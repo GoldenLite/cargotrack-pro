@@ -1,0 +1,796 @@
+{% extends "cargo/base.html" %}
+{% block title %}Товары — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<style>
+  /* ── Таблица ── */
+  .th-hdr { background: #f0f4f8; color: #374151 !important; font-size: 11px;
+            text-transform: uppercase; letter-spacing: .4px; }
+  .th-hdr a { color: #374151 !important; text-decoration: none;
+              display: flex; align-items: center; gap: 3px; }
+  .th-hdr a:hover { color: #2563eb !important; }
+  .th-hdr a i { font-size: 9px; opacity: .7; }
+  #goodsTable { table-layout: fixed; width: 100%; }
+  #goodsTable tbody tr { height: 36px; }
+  #goodsTable th, #goodsTable td {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+  }
+
+  /* ── Excel-фильтры под заголовками ── */
+  .col-filter { width: 100%; font-size: 11px; padding: 1px 3px; border: 1px solid #cbd5e1;
+                border-radius: 3px; background: #fff; color: #374151; }
+  .col-filter:focus { outline: none; border-color: #2563eb; }
+
+  /* ── Массовые действия ── */
+  #bulkBar { transition: opacity .2s; }
+
+  /* ── Статус согласования ── */
+  .badge-approval { font-size: 11px; padding: 3px 8px; border-radius: 4px; white-space: nowrap; }
+
+  /* ── Resizer ── */
+  th { position: relative; }
+  .col-resizer { position: absolute; right: 0; top: 0; bottom: 0; width: 6px;
+                 cursor: col-resize; z-index: 10; border-right: 2px solid transparent; }
+  .col-resizer:hover { border-right-color: #2563eb; }
+
+  /* ── Drag-and-drop columns ── */
+  th[draggable="true"] { cursor: grab; }
+  th[draggable="true"]:active { cursor: grabbing; }
+  th.col-dragging { opacity: 0.4; outline: 2px dashed #2563eb; }
+  th.col-drag-over { border-left: 3px solid #2563eb !important; background: #dbeafe !important; }
+
+  /* ── Inline Excel-like редактирование ── */
+  #goodsTable td.editable-cell {
+    cursor: text;
+    border-radius: 3px;
+    transition: background .1s;
+  }
+  #goodsTable td.editable-cell:hover {
+    background: #eff6ff;
+    outline: 1px solid #bfdbfe;
+  }
+  #goodsTable td.editable-cell.editing {
+    background: #fff !important;
+    outline: 2px solid #2563eb !important;
+    padding: 0 !important;
+  }
+  #goodsTable td.editable-cell input,
+  #goodsTable td.editable-cell select {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: inherit;
+    font-family: inherit;
+    padding: 4px 6px;
+    box-sizing: border-box;
+  }
+  #goodsTable td.editable-cell.cell-saving { background: #fefce8 !important; }
+  #goodsTable td.editable-cell.cell-saved  { background: #f0fdf4 !important; transition: background 1.2s; }
+  #goodsTable td.editable-cell.cell-error  { background: #fef2f2 !important; outline-color: #ef4444 !important; }
+
+  /* Тост-уведомление */
+  #editToast { position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+               min-width: 180px; font-size: 13px; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Тост-уведомление о сохранении -->
+<div id="editToast" class="toast align-items-center border-0 hide" role="alert" aria-live="assertive">
+  <div class="d-flex">
+    <div class="toast-body" id="editToastMsg">Сохранено</div>
+    <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+  </div>
+</div>
+
+<!-- Заголовок -->
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <h5 class="mb-0 fw-bold">
+    <i class="bi bi-grid-3x3-gap me-2 text-primary"></i>Товары
+    <span class="badge bg-secondary ms-1 fs-6">{{ total }}</span>
+  </h5>
+  <a href="{% url 'goods_export_excel' %}?{{ request.GET.urlencode }}"
+     class="btn btn-sm btn-success">
+    <i class="bi bi-file-earmark-excel me-1"></i>Excel
+  </a>
+</div>
+
+<!-- Панель фильтров -->
+<div class="filter-bar mb-2">
+  <form method="get" id="filterForm" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm"
+             placeholder="Наименование, бренд, арт., ТН ВЭД, HAWB…">
+    </div>
+    <div class="col-md-2">
+      <input type="text" name="hawb" value="{{ filter_hawb }}" class="form-control form-control-sm"
+             placeholder="Фильтр по HAWB">
+    </div>
+    <div class="col-md-2">
+      <input type="text" name="tnved" value="{{ filter_tnved }}" class="form-control form-control-sm"
+             placeholder="Код ТН ВЭД">
+    </div>
+    <div class="col-md-2">
+      <select name="approval" class="form-select form-select-sm">
+        <option value="">Все статусы</option>
+        {% for code, label in approval_choices %}
+        <option value="{{ code }}" {% if filter_approve == code %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto d-flex gap-1">
+      <button type="submit" class="btn btn-sm btn-primary">
+        <i class="bi bi-search me-1"></i>Найти
+      </button>
+      {% if q or filter_hawb or filter_tnved or filter_approve %}
+      <a href="{% url 'goods_list' %}" class="btn btn-sm btn-outline-secondary">Сброс</a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+<!-- Панель массовых действий (скрыта, пока нет выбора) -->
+<div id="bulkBar" class="d-none mb-2">
+  <form method="post" action="{% url 'goods_approve' %}" id="bulkForm">
+    {% csrf_token %}
+    <input type="hidden" name="return_params" id="returnParams">
+    <!-- Сюда динамически вставляются скрытые поля good_ids -->
+    <div id="bulkHiddenIds"></div>
+
+    <div class="d-flex align-items-center gap-2 flex-wrap bg-white rounded-3 p-2 shadow-sm">
+      <span class="fw-semibold small text-primary">
+        <i class="bi bi-check2-square me-1"></i>
+        Выбрано: <span id="selectedCount">0</span> поз.
+      </span>
+      <button type="submit" name="action" value="approve"
+              class="btn btn-sm btn-success">
+        <i class="bi bi-check-circle me-1"></i>Согласовать
+      </button>
+      <button type="button" class="btn btn-sm btn-warning text-dark"
+              data-bs-toggle="modal" data-bs-target="#clarifyModal">
+        <i class="bi bi-question-circle me-1"></i>Требует уточнения
+      </button>
+      <button type="submit" name="action" value="reject"
+              class="btn btn-sm btn-danger">
+        <i class="bi bi-x-circle me-1"></i>Отклонить
+      </button>
+      <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="clearSelection">
+        <i class="bi bi-x me-1"></i>Снять выбор
+      </button>
+    </div>
+  </form>
+</div>
+
+<!-- Модальное окно — уточнение -->
+<div class="modal fade" id="clarifyModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold">
+          <i class="bi bi-question-circle text-warning me-2"></i>Запрос уточнения
+        </h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-2">
+          Укажите, что именно требуется уточнить по выбранным позициям.
+          Комментарий будет сохранён к каждой позиции.
+        </p>
+        <textarea id="clarifyText" class="form-control" rows="4"
+                  placeholder="Например: уточните код ТН ВЭД, предоставьте сертификат соответствия…"></textarea>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button type="button" class="btn btn-sm btn-warning text-dark" id="submitClarify">
+          <i class="bi bi-send me-1"></i>Отправить запрос
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Таблица -->
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle" id="goodsTable" style="font-size:12px">
+        <thead style="border-bottom: 2px solid #cbd5e1;">
+
+          {% with s=sort d=direction q=q fh=filter_hawb ft=filter_tnved fa=filter_approve %}
+
+          <!-- Строка заголовков с сортировкой -->
+          <tr>
+            <!-- Чекбокс «выбрать все» -->
+            <th class="th-hdr text-center" style="width:36px">
+              <input type="checkbox" id="checkAll" class="form-check-input" title="Выбрать все">
+            </th>
+
+            {% for fld, lbl in goods_cols %}
+            <th class="th-hdr" data-col-id="{{ fld }}">
+              <a href="?q={{ q }}&hawb={{ fh }}&tnved={{ ft }}&approval={{ fa }}&sort={{ fld }}&dir={% if s == fld and d == 'asc' %}desc{% else %}asc{% endif %}">
+                {{ lbl }}
+                {% if s == fld %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand" style="font-size:9px;opacity:.6"></i>{% endif %}
+              </a>
+            </th>
+            {% endfor %}
+          </tr>
+
+          <!-- Строка фильтров под заголовками (Excel-style) -->
+          <tr id="colFilterRow">
+            <td></td><!-- чекбокс -->
+            <td><input class="col-filter" data-col-idx="1"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="2"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="3"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="4"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="5"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="6"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="7"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="8"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="9"  placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="10" placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="11" placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="12" placeholder="🔍"></td>
+            <td><input class="col-filter" data-col-idx="13" placeholder="🔍"></td>
+            <td><!-- Тип груза -->
+              <select class="col-filter" data-col-idx="14">
+                <option value="">Все</option>
+                <option value="B2C">B2C</option>
+                <option value="B2B">B2B</option>
+                <option value="C2C">C2C</option>
+                <option value="DOC">DOC</option>
+              </select>
+            </td>
+            <td><input class="col-filter" data-col-idx="15" placeholder="🔍"></td><!-- HAWB -->
+            <td><!-- Согласование -->
+              <select class="col-filter" data-col-idx="16">
+                <option value="">Все</option>
+                {% for code, label in approval_choices %}
+                <option value="{{ label }}">{{ label }}</option>
+                {% endfor %}
+              </select>
+            </td>
+          </tr>
+
+          {% endwith %}
+        </thead>
+
+        <tbody>
+          {% for good in goods %}
+          <tr data-good-id="{{ good.pk }}"
+              data-hawb-url="{% url 'hawb_detail' good.hawb.pk %}"
+              onclick="rowClick(event, '{% url 'hawb_detail' good.hawb.pk %}')"
+              style="cursor:pointer">
+
+            <!-- Чекбокс -->
+            <td class="text-center" onclick="event.stopPropagation()">
+              <input type="checkbox" class="form-check-input row-check" value="{{ good.pk }}">
+            </td>
+
+            <!-- Наименование -->
+            <td class="editable-cell fw-semibold" data-field="name" data-type="text">{{ good.name }}</td>
+
+            <!-- ТН ВЭД -->
+            <td class="editable-cell font-monospace" data-field="tnved_code" data-type="text">{{ good.tnved_code|default:"" }}</td>
+
+            <!-- Бренд -->
+            <td class="editable-cell" data-field="brand" data-type="text">{{ good.brand|default:"" }}</td>
+
+            <!-- Изготовитель -->
+            <td class="editable-cell" data-field="manufacturer" data-type="text">{{ good.manufacturer|default:"" }}</td>
+
+            <!-- Модель -->
+            <td class="editable-cell" data-field="model" data-type="text">{{ good.model|default:"" }}</td>
+
+            <!-- Артикул -->
+            <td class="editable-cell font-monospace" data-field="article" data-type="text">{{ good.article|default:"" }}</td>
+
+            <!-- Количество -->
+            <td class="editable-cell text-end" data-field="quantity" data-type="number">{{ good.quantity|floatformat:"-3" }}</td>
+
+            <!-- Единица -->
+            <td class="editable-cell" data-field="unit" data-type="text">{{ good.unit|default:"шт" }}</td>
+
+            <!-- Нетто -->
+            <td class="editable-cell text-end" data-field="weight_net" data-type="number">{{ good.weight_net|floatformat:3|default:"" }}</td>
+
+            <!-- Брутто -->
+            <td class="editable-cell text-end" data-field="weight_gross" data-type="number">{{ good.weight_gross|floatformat:3|default:"" }}</td>
+
+            <!-- Цена -->
+            <td class="editable-cell text-end" data-field="unit_price" data-type="number">{{ good.unit_price|floatformat:2|default:"" }}</td>
+
+            <!-- Стоимость -->
+            <td class="editable-cell text-end fw-semibold" data-field="total_value" data-type="number">{{ good.total_value|floatformat:2|default:"" }}</td>
+
+            <!-- Валюта -->
+            <td class="editable-cell" data-field="currency" data-type="select"
+                data-options="USD,EUR,CNY,GBP,RUB" data-value="{{ good.currency }}">{{ good.currency }}</td>
+
+            <!-- Тип груза -->
+            <td class="editable-cell" data-field="cargo_type" data-type="select"
+                data-options="B2C,B2B,C2C,DOC" data-value="{{ good.effective_cargo_type }}">
+              {% with ct=good.effective_cargo_type %}
+              <span class="badge {% if ct == 'B2B' %}bg-primary{% elif ct == 'B2C' %}bg-info text-dark{% elif ct == 'DOC' %}bg-warning text-dark{% elif ct == 'C2C' %}bg-secondary{% endif %}" style="font-size:10px">{{ ct }}</span>
+              {% endwith %}
+            </td>
+
+            <!-- HAWB -->
+            <td onclick="event.stopPropagation()"
+                title="{{ good.hawb.hawb_number }}{% if good.hawb.mawb %} / {{ good.hawb.mawb.awb_number }}{% endif %}">
+              <a href="{% url 'hawb_detail' good.hawb.pk %}"
+                 class="font-monospace fw-bold text-decoration-none"
+                 style="color:#1e3a5f; font-size:11px">{{ good.hawb.hawb_number }}</a>{% if good.hawb.mawb %}<span class="text-muted ms-1" style="font-size:10px">/ {{ good.hawb.mawb.awb_number }}</span>{% endif %}
+            </td>
+
+            <!-- Статус согласования -->
+            <td onclick="event.stopPropagation()"
+                title="{% if good.approval_comment %}{{ good.approval_comment }}{% endif %}">
+              <span class="badge badge-approval bg-{{ good.approval_color }} {% if good.approval_color == 'warning' %}text-dark{% endif %}">{{ good.approval_label }}</span>
+            </td>
+
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="16" class="text-center text-muted py-5">
+              <i class="bi bi-inbox d-block" style="font-size:2.5rem"></i>
+              <div class="mt-2">Товарные позиции не найдены</div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Переход по строке ──
+function rowClick(e, url) {
+  if (e.target.closest('a, button, input, select, .editable-cell')) return;
+  window.location = url;
+}
+
+// ── Клиентская фильтрация по столбцам (Excel-style) ──
+// Использует cellIndex вместо data-col-idx, чтобы работать после перестановки столбцов
+(function() {
+  const filterInputs = document.querySelectorAll('.col-filter');
+  const tbody = document.querySelector('#goodsTable tbody');
+
+  function applyFilters() {
+    const filters = Array.from(filterInputs).map(inp => {
+      const td = inp.closest('td');
+      return {
+        colIdx: td ? td.cellIndex : -1,
+        value: inp.value.trim().toLowerCase()
+      };
+    }).filter(f => f.value && f.colIdx >= 0);
+
+    Array.from(tbody.querySelectorAll('tr[data-good-id]')).forEach(row => {
+      const cells = Array.from(row.querySelectorAll('td'));
+      const visible = filters.every(f => {
+        const cell = cells[f.colIdx];
+        return cell && cell.textContent.toLowerCase().includes(f.value);
+      });
+      row.style.display = visible ? '' : 'none';
+    });
+  }
+
+  filterInputs.forEach(inp => inp.addEventListener('input', applyFilters));
+})();
+
+// ── Управление выбором строк / bulk-bar ──
+(function() {
+  const checkAll   = document.getElementById('checkAll');
+  const bulkBar    = document.getElementById('bulkBar');
+  const selCount   = document.getElementById('selectedCount');
+  const hiddenIds  = document.getElementById('bulkHiddenIds');
+  const retParams  = document.getElementById('returnParams');
+  const clearBtn   = document.getElementById('clearSelection');
+  const bulkForm   = document.getElementById('bulkForm');
+
+  function getChecked() {
+    return Array.from(document.querySelectorAll('.row-check:checked'));
+  }
+
+  function updateBar() {
+    const checked = getChecked();
+    selCount.textContent = checked.length;
+    if (checked.length > 0) {
+      bulkBar.classList.remove('d-none');
+      // заполнить скрытые поля
+      hiddenIds.innerHTML = checked
+        .map(cb => `<input type="hidden" name="good_ids" value="${cb.value}">`)
+        .join('');
+      // текущие GET-параметры для возврата
+      retParams.value = window.location.search.replace(/^\?/, '');
+    } else {
+      bulkBar.classList.add('d-none');
+      hiddenIds.innerHTML = '';
+    }
+  }
+
+  document.querySelectorAll('.row-check').forEach(cb => {
+    cb.addEventListener('change', updateBar);
+  });
+
+  checkAll.addEventListener('change', function() {
+    document.querySelectorAll('.row-check').forEach(cb => {
+      // только видимые строки
+      const row = cb.closest('tr');
+      if (!row || row.style.display === 'none') return;
+      cb.checked = checkAll.checked;
+    });
+    updateBar();
+  });
+
+  clearBtn.addEventListener('click', function() {
+    document.querySelectorAll('.row-check').forEach(cb => cb.checked = false);
+    checkAll.checked = false;
+    updateBar();
+  });
+
+  // ── Согласование через «Требует уточнения» ──
+  document.getElementById('submitClarify').addEventListener('click', function() {
+    const text = document.getElementById('clarifyText').value.trim();
+    // добавить скрытое поле comment
+    let commentField = bulkForm.querySelector('input[name="comment"]');
+    if (!commentField) {
+      commentField = document.createElement('input');
+      commentField.type  = 'hidden';
+      commentField.name  = 'comment';
+      bulkForm.appendChild(commentField);
+    }
+    commentField.value = text;
+
+    // добавить hidden action
+    let actionField = bulkForm.querySelector('input[name="action"]');
+    if (!actionField) {
+      actionField = document.createElement('input');
+      actionField.type  = 'hidden';
+      actionField.name  = 'action';
+      bulkForm.appendChild(actionField);
+    }
+    actionField.value = 'clarification';
+
+    bootstrap.Modal.getInstance(document.getElementById('clarifyModal')).hide();
+    bulkForm.submit();
+  });
+
+  // При нажатии кнопок approve / reject убираем возможный action от clarify
+  bulkForm.querySelectorAll('button[name="action"]').forEach(btn => {
+    btn.addEventListener('click', function() {
+      const existing = bulkForm.querySelector('input[name="action"]');
+      if (existing) existing.remove();
+      const existing2 = bulkForm.querySelector('input[name="comment"]');
+      if (existing2) existing2.remove();
+    });
+  });
+})();
+
+// ── Resize столбцов ──
+(function() {
+  const table = document.getElementById('goodsTable');
+  if (!table) return;
+  const WKEY = 'goodsTableWidths_v2';
+  // Сбрасываем устаревший ключ v1
+  localStorage.removeItem('goodsTableWidths');
+
+  const MIN_COL_WIDTH = 40; // минимальная ширина колонки в px
+
+  function saveWidths() {
+    const ths = table.querySelectorAll('thead tr:first-child th');
+    localStorage.setItem(WKEY, JSON.stringify(
+      Array.from(ths).map(th => th.offsetWidth + 'px')
+    ));
+  }
+
+  function restoreWidths() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(WKEY));
+      if (!saved) return;
+      table.querySelectorAll('thead tr:first-child th').forEach((th, i) => {
+        if (saved[i]) {
+          const w = Math.max(MIN_COL_WIDTH, parseInt(saved[i])) + 'px';
+          th.style.width = w; th.style.minWidth = w;
+        }
+      });
+    } catch(e) {}
+  }
+
+  function addResizers() {
+    table.querySelectorAll('thead tr:first-child th').forEach(th => {
+      if (th.querySelector('.col-resizer')) return;
+      const r = document.createElement('div');
+      r.className = 'col-resizer';
+      let startX, startW;
+      r.addEventListener('mousedown', e => {
+        e.preventDefault(); e.stopPropagation();
+        th.setAttribute('draggable', 'false'); // не мешать drag во время resize
+        startX = e.pageX; startW = th.offsetWidth;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        const onMove = e => {
+          const w = Math.max(MIN_COL_WIDTH, startW + e.pageX - startX);
+          th.style.width = w + 'px'; th.style.minWidth = w + 'px';
+        };
+        const onUp = () => {
+          th.setAttribute('draggable', 'true'); // восстанавливаем drag
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+          saveWidths();
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+      th.appendChild(r);
+    });
+  }
+
+  restoreWidths();
+  addResizers();
+})();
+
+// ── Inline Excel-like редактирование ──────────────────────────────────────
+(function() {
+  const toastEl  = document.getElementById('editToast');
+  const toastMsg = document.getElementById('editToastMsg');
+
+  const CARGO_COLORS = { B2B: 'primary', B2C: 'info text-dark', C2C: 'secondary', DOC: 'warning text-dark' };
+  function cargoTypeBadge(val) {
+    if (!val) return '';
+    const cls = CARGO_COLORS[val] || 'secondary';
+    return `<span class="badge bg-${cls}" style="font-size:10px">${val}</span>`;
+  }
+  function setCellContent(cell, value) {
+    if (cell.dataset.field === 'cargo_type') {
+      cell.innerHTML = cargoTypeBadge(value);
+    } else {
+      cell.textContent = value || '';
+    }
+  }
+  let toastInst  = toastEl ? new bootstrap.Toast(toastEl, { delay: 2000 }) : null;
+
+  function showToast(msg, type) {
+    if (!toastInst) return;
+    toastEl.className = 'toast align-items-center border-0 text-bg-' + type;
+    toastMsg.textContent = msg;
+    toastInst.show();
+  }
+
+  function getCsrf() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value
+        || document.cookie.split(';').map(c => c.trim())
+             .find(c => c.startsWith('csrftoken='))?.split('=')[1] || '';
+  }
+
+  function saveCell(cell, hawbUrl, goodId, field, value) {
+    cell.classList.add('cell-saving');
+
+    fetch(hawbUrl, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: new URLSearchParams({
+        csrfmiddlewaretoken: getCsrf(),
+        action: 'update_good',
+        good_id: goodId,
+        field: field,
+        value: value,
+      }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      cell.classList.remove('cell-saving');
+      if (data.ok) {
+        cell.classList.add('cell-saved');
+        setTimeout(() => cell.classList.remove('cell-saved'), 1400);
+        showToast('Сохранено', 'success');
+      } else {
+        cell.classList.add('cell-error');
+        setTimeout(() => cell.classList.remove('cell-error'), 2000);
+        showToast('Ошибка: ' + (data.error || 'неизвестная'), 'danger');
+      }
+    })
+    .catch(() => {
+      cell.classList.remove('cell-saving');
+      showToast('Ошибка сети', 'danger');
+    });
+  }
+
+  let _activeCancel = null;
+
+  function startEdit(cell, e) {
+    if (e) e.stopPropagation();
+    // Явно отменяем предыдущую активную ячейку (blur не всегда срабатывает на <td>)
+    if (_activeCancel && !cell.classList.contains('editing')) {
+      const prev = _activeCancel;
+      _activeCancel = null;
+      prev();
+    }
+    if (cell.classList.contains('editing')) return;
+
+    const row    = cell.closest('tr');
+    const goodId = row.dataset.goodId;
+    const hawbUrl = row.dataset.hawbUrl;
+    const field  = cell.dataset.field;
+    const dtype  = cell.dataset.type;
+    const origText = cell.textContent.trim();
+
+    cell.classList.add('editing');
+    cell.setAttribute('data-orig', origText);
+
+    let input;
+    if (dtype === 'select') {
+      input = document.createElement('select');
+      const opts = (cell.dataset.options || '').split(',');
+      const cur  = cell.dataset.value || origText;
+      opts.forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.trim();
+        opt.textContent = o.trim();
+        if (o.trim() === cur) opt.selected = true;
+        input.appendChild(opt);
+      });
+    } else {
+      input = document.createElement('input');
+      input.type  = dtype === 'number' ? 'number' : 'text';
+      input.value = origText === '—' ? '' : origText;
+      if (dtype === 'number') input.step = 'any';
+    }
+
+    cell.textContent = '';
+    cell.appendChild(input);
+    input.focus();
+    if (dtype === 'text') {
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }
+
+    function cancel() {
+      if (!cell.classList.contains('editing')) return;
+      input.removeEventListener('blur', cancel);
+      if (_activeCancel === cancel) _activeCancel = null;
+      cell.classList.remove('editing');
+      setCellContent(cell, cell.getAttribute('data-orig'));
+    }
+
+    function commit() {
+      if (!cell.classList.contains('editing')) return;
+      input.removeEventListener('blur', cancel);
+      if (_activeCancel === cancel) _activeCancel = null;
+      const newVal  = input.value.trim();
+      const origVal = cell.getAttribute('data-orig');
+      cell.classList.remove('editing');
+      if (dtype === 'select') cell.setAttribute('data-value', newVal);
+      setCellContent(cell, newVal);
+      const compare = origVal === '—' ? '' : origVal;
+      if (newVal !== compare) {
+        saveCell(cell, hawbUrl, goodId, field, newVal);
+      }
+    }
+
+    _activeCancel = cancel;
+    input.addEventListener('blur', cancel);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      }
+      if (e.key === 'Escape') {
+        cancel();
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        commit();
+        const editCells = Array.from(row.querySelectorAll('.editable-cell'));
+        const idx  = editCells.indexOf(cell);
+        const next = editCells[e.shiftKey ? idx - 1 : idx + 1];
+        if (next) setTimeout(() => startEdit(next), 0);
+      }
+    });
+  }
+
+  document.querySelectorAll('#goodsTable .editable-cell').forEach(cell => {
+    cell.addEventListener('click', e => startEdit(cell, e));
+  });
+})();
+
+// ── Drag-and-drop перестановка столбцов (с сохранением в localStorage) ──
+(function() {
+  const table = document.getElementById('goodsTable');
+  if (!table) return;
+  const COL_ORDER_KEY = 'goodsColOrder_v1';
+
+  function getHeaderCells() {
+    return Array.from(table.querySelectorAll('thead tr:first-child th'));
+  }
+  function getAllRows() {
+    return Array.from(table.querySelectorAll('tr'));
+  }
+
+  // Перемещает столбец srcIdx на место столбца dstIdx во всех строках таблицы
+  function moveColumn(srcIdx, dstIdx) {
+    if (srcIdx === dstIdx) return;
+    getAllRows().forEach(row => {
+      const cells = Array.from(row.children);
+      const src = cells[srcIdx];
+      const dst = cells[dstIdx];
+      if (src && dst) row.insertBefore(src, dst);
+    });
+  }
+
+  function saveColOrder() {
+    const order = getHeaderCells().map(th => th.dataset.colId || '');
+    localStorage.setItem(COL_ORDER_KEY, JSON.stringify(order));
+  }
+
+  function restoreColOrder() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COL_ORDER_KEY));
+      if (!saved || !Array.isArray(saved)) return;
+      for (let ti = 0; ti < saved.length; ti++) {
+        const colId = saved[ti];
+        if (!colId) continue; // пропускаем чекбокс-колонку
+        const ths = getHeaderCells();
+        const ci = ths.findIndex(th => th.dataset.colId === colId);
+        if (ci === -1 || ci === ti) continue;
+        moveColumn(ci, ti);
+      }
+    } catch(e) {}
+  }
+
+  // Сначала восстанавливаем сохранённый порядок, потом вешаем события
+  restoreColOrder();
+
+  let dragSrc = null;
+
+  getHeaderCells().forEach(th => {
+    if (!th.dataset.colId) return; // пропускаем колонку с чекбоксом
+    th.setAttribute('draggable', 'true');
+    // Запрещаем браузеру тащить ссылку сортировки вместо колонки
+    th.querySelectorAll('a').forEach(a => a.setAttribute('draggable', 'false'));
+
+    th.addEventListener('dragstart', e => {
+      dragSrc = th;
+      e.dataTransfer.effectAllowed = 'move';
+      setTimeout(() => th.classList.add('col-dragging'), 0);
+    });
+    th.addEventListener('dragend', () => {
+      th.classList.remove('col-dragging');
+      getHeaderCells().forEach(t => t.classList.remove('col-drag-over'));
+      dragSrc = null;
+    });
+    th.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      getHeaderCells().forEach(t => t.classList.remove('col-drag-over'));
+      if (th !== dragSrc) th.classList.add('col-drag-over');
+    });
+    th.addEventListener('dragleave', () => {
+      th.classList.remove('col-drag-over');
+    });
+    th.addEventListener('drop', e => {
+      e.preventDefault();
+      th.classList.remove('col-drag-over');
+      if (!dragSrc || dragSrc === th) return;
+      const ths = getHeaderCells();
+      const si = ths.indexOf(dragSrc);
+      const di = ths.indexOf(th);
+      if (si >= 0 && di >= 0) {
+        moveColumn(si, di);
+        saveColOrder();
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

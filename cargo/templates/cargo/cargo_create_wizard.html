@@ -1,0 +1,379 @@
+{% extends "cargo/base.html" %}
+{% load cargo_filters %}
+{% block title %}Новая партия — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<style>
+  .th-hdr { background:#f0f4f8; color:#374151 !important; font-size:11px;
+            text-transform:uppercase; letter-spacing:.4px; }
+  .hawb-row.selected { background:#eff6ff !important; }
+  .step-indicator .step { display:flex; align-items:center; gap:8px; }
+  .step-num { width:28px; height:28px; border-radius:50%; display:flex;
+              align-items:center; justify-content:center; font-weight:700; font-size:13px; }
+  .step-active .step-num { background:#2563eb; color:#fff; }
+  .step-done .step-num { background:#10b981; color:#fff; }
+  .step-pending .step-num { background:#e2e8f0; color:#94a3b8; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Шаги -->
+<div class="d-flex align-items-center gap-4 mb-4">
+  <a href="{% url 'cargo_list' %}" class="text-muted text-decoration-none">
+    <i class="bi bi-arrow-left me-1"></i>Все партии
+  </a>
+  <h5 class="mb-0 fw-bold"><i class="bi bi-plus-circle me-2 text-primary"></i>Новая партия (MAWB)</h5>
+  <div class="d-flex align-items-center gap-3 ms-2 step-indicator">
+    <div class="step {% if step == '1' %}step-active{% else %}step-done{% endif %}">
+      <div class="step-num">{% if step == '2' %}<i class="bi bi-check"></i>{% else %}1{% endif %}</div>
+      <span class="small fw-semibold {% if step == '1' %}text-primary{% else %}text-success{% endif %}">Выбор накладных</span>
+    </div>
+    <i class="bi bi-chevron-right text-muted"></i>
+    <div class="step {% if step == '2' %}step-active{% else %}step-pending{% endif %}">
+      <div class="step-num">2</div>
+      <span class="small fw-semibold {% if step == '2' %}text-primary{% else %}text-muted{% endif %}">Данные партии</span>
+    </div>
+  </div>
+</div>
+
+{% if step == '1' %}
+<!-- ══════════════ ШАГ 1: ВЫБОР HAWB ══════════════ -->
+
+<form method="get" action="{% url 'cargo_create_from_hawbs' %}" class="mb-3">
+  <input type="hidden" name="step" value="1">
+  <div class="filter-bar">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm"
+               placeholder="HAWB, получатель, ИНН...">
+      </div>
+      <div class="col-md-2">
+        <select name="cargo_type" class="form-select form-select-sm">
+          <option value="">Тип груза</option>
+          <option value="B2B" {% if filter_type == 'B2B' %}selected{% endif %}>B2B</option>
+          <option value="B2C" {% if filter_type == 'B2C' %}selected{% endif %}>B2C</option>
+          <option value="C2C" {% if filter_type == 'C2C' %}selected{% endif %}>C2C</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <select name="shipment_type" class="form-select form-select-sm">
+          <option value="">Тип отправки</option>
+          <option value="IMPORT" {% if filter_ship == 'IMPORT' %}selected{% endif %}>Импорт</option>
+          <option value="EXPORT" {% if filter_ship == 'EXPORT' %}selected{% endif %}>Экспорт</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm btn-outline-primary">
+          <i class="bi bi-search me-1"></i>Найти
+        </button>
+      </div>
+    </div>
+  </div>
+</form>
+
+<form method="post" action="{% url 'cargo_create_from_hawbs' %}?step=1&q={{ q }}&status={{ filter_status }}&cargo_type={{ filter_type }}&shipment_type={{ filter_ship }}" id="step1Form">
+  {% csrf_token %}
+  <input type="hidden" name="step" value="1">
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header bg-white py-2 d-flex align-items-center justify-content-between">
+      <div>
+        <span class="fw-semibold">Накладные без партии</span>
+        <span class="badge bg-secondary ms-2">{{ total }}</span>
+        <small class="text-muted ms-2">— только HAWB без партии, статус «Принят на склад», все товары согласованы</small>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span id="selectedCount" class="badge bg-primary">0 выбрано</span>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0 align-middle" style="font-size:12px">
+          <thead>
+            <tr>
+              <th class="th-hdr px-3 text-center" style="width:40px">
+                <input type="checkbox" id="selectAll" class="form-check-input"
+                       style="width:16px;height:16px;cursor:pointer"
+                       title="Выбрать все">
+              </th>
+              <th class="th-hdr">№ HAWB</th>
+              <th class="th-hdr">Тип груза</th>
+              <th class="th-hdr">Тип отправки</th>
+              <th class="th-hdr">Получатель / ИНН</th>
+              <th class="th-hdr text-end">Вес, кг</th>
+              <th class="th-hdr text-center">Места</th>
+              <th class="th-hdr text-end">Стоимость</th>
+              <th class="th-hdr">Лог. статус</th>
+              <th class="th-hdr text-center">Документы</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for hawb in hawbs %}
+            <tr class="hawb-row" id="row-{{ hawb.pk }}">
+              <td class="px-3 text-center">
+                <input type="checkbox" name="hawb_ids" value="{{ hawb.pk }}"
+                       class="form-check-input hawb-check" style="width:16px;height:16px">
+              </td>
+              <td class="font-monospace fw-bold" style="color:#1e3a5f">{{ hawb.hawb_number }}</td>
+              <td>
+                <span class="badge {% if hawb.cargo_type == 'B2B' %}bg-primary{% elif hawb.cargo_type == 'B2C' %}bg-info text-dark{% else %}bg-secondary{% endif %}"
+                      style="font-size:10px">{{ hawb.cargo_type }}</span>
+              </td>
+              <td>
+                <span class="badge {% if hawb.shipment_type == 'IMPORT' %}bg-success{% else %}bg-warning text-dark{% endif %}"
+                      style="font-size:10px">{{ hawb.get_shipment_type_display }}</span>
+              </td>
+              <td class="small">
+                <div class="fw-semibold">{{ hawb.consignee_name|default:"—"|truncatechars:20 }}</div>
+                {% if hawb.consignee_inn %}
+                <div class="text-muted" style="font-size:10px">ИНН: {{ hawb.consignee_inn }}</div>
+                {% endif %}
+              </td>
+              <td class="text-end pe-2">{{ hawb.weight|floatformat:2|default:"—" }}</td>
+              <td class="text-center">{{ hawb.pieces_declared }}</td>
+              <td class="text-end pe-2">
+                {% if hawb.invoice_value %}{{ hawb.invoice_value|floatformat:2 }} {{ hawb.invoice_currency }}{% else %}—{% endif %}
+              </td>
+              <td>
+                <span class="badge bg-{{ hawb.status_color }} {% if hawb.status_color == 'warning' %}text-dark{% endif %}"
+                      style="font-size:10px">{{ hawb.get_logistics_status_display|default:"—" }}</span>
+              </td>
+              <td class="text-center">
+                <span class="badge {% if hawb.docs_ready %}bg-success{% else %}bg-warning text-dark{% endif %}"
+                      style="font-size:10px">{{ hawb.docs_count }}/{{ hawb.docs_required }}</span>
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="10" class="text-center text-muted py-4">
+                <i class="bi bi-inbox d-block fs-3 mb-2"></i>
+                Нет накладных без партии. Все HAWB уже привязаны к партиям.
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Итоговая панель выбора -->
+  <div class="d-flex justify-content-between align-items-center p-3 bg-white border rounded shadow-sm">
+    <div id="selectionSummary" class="small text-muted">Выберите накладные для объединения в партию</div>
+    <button type="submit" class="btn btn-primary px-4" id="nextBtn" disabled>
+      Далее: данные партии <i class="bi bi-arrow-right ms-2"></i>
+    </button>
+  </div>
+</form>
+
+{% elif step == '2' %}
+<!-- ══════════════ ШАГ 2: ДАННЫЕ ПАРТИИ ══════════════ -->
+
+<div class="row g-4">
+  <div class="col-lg-5">
+
+    <!-- Выбранные HAWB -->
+    <div class="card mb-3">
+      <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small">
+          <i class="bi bi-check2-all me-2 text-success"></i>
+          Выбрано накладных: <strong>{{ selected_hawbs|length }}</strong>
+        </span>
+        <a href="{% url 'cargo_create_from_hawbs' %}?step=1" class="btn btn-sm btn-outline-secondary py-0">
+          <i class="bi bi-arrow-left me-1"></i>Изменить
+        </a>
+      </div>
+      <div class="card-body p-0">
+        <div style="max-height:300px;overflow-y:auto">
+          <table class="table table-sm mb-0" style="font-size:11px">
+            <thead>
+              <tr>
+                <th class="th-hdr px-2">HAWB</th>
+                <th class="th-hdr">Получатель</th>
+                <th class="th-hdr text-end">Вес</th>
+                <th class="th-hdr text-center">Места</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for hawb in selected_hawbs %}
+              <tr>
+                <td class="font-monospace fw-bold px-2" style="font-size:11px">{{ hawb.hawb_number }}</td>
+                <td class="small">{{ hawb.consignee_name|default:"—"|truncatechars:18 }}</td>
+                <td class="text-end">{{ hawb.weight|floatformat:1|default:"—" }}</td>
+                <td class="text-center">{{ hawb.pieces_declared }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot style="background:#f8fafc">
+              <tr class="fw-bold">
+                <td colspan="2" class="px-2 small text-muted">Итого</td>
+                <td class="text-end">{{ total_weight|floatformat:1 }} кг</td>
+                <td class="text-center">{{ total_pieces }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="col-lg-7">
+    <form method="post" action="{% url 'cargo_create_from_hawbs' %}?step=2&ids={{ ids_param }}">
+      {% csrf_token %}
+      <input type="hidden" name="step" value="2">
+
+      <div class="card mb-3">
+        <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+          <i class="bi bi-card-text me-2"></i>Основные данные партии
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Номер AWB *</label>
+              <input type="text" name="awb_number" class="form-control font-monospace"
+                     placeholder="000-00000000" required>
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Описание (RU)</label>
+              <input type="text" name="description_ru" class="form-control"
+                     placeholder="Краткое описание груза">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+          <i class="bi bi-airplane me-2"></i>Рейс
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label small text-muted mb-1">Номер рейса</label>
+              <input type="text" name="flight_number" class="form-control font-monospace"
+                     placeholder="EK211">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small text-muted mb-1">Дата рейса</label>
+              <input type="date" name="flight_date" class="form-control">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small text-muted mb-1">Откуда</label>
+              <input type="text" name="departure_iata" class="form-control font-monospace text-uppercase"
+                     placeholder="DXB" maxlength="3">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small text-muted mb-1">Куда</label>
+              <input type="text" name="arrival_iata" class="form-control font-monospace text-uppercase"
+                     placeholder="SVO" maxlength="3">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+          <i class="bi bi-boxes me-2"></i>Параметры груза
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Общий вес (кг)</label>
+              <input type="number" name="weight" value="{{ total_weight|floatformat:'2u' }}"
+                     class="form-control" step="0.01">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" value="{{ total_pieces }}"
+                     class="form-control">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Валюта</label>
+              <select name="invoice_currency" class="form-select">
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
+                <option value="CNY">CNY</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small text-muted mb-1">Стоимость инвойса</label>
+              <input type="number" name="invoice_value" class="form-control" step="0.01">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+          <i class="bi bi-building me-2"></i>Склад СВХ
+        </div>
+        <div class="card-body">
+          <div class="text-muted small">
+            <i class="bi bi-info-circle me-1"></i>
+            Склад СВХ назначается после формирования партии (этап «Сформирована» и далее).
+            На этапе черновика назначение склада недоступно.
+          </div>
+        </div>
+      </div>
+
+      <div class="d-flex gap-3">
+        <button type="submit" class="btn btn-success px-4 fw-semibold">
+          <i class="bi bi-check-lg me-2"></i>Создать партию
+        </button>
+        <a href="{% url 'cargo_list' %}" class="btn btn-outline-secondary">Отмена</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+{% if step == '1' %}
+const checks = document.querySelectorAll('.hawb-check');
+const selectAll = document.getElementById('selectAll');
+const nextBtn = document.getElementById('nextBtn');
+const counter = document.getElementById('selectedCount');
+const summary = document.getElementById('selectionSummary');
+
+function updateSelection() {
+  const checked = document.querySelectorAll('.hawb-check:checked');
+  const n = checked.length;
+  counter.textContent = n + ' выбрано';
+  nextBtn.disabled = n === 0;
+
+  let totalW = 0, totalP = 0;
+  checked.forEach(cb => {
+    const row = cb.closest('tr');
+    row.classList.add('selected');
+    const wCell = row.cells[5].textContent.trim();
+    const pCell = row.cells[6].textContent.trim().split('/')[0];
+    totalW += parseFloat(wCell) || 0;
+    totalP += parseInt(pCell) || 0;
+  });
+  document.querySelectorAll('.hawb-check:not(:checked)').forEach(cb => {
+    cb.closest('tr').classList.remove('selected');
+  });
+
+  if (n > 0) {
+    summary.innerHTML = `<strong>${n}</strong> накладных выбрано &nbsp;|&nbsp; Вес: <strong>${totalW.toFixed(2)} кг</strong> &nbsp;|&nbsp; Мест: <strong>${totalP}</strong>`;
+    summary.className = 'small text-primary fw-semibold';
+  } else {
+    summary.textContent = 'Выберите накладные для объединения в партию';
+    summary.className = 'small text-muted';
+  }
+}
+
+checks.forEach(cb => cb.addEventListener('change', updateSelection));
+
+selectAll.addEventListener('change', function() {
+  checks.forEach(cb => cb.checked = this.checked);
+  updateSelection();
+});
+{% endif %}
+</script>
+{% endblock %}

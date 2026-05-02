@@ -1,0 +1,115 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - link "CT CargoTrack Pro" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e5]: CT
+      - generic [ref=e6]:
+        - generic [ref=e7]: CargoTrack
+        - generic [ref=e8]: Pro
+    - navigation [ref=e9]:
+      - generic [ref=e10]: Навигация
+      - link " Дашборд" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e12]: 
+        - text: Дашборд
+      - link " Партии (MAWB)" [ref=e13] [cursor=pointer]:
+        - /url: /list/
+        - generic [ref=e14]: 
+        - text: Партии (MAWB)
+      - link " Накладные (HAWB)" [ref=e15] [cursor=pointer]:
+        - /url: /hawbs/
+        - generic [ref=e16]: 
+        - text: Накладные (HAWB)
+      - link " Товары" [ref=e17] [cursor=pointer]:
+        - /url: /goods/
+        - generic [ref=e18]: 
+        - text: Товары
+      - link " Бизнес-процессы" [ref=e19] [cursor=pointer]:
+        - /url: /workflows/
+        - generic [ref=e20]: 
+        - text: Бизнес-процессы
+      - link " SLA-нормативы" [ref=e21] [cursor=pointer]:
+        - /url: /sla/
+        - generic [ref=e22]: 
+        - text: SLA-нормативы
+      - generic [ref=e24]: Справочники
+      - link " Статусы" [ref=e25] [cursor=pointer]:
+        - /url: /faq/
+        - generic [ref=e26]: 
+        - text: Статусы
+      - link " Метки" [ref=e27] [cursor=pointer]:
+        - /url: /labels/
+        - generic [ref=e28]: 
+        - text: Метки
+      - link " Администрирование" [ref=e29] [cursor=pointer]:
+        - /url: /admin/
+        - generic [ref=e30]: 
+        - text: Администрирование
+    - generic [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]: 
+        - generic [ref=e34]: andy
+      - link " Выйти" [ref=e35] [cursor=pointer]:
+        - /url: /logout/
+        - generic [ref=e36]: 
+        - text: Выйти
+  - generic [ref=e37]:
+    - generic [ref=e38]:
+      - generic [ref=e39]:
+        - generic [ref=e40]: 
+        - generic [ref=e41]: /
+        - generic [ref=e42]: Партии (MAWB)
+      - generic [ref=e43]:
+        - link " Новая партия" [ref=e44] [cursor=pointer]:
+          - /url: /list/new/
+          - generic [ref=e45]: 
+          - text: Новая партия
+        - link "" [ref=e46] [cursor=pointer]:
+          - /url: /export/?q=&status=&queue=
+          - generic [ref=e47]: 
+    - generic [ref=e48]:
+      - generic [ref=e50]:
+        - generic [ref=e51]:
+          - generic [ref=e52]:
+            - generic [ref=e53]: Поиск
+            - textbox "AWB, ТД, описание..." [ref=e54]
+          - generic [ref=e55]:
+            - generic [ref=e56]: Этап
+            - combobox [ref=e57]
+          - generic [ref=e58]:
+            - generic [ref=e59]: Вид транспорта
+            - combobox [ref=e60]
+          - generic [ref=e62]:
+            - checkbox "Есть невыпущенные HAWB" [ref=e63]
+            - text: Есть невыпущенные HAWB
+        - generic [ref=e64]:
+          - button "НАЙТИ" [ref=e65] [cursor=pointer]
+          - button "ОЧИСТИТЬ" [disabled] [ref=e66] [cursor=pointer]
+          - generic [ref=e67]:
+            - generic [ref=e68]: 
+            - text: перетаскивайте столбцы ·
+            - generic [ref=e69]: 
+            - text: ▼ в шапке — фильтр
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - generic [ref=e72]:
+            - text: "Найдено:"
+            - strong [ref=e73]: "11"
+          - generic [ref=e74]:
+            - button "" [ref=e75] [cursor=pointer]
+            - button "" [ref=e77] [cursor=pointer]
+        - table [ref=e80]:
+          - rowgroup [ref=e81]:
+            - row "⠿ AWB  ▼ ⠿ Этап  ▼ ⠿ Дата вылета  ▼ ⠿ Дата прилёта  ▼ ⠿ Рейс ▼ ⠿ Маршрут ▼ ⠿ Вес, кг  ▼ ⠿ Мест, шт  ▼ ⠿ Остаток, кг ▼ ⠿ Выпущено, кг ▼ ⠿ Склад / Лицензия  ▼ ⠿ На СВХ с  ▼ ⠿ Платное хранение ▼ ⠿ До конца, дн. ▼ ⠿ HAWB ▼ ⠿ Невыпущ. ▼ ⠿ Выпущено / Всего ▼ ⠿ Типы грузов ▼ ⠿ Вид транспорта ▼" [ref=e82]
+          - rowgroup [ref=e194]:
+            - row "823-83514684 Формирование партии черновик — — SU834 IST→SVO 188,9 8 188,9 — — — — — 4 невып. 0/4 B2B, B2C, C2C Авиа" [ref=e195]
+            - row "719-14909277 Формирование партии черновик — — QR297 AMS→VKO 125,5 9 125,5 — — — — — 3 невып. 0/3 B2B, B2C, C2C Авиа" [ref=e221]
+            - row "210-91058504 Партия сформирована — — CA805 DXB→VKO 140,5 10 140,5 — — — — — 5 невып. 0/5 B2B, B2C, C2C Авиа" [ref=e247]
+            - row "827-59326299 Партия сформирована — — U6852 CDG→VKO 124,5 4 124,5 — — — — — 4 невып. 0/4 B2B, B2C, C2C Авиа" [ref=e272]
+            - row "169-32209366 Партия отправлена в страну назначения 15.04.2026 17.04.2026 TK563 HKG→VKO 143,8 10 143,8 — — — — — 5 невып. 0/5 B2B, B2C, C2C Авиа" [ref=e297]
+            - row "109-24957472 Партия отправлена в страну назначения 15.04.2026 17.04.2026 S7394 CDG→SVO 141,4 8 141,4 — — — — — 4 невып. 0/4 B2B, B2C, C2C Авиа" [ref=e322]
+            - row "328-79909442 Партия прибыла в страну назначения 11.04.2026 13.04.2026 QR266 ICN→VKO 122,6 15 122,6 — ООО Шереметьево-К… СВХ/0001/2019/Ш 21.04.2026 25.04.2026  Платное 108 дн. до 19.08.2026 5 невып. 0/5 B2B, B2C, C2C Авиа" [ref=e347]
+            - row "455-54359822 Партия прибыла в страну назначения 11.04.2026 13.04.2026 SU788 JFK→SVO 92,2 8 92,2 — ЗАО Домодедово-Ка… СВХ/0002/2018/Д 21.04.2026 25.04.2026  Платное 108 дн. до 19.08.2026 4 невып. 0/4 B2C, C2C Авиа" [ref=e377]
+            - row "312-38828440 Таможенное оформление в стране назначения 07.04.2026 09.04.2026 TK445 IST→DME 238,6 21 238,6 — ООО Шереметьево-К… СВХ/0001/2019/Ш 17.04.2026 21.04.2026  Платное 104 дн. до 15.08.2026 7 невып. 0/7 B2B, B2C Авиа" [ref=e407]
+            - row "114-12517729 Таможенное оформление в стране назначения 07.04.2026 09.04.2026 S7473 LHR→LED 162,8 10 162,8 52,1 АО Внуково-Логист… СВХ/0003/2020/В 17.04.2026 21.04.2026  Платное 104 дн. до 15.08.2026 5 невып. 2/5 B2B, B2C, C2C Авиа" [ref=e437]
+            - row "825-38269698 Полный выпуск 31.03.2026 02.04.2026 TK992 LHR→VKO 138,5 12 138,5 138,5 ЗАО Домодедово-Ка… СВХ/0002/2018/Д 10.04.2026 14.04.2026  Платное 97 дн. до 08.08.2026 4  Все 4/4 B2B, B2C, C2C Авиа" [ref=e467]

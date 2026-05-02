@@ -1,0 +1,169 @@
+{% extends "cargo/base.html" %}
+{% block title %}Новый HAWB — CargoTrack Pro{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center mb-4">
+  <a href="{% url 'all_hawbs' %}" class="text-muted text-decoration-none me-3">
+    <i class="bi bi-arrow-left"></i>
+  </a>
+  <h5 class="mb-0 fw-bold"><i class="bi bi-plus-circle me-2 text-primary"></i>Создать индивидуальную накладную (HAWB)</h5>
+</div>
+
+<form method="post" action="{% url 'hawb_create_standalone' %}">
+  {% csrf_token %}
+  <div class="row g-4">
+
+    <!-- ЛЕВАЯ КОЛОНКА -->
+    <div class="col-lg-6">
+
+      <div class="card mb-3">
+        <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+          <i class="bi bi-card-text me-2"></i>Основная информация
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Номер HAWB *</label>
+              <input type="text" name="hawb_number" class="form-control font-monospace"
+                     placeholder="000-00000000" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Тип груза</label>
+              <select name="cargo_type" class="form-select">
+                <option value="B2C">B2C — Бизнес для потребителя</option>
+                <option value="B2B">B2B — Бизнес для бизнеса</option>
+                <option value="C2C">C2C — Частное лицо</option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Тип отправки</label>
+              <select name="shipment_type" class="form-select">
+                <option value="IMPORT">Импорт</option>
+                <option value="EXPORT">Экспорт</option>
+              </select>
+            </div>
+            <div class="col-md-12">
+              <label class="form-label small text-muted mb-1">Ответственный</label>
+              <select name="assigned_to" class="form-select">
+                <option value="">— не назначен —</option>
+                {% for u in all_users %}
+                <option value="{{ u.pk }}">{{ u.get_full_name|default:u.username }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Описание товара</label>
+              <textarea name="description" class="form-control" rows="2"
+                        placeholder="Краткое описание содержимого..."></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Привязка к MAWB (необязательно) -->
+      <div class="card mb-3 border-dashed" style="border-style:dashed!important">
+        <div class="card-header py-2 bg-white">
+          <div class="fw-bold small text-muted text-uppercase">
+            <i class="bi bi-link-45deg me-2"></i>Привязка к партии MAWB
+            <span class="badge bg-light text-muted border ms-2" style="font-size:10px">необязательно</span>
+          </div>
+          <div class="small text-muted mt-1">
+            Если HAWB ещё не входит ни в одну партию — оставьте пустым
+          </div>
+        </div>
+        <div class="card-body">
+          <label class="form-label small text-muted mb-1">Номер MAWB</label>
+          <input type="text" name="mawb_awb" class="form-control font-monospace"
+                 list="mawb_list" placeholder="Начните вводить AWB...">
+          <datalist id="mawb_list">
+            {% for m in mawb_list %}
+            <option value="{{ m.awb_number }}">{{ m.awb_number }} — рейс {{ m.flight_number|default:"?" }} {{ m.flight_date|default:"" }}</option>
+            {% endfor %}
+          </datalist>
+          <div class="form-text">Введите номер существующей партии или выберите из списка</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ПРАВАЯ КОЛОНКА -->
+    <div class="col-lg-6">
+
+      <div class="card mb-3">
+        <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+          <i class="bi bi-person me-2"></i>Получатель
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Наименование / ФИО</label>
+              <input type="text" name="consignee_name" class="form-control"
+                     placeholder="ООО Название или Иванов И.И.">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">ИНН</label>
+              <input type="text" name="consignee_inn" class="form-control font-monospace"
+                     placeholder="7700000000">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Город</label>
+              <input type="text" name="consignee_city" class="form-control" placeholder="Москва">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Телефон</label>
+              <input type="text" name="consignee_phone" class="form-control">
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Адрес доставки</label>
+              <input type="text" name="consignee_address" class="form-control">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+          <i class="bi bi-boxes me-2"></i>Параметры груза
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Вес (кг)</label>
+              <input type="number" name="weight" class="form-control" step="0.01">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" class="form-control" value="1" min="1">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Стоимость</label>
+              <input type="number" name="invoice_value" class="form-control" step="0.01">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Валюта</label>
+              <select name="invoice_currency" class="form-select">
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
+                <option value="CNY">CNY</option>
+                <option value="RUB">RUB</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Примечания</label>
+              <textarea name="notes" class="form-control" rows="2"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="d-flex gap-3 mt-2">
+    <button type="submit" class="btn btn-primary px-4">
+      <i class="bi bi-check-lg me-2"></i>Создать накладную
+    </button>
+    <a href="{% url 'all_hawbs' %}" class="btn btn-outline-secondary">Отмена</a>
+  </div>
+</form>
+{% endblock %}

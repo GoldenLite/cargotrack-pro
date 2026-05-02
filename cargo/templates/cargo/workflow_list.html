@@ -1,0 +1,570 @@
+{% extends "cargo/base.html" %}
+{% block title %}Бизнес-процессы — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Бизнес-процессы{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn-cdek-secondary" id="btnHowItWorks" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('wfGuideModal')).show()" style="display:inline-flex;align-items:center;gap:4px">
+  <i class="bi bi-question-circle"></i> Как это работает?
+</button>
+<button class="btn-cdek-primary" id="btnCreateWf" style="display:inline-flex;align-items:center;gap:4px">
+  <i class="bi bi-plus-lg"></i> Создать процесс
+</button>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.wf-list { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; margin-top:8px; }
+.wf-card {
+  background:#fff; border:1px solid var(--cdek-border); border-radius:8px;
+  padding:20px; cursor:pointer; transition:box-shadow .15s, border-color .15s;
+  display:flex; flex-direction:column; gap:10px;
+}
+.wf-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.08); border-color:#93c5fd; }
+.wf-card-title { font-size:15px; font-weight:600; color:#1f2937; display:flex; align-items:center; gap:8px; }
+.wf-card-desc { font-size:12px; color:#6b7280; line-height:1.4; flex:1; }
+.wf-card-meta { display:flex; align-items:center; gap:12px; font-size:11px; color:#9ca3af; }
+.wf-badge-active { background:#dcfce7; color:#166534; font-size:10px; padding:2px 8px; border-radius:10px; font-weight:500; }
+.wf-badge-inactive { background:#f3f4f6; color:#6b7280; font-size:10px; padding:2px 8px; border-radius:10px; font-weight:500; }
+.wf-card-actions { display:flex; gap:4px; margin-left:auto; }
+.wf-card-actions button {
+  width:28px; height:28px; border:none; background:transparent; color:#9ca3af;
+  cursor:pointer; border-radius:4px; font-size:14px;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.wf-card-actions button:hover { background:#f3f4f6; color:#374151; }
+.wf-card-actions .btn-del:hover { background:#fee2e2; color:#dc2626; }
+
+.wf-empty {
+  text-align:center; padding:60px 20px; background:#fff;
+  border:2px dashed #e5e7eb; border-radius:10px; margin-top:8px;
+}
+.wf-empty i { font-size:48px; color:#d1d5db; display:block; margin-bottom:12px; }
+.wf-empty h5 { color:#374151; margin-bottom:6px; }
+.wf-empty p { color:#6b7280; font-size:13px; margin-bottom:20px; }
+
+/* Modal */
+.modal-wf { max-width:480px; }
+
+/* Info banner */
+.wf-info-banner {
+  background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px;
+  padding:12px 16px; margin-bottom:16px;
+}
+
+/* Guide modal */
+.wf-guide-section { margin-bottom:24px; }
+.wf-guide-section h6 {
+  font-size:13px; font-weight:700; color:#1f2937;
+  display:flex; align-items:center; gap:8px;
+  padding-bottom:6px; border-bottom:1px solid #e5e7eb; margin-bottom:12px;
+}
+.wf-guide-step {
+  display:flex; gap:12px; margin-bottom:10px; align-items:flex-start;
+}
+.wf-guide-step-num {
+  width:22px; height:22px; border-radius:50%; background:var(--cdek-blue);
+  color:#fff; font-size:11px; font-weight:700;
+  display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.wf-guide-step-body { font-size:13px; color:#374151; line-height:1.5; }
+.wf-guide-step-body strong { color:#111827; }
+.wf-guide-tip {
+  background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px;
+  padding:10px 12px; font-size:12px; color:#166534; margin-top:8px;
+  display:flex; gap:8px; align-items:flex-start;
+}
+.wf-guide-warn {
+  background:#fffbeb; border:1px solid #fde68a; border-radius:6px;
+  padding:10px 12px; font-size:12px; color:#92400e; margin-top:8px;
+  display:flex; gap:8px; align-items:flex-start;
+}
+.wf-guide-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+.wf-guide-table th { background:#f3f4f6; color:#6b7280; padding:5px 10px; text-align:left; font-weight:600; }
+.wf-guide-table td { padding:6px 10px; border-top:1px solid #f3f4f6; color:#374151; vertical-align:top; }
+.wf-guide-table tr:hover td { background:#fafafa; }
+.wf-guide-example {
+  background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px;
+  padding:12px 14px; margin-top:8px;
+}
+.wf-guide-example-title { font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px; }
+.wf-flow {
+  display:flex; align-items:center; gap:4px; flex-wrap:wrap;
+  font-size:12px;
+}
+.wf-flow-step {
+  background:#fff; border:1px solid #cbd5e1; border-radius:5px;
+  padding:3px 8px; color:#334155; font-weight:500;
+}
+.wf-flow-arrow { color:#94a3b8; font-size:14px; }
+.wf-flow-step.active { background:#dbeafe; border-color:#93c5fd; color:#1e40af; }
+.modal-guide { max-width:680px; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="db-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+  <div style="font-size:18px;font-weight:700;color:var(--cdek-text);display:flex;align-items:center;gap:8px">
+    <i class="bi bi-diagram-3" style="font-size:20px;color:var(--cdek-blue)"></i>
+    Бизнес-процессы
+  </div>
+</div>
+
+<!-- Info banner -->
+<div class="wf-info-banner" id="wfInfoBanner">
+  <div style="display:flex;align-items:flex-start;gap:12px">
+    <i class="bi bi-info-circle-fill" style="font-size:18px;color:var(--cdek-blue);flex-shrink:0;margin-top:1px"></i>
+    <div style="flex:1;font-size:13px;color:#374151;line-height:1.6">
+      <strong>Бизнес-процессы</strong> — это сценарии, которые автоматически запускаются на партиях или накладных
+      и отслеживают их движение по шагам в зависимости от смены статусов.
+      Настройте шаги, переходы и автоматизации один раз — система будет выполнять их сама.
+      <a href="#" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('wfGuideModal')).show();return false" style="color:var(--cdek-blue);font-weight:500;margin-left:6px">
+        Подробнее →
+      </a>
+    </div>
+    <button onclick="document.getElementById('wfInfoBanner').style.display='none'" style="border:none;background:transparent;color:#9ca3af;cursor:pointer;padding:0;font-size:14px;flex-shrink:0">
+      <i class="bi bi-x-lg"></i>
+    </button>
+  </div>
+</div>
+
+<div class="wf-list" id="wfList"></div>
+
+<div class="wf-empty" id="wfEmpty" style="display:none">
+  <i class="bi bi-diagram-3"></i>
+  <h5>Нет бизнес-процессов</h5>
+  <p>Создайте бизнес-процесс для настройки последовательности этапов,<br>
+     переходов и автоматизаций — как в Jira Workflows.</p>
+  <button class="btn-cdek-primary" onclick="openCreateModal()" style="display:inline-flex;align-items:center;gap:4px;height:36px;padding:6px 20px;font-size:13px">
+    <i class="bi bi-plus-lg"></i> Создать первый процесс
+  </button>
+</div>
+
+<!-- Create / Edit modal -->
+<div class="modal fade" id="wfModal" tabindex="-1">
+  <div class="modal-dialog modal-wf">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold" id="wfModalTitle">Создать процесс</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Название</label>
+          <input type="text" id="wfName" class="form-control form-control-sm" placeholder="Например: Импорт стандарт">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Описание</label>
+          <textarea id="wfDesc" class="form-control form-control-sm" rows="3" placeholder="Необязательно"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn-cdek-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn-cdek-primary" id="btnSaveWf" onclick="saveWorkflow()" style="display:inline-flex;align-items:center;gap:4px">
+          <i class="bi bi-check-lg"></i> Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Guide modal -->
+<div class="modal fade" id="wfGuideModal" tabindex="-1">
+  <div class="modal-dialog modal-guide modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2" style="background:var(--cdek-blue);color:#fff">
+        <h6 class="modal-title fw-bold d-flex align-items-center gap-2">
+          <i class="bi bi-book"></i> Руководство: Бизнес-процессы
+        </h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" style="padding:24px">
+
+        <!-- Что такое бизнес-процесс -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-diagram-3" style="color:var(--cdek-blue)"></i> Что такое бизнес-процесс?</h6>
+          <p style="font-size:13px;color:#374151;line-height:1.6;margin:0">
+            Бизнес-процесс (воркфлоу) — это заранее описанный сценарий движения груза или накладной
+            по этапам. Каждый процесс состоит из <strong>шагов</strong> (этапов обработки),
+            <strong>переходов</strong> между ними и <strong>автоматизаций</strong> (действий, которые
+            выполняются при наступлении события).
+          </p>
+          <div class="wf-guide-example" style="margin-top:12px">
+            <div class="wf-guide-example-title">Пример: Воркфлоу «B2B Импорт»</div>
+            <div class="wf-flow">
+              <div class="wf-flow-step active">Прибытие на СВХ</div>
+              <i class="bi bi-arrow-right wf-flow-arrow"></i>
+              <div class="wf-flow-step">Таможенное оформление</div>
+              <i class="bi bi-arrow-right wf-flow-arrow"></i>
+              <div class="wf-flow-step">Выпуск</div>
+              <i class="bi bi-arrow-right wf-flow-arrow"></i>
+              <div class="wf-flow-step">Выдача получателю</div>
+            </div>
+            <div style="font-size:11px;color:#64748b;margin-top:8px">
+              Процесс автоматически запускается для каждой накладной B2B-импорта и продвигается
+              вперёд при смене статуса накладной.
+            </div>
+          </div>
+        </div>
+
+        <!-- Как работает автозапуск -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-play-circle" style="color:#10b981"></i> Автоматический запуск</h6>
+          <p style="font-size:13px;color:#374151;line-height:1.6;margin:0 0 10px">
+            Когда создаётся новая партия или накладная, система автоматически проверяет все активные
+            процессы и запускает те, которые подходят по условиям.
+          </p>
+          <table class="wf-guide-table">
+            <thead>
+              <tr>
+                <th>Настройка</th>
+                <th>Описание</th>
+                <th>Пример</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Тип сущности</strong></td>
+                <td>К чему применяется процесс</td>
+                <td>Партия (MAWB) или Накладная (HAWB)</td>
+              </tr>
+              <tr>
+                <td><strong>Условия запуска</strong></td>
+                <td>Поля сущности, которым должна соответствовать запись</td>
+                <td><code>cargo_type = B2B</code><br><code>shipment_type = IMPORT</code></td>
+              </tr>
+              <tr>
+                <td><strong>Автозапуск</strong></td>
+                <td>Запускать автоматически при создании записи</td>
+                <td>Включено / Выключено</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="wf-guide-tip">
+            <i class="bi bi-lightbulb-fill" style="flex-shrink:0;margin-top:1px"></i>
+            <span>Если «Автозапуск» выключен — процесс можно запустить вручную со страницы
+            накладной или партии через кнопку «Запустить процесс».</span>
+          </div>
+        </div>
+
+        <!-- Как работают шаги -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-boxes" style="color:#8b5cf6"></i> Шаги и продвижение по процессу</h6>
+          <p style="font-size:13px;color:#374151;line-height:1.6;margin:0 0 10px">
+            Каждый шаг привязан к конкретному статусу сущности. Когда статус меняется — процесс
+            автоматически переходит на соответствующий шаг.
+          </p>
+          <table class="wf-guide-table">
+            <thead>
+              <tr>
+                <th>Тип процесса</th>
+                <th>Поле шага</th>
+                <th>Пример значения</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Для партии (Cargo)</td>
+                <td>Этап партии</td>
+                <td>DRAFT → FORMED → DISPATCHED → ARRIVED → CUSTOMS → RELEASED</td>
+              </tr>
+              <tr>
+                <td rowspan="2">Для накладной (HAWB)</td>
+                <td>Логистический статус</td>
+                <td>AT_SVH, IN_TRANSIT, IMPORT_CUSTOMS, RELEASED…</td>
+              </tr>
+              <tr>
+                <td>Таможенный статус</td>
+                <td>PENDING, DECLARED, INSPECTION, RELEASED…</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="wf-guide-warn">
+            <i class="bi bi-exclamation-triangle-fill" style="flex-shrink:0;margin-top:1px"></i>
+            <span>Шаг без входящих переходов считается <strong>начальным</strong>, шаг без исходящих —
+            <strong>финальным</strong>. Когда процесс достигает финального шага, экземпляр
+            автоматически закрывается со статусом «Завершён».</span>
+          </div>
+        </div>
+
+        <!-- Как работают переходы -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-arrow-left-right" style="color:#f59e0b"></i> Переходы между шагами</h6>
+          <p style="font-size:13px;color:#374151;line-height:1.6;margin:0 0 10px">
+            Переход определяет, при каком условии можно перейти от одного шага к другому.
+            Переходы бывают двух видов:
+          </p>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">1</div>
+            <div class="wf-guide-step-body">
+              <strong>Автоматический переход</strong> — срабатывает при смене статуса сущности.
+              Ничего делать не нужно — система сама сдвигает экземпляр процесса вперёд.
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">2</div>
+            <div class="wf-guide-step-body">
+              <strong>Ручной переход</strong> — пользователь нажимает кнопку действия на экране
+              (пока в разработке).
+            </div>
+          </div>
+        </div>
+
+        <!-- Автоматизации -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-robot" style="color:#ef4444"></i> Автоматизации</h6>
+          <p style="font-size:13px;color:#374151;line-height:1.6;margin:0 0 10px">
+            К каждому переходу можно привязать одно или несколько действий, которые выполняются
+            автоматически при наступлении перехода.
+          </p>
+          <table class="wf-guide-table">
+            <thead>
+              <tr>
+                <th>Тип действия</th>
+                <th>Что делает</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>send_notify</code></td>
+                <td>Отправляет уведомление — email или внутреннее сообщение</td>
+              </tr>
+              <tr>
+                <td><code>change_stage</code></td>
+                <td>Автоматически меняет этап партии на указанный</td>
+              </tr>
+              <tr>
+                <td><code>set_field</code></td>
+                <td>Устанавливает произвольное поле сущности в нужное значение</td>
+              </tr>
+              <tr>
+                <td><code>assign_user</code></td>
+                <td>Назначает ответственного пользователя на запись</td>
+              </tr>
+              <tr>
+                <td><code>webhook</code></td>
+                <td>Вызывает внешний URL с данными о событии (HTTP POST)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Как создать процесс -->
+        <div class="wf-guide-section">
+          <h6><i class="bi bi-wrench" style="color:#6366f1"></i> Как создать процесс: пошагово</h6>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">1</div>
+            <div class="wf-guide-step-body">
+              Нажмите <strong>«Создать процесс»</strong>, введите название и описание.
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">2</div>
+            <div class="wf-guide-step-body">
+              Откройте процесс в редакторе. В панели <strong>«Настройки процесса»</strong> (слева) выберите:
+              тип сущности (Партия или Накладная), условия автозапуска (если нужны)
+              и включите «Автозапуск».
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">3</div>
+            <div class="wf-guide-step-body">
+              Добавьте шаги через кнопку <strong>«+ Добавить шаг»</strong>. Для каждого шага
+              укажите имя и соответствующий статус (этап партии или статус накладной).
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">4</div>
+            <div class="wf-guide-step-body">
+              Соедините шаги <strong>переходами</strong>: потяните от одного блока к другому
+              в редакторе схемы.
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">5</div>
+            <div class="wf-guide-step-body">
+              Добавьте <strong>автоматизации</strong> к переходам при необходимости.
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num">6</div>
+            <div class="wf-guide-step-body">
+              Нажмите кнопку активации процесса — после этого он начнёт применяться к новым записям.
+            </div>
+          </div>
+          <div class="wf-guide-tip">
+            <i class="bi bi-lightbulb-fill" style="flex-shrink:0;margin-top:1px"></i>
+            <span>Прогресс выполнения процесса виден на странице каждой партии и накладной
+            в блоке <strong>«Бизнес-процессы»</strong>. Там же можно запустить процесс вручную
+            или отменить активный экземпляр.</span>
+          </div>
+        </div>
+
+        <!-- Где смотреть статус -->
+        <div class="wf-guide-section" style="margin-bottom:0">
+          <h6><i class="bi bi-eye" style="color:#0ea5e9"></i> Где смотреть ход выполнения</h6>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num"><i class="bi bi-box-seam" style="font-size:9px"></i></div>
+            <div class="wf-guide-step-body">
+              <strong>Страница партии</strong> — блок «Бизнес-процессы» показывает активные
+              экземпляры процессов, текущий шаг и прогресс в виде точек.
+            </div>
+          </div>
+          <div class="wf-guide-step">
+            <div class="wf-guide-step-num"><i class="bi bi-file-text" style="font-size:9px"></i></div>
+            <div class="wf-guide-step-body">
+              <strong>Страница накладной</strong> — аналогичный блок с прогрессом HAWB-процессов.
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn-cdek-primary" data-bs-dismiss="modal">Понятно</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirm -->
+<div class="modal fade" id="wfDeleteModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-body py-3 text-center">
+        <i class="bi bi-trash3 text-danger d-block mb-2" style="font-size:28px"></i>
+        <p class="mb-1 fw-bold">Удалить процесс?</p>
+        <p class="text-muted small mb-0" id="wfDeleteName"></p>
+      </div>
+      <div class="modal-footer py-2 justify-content-center">
+        <button class="btn-cdek-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn btn-sm btn-danger" id="btnConfirmDeleteWf">Удалить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CSRF = (()=>{ const m=document.cookie.match(/csrftoken=([^;]+)/); return m?m[1]:''; })();
+const API = {
+  get:    (u)    => fetch(u, {headers:{'X-CSRFToken':CSRF}}),
+  post:   (u,d)  => fetch(u, {method:'POST',   headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(d)}),
+  put:    (u,d)  => fetch(u, {method:'PUT',     headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(d)}),
+  delete: (u)    => fetch(u, {method:'DELETE',  headers:{'X-CSRFToken':CSRF}}),
+};
+
+let allWfs = [];
+let editingWfId = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btnCreateWf').addEventListener('click', () => openCreateModal());
+  loadWorkflows();
+});
+
+async function loadWorkflows() {
+  const res = await API.get('/api/v1/workflows/');
+  const data = await res.json();
+  allWfs = data.workflows || [];
+  renderList();
+}
+
+function renderList() {
+  const list = document.getElementById('wfList');
+  const empty = document.getElementById('wfEmpty');
+  if (!allWfs.length) {
+    list.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  list.innerHTML = allWfs.map(w => `
+    <div class="wf-card" onclick="window.location='/workflows/${w.id}/'">
+      <div class="wf-card-title">
+        <i class="bi bi-diagram-3" style="color:var(--cdek-blue)"></i>
+        ${esc(w.name)}
+        <span class="${w.is_active ? 'wf-badge-active' : 'wf-badge-inactive'}">${w.is_active ? 'Активен' : 'Неактивен'}</span>
+        <div class="wf-card-actions">
+          <button title="Редактировать" onclick="event.stopPropagation();openEditModal(${w.id})">
+            <i class="bi bi-pencil"></i>
+          </button>
+          <button class="btn-del" title="Удалить" onclick="event.stopPropagation();confirmDeleteWf(${w.id})">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </div>
+      </div>
+      <div class="wf-card-desc">${esc(w.description) || '<span style="color:#d1d5db">Без описания</span>'}</div>
+      <div class="wf-card-meta">
+        <span><i class="bi bi-layers me-1"></i>${w.steps_count} ${pluralRu(w.steps_count, ['шаг','шага','шагов'])}</span>
+        <span><i class="bi bi-person me-1"></i>${esc(w.created_by)}</span>
+        <span><i class="bi bi-clock me-1"></i>${esc(w.updated_at)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openCreateModal() {
+  editingWfId = null;
+  document.getElementById('wfModalTitle').textContent = 'Создать процесс';
+  document.getElementById('wfName').value = '';
+  document.getElementById('wfDesc').value = '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('wfModal')).show();
+}
+
+function openEditModal(id) {
+  const w = allWfs.find(x => x.id === id);
+  if (!w) return;
+  editingWfId = id;
+  document.getElementById('wfModalTitle').textContent = 'Редактировать процесс';
+  document.getElementById('wfName').value = w.name;
+  document.getElementById('wfDesc').value = w.description;
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('wfModal')).show();
+}
+
+async function saveWorkflow() {
+  const name = document.getElementById('wfName').value.trim();
+  if (!name) { document.getElementById('wfName').focus(); return; }
+  const payload = { name, description: document.getElementById('wfDesc').value.trim() };
+  const btn = document.getElementById('btnSaveWf');
+  btn.disabled = true;
+  try {
+    if (editingWfId) {
+      await API.put(`/api/v1/workflows/${editingWfId}/`, payload);
+    } else {
+      await API.post('/api/v1/workflows/', payload);
+    }
+    bootstrap.Modal.getInstance(document.getElementById('wfModal'))?.hide();
+    await loadWorkflows();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function confirmDeleteWf(id) {
+  const w = allWfs.find(x => x.id === id);
+  document.getElementById('wfDeleteName').textContent = w ? w.name : '';
+  document.getElementById('btnConfirmDeleteWf').onclick = () => deleteWf(id);
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('wfDeleteModal')).show();
+}
+
+async function deleteWf(id) {
+  bootstrap.Modal.getInstance(document.getElementById('wfDeleteModal'))?.hide();
+  await API.delete(`/api/v1/workflows/${id}/`);
+  await loadWorkflows();
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function pluralRu(n, forms) {
+  const a = Math.abs(Number(n)) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return forms[2];
+  if (b > 1 && b < 5) return forms[1];
+  if (b === 1) return forms[0];
+  return forms[2];
+}
+</script>
+{% endblock %}

@@ -1,0 +1,316 @@
+{% extends "cargo/base.html" %}
+{% block title %}Метки — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Метки{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn-cdek-primary" id="btnAddLabel">
+  <i class="bi bi-plus-lg me-1"></i>Создать метку
+</button>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.labels-page { padding: 16px; }
+.labels-table { width: 100%; background: #fff; border: 1px solid var(--cdek-border); border-radius: 6px; overflow: hidden; }
+.labels-table th { background: var(--cdek-header-bg); padding: 10px 14px; text-align: left; font-weight: 600; font-size: 12px; color: var(--cdek-text-muted); border-bottom: 1px solid var(--cdek-border); }
+.labels-table td { padding: 10px 14px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+.labels-table tr:hover { background: var(--cdek-row-hover); }
+.labels-table tr:last-child td { border-bottom: none; }
+.label-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .2px;
+}
+.usage-badge {
+  display: inline-block;
+  background: #e0e7ff;
+  color: #3730a3;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.usage-badge.zero { background: #f3f4f6; color: #6b7280; }
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: var(--cdek-text-muted);
+}
+.empty-state i { font-size: 32px; opacity: .4; margin-bottom: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="labels-page">
+  <div id="labelsContainer">
+    <div class="text-muted small">Загрузка…</div>
+  </div>
+</div>
+
+<!-- Modal: создать/редактировать метку -->
+<div class="modal fade" id="labelModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="labelModalTitle">Новая метка</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="labelId">
+        <div class="mb-3">
+          <label class="form-label">Название <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="labelName" maxlength="64" required>
+          <div class="form-text">Используется в CQL: <code>labels = "Название"</code></div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Цвет</label>
+          <div class="d-flex align-items-center gap-2">
+            <input type="color" class="form-control form-control-color" id="labelColor" value="#6c757d" style="width:50px;height:38px">
+            <input type="text" class="form-control" id="labelColorText" value="#6c757d" maxlength="7" style="max-width:120px;font-family:'Roboto Mono',monospace">
+            <span class="ms-2 small text-muted">Превью:</span>
+            <span class="label-chip" id="labelPreview" style="background:#6c757d">Метка</span>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Описание</label>
+          <textarea class="form-control" id="labelDescription" rows="2" placeholder="Опционально"></textarea>
+        </div>
+        <div id="labelError" class="alert alert-danger small d-none mb-0"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button type="button" class="btn btn-primary" id="labelSaveBtn">
+          <i class="bi bi-check-lg me-1"></i>Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: подтверждение удаления -->
+<div class="modal fade" id="deleteLabelModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Удалить метку?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Удалить метку <strong id="deleteLabelName"></strong>?</p>
+        <div id="deleteLabelUsage" class="alert alert-warning small d-none">
+          Метка используется в <strong id="deleteLabelUsageCount"></strong> сущностях.
+          Удаление снимет её со всех партий и накладных.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button type="button" class="btn btn-danger" id="deleteLabelConfirmBtn">
+          <i class="bi bi-trash me-1"></i>Удалить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function() {
+  const csrftoken = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+  const API = {
+    async get(url) {
+      const r = await fetch(url, {credentials: 'same-origin'});
+      return r.json();
+    },
+    async post(url, body) {
+      const r = await fetch(url, {
+        method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrftoken},
+        body: JSON.stringify(body),
+      });
+      return {status: r.status, data: await r.json()};
+    },
+    async put(url, body) {
+      const r = await fetch(url, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrftoken},
+        body: JSON.stringify(body),
+      });
+      return {status: r.status, data: await r.json()};
+    },
+    async del(url) {
+      const r = await fetch(url, {
+        method: 'DELETE', credentials: 'same-origin',
+        headers: {'X-CSRFToken': csrftoken},
+      });
+      return {status: r.status, data: r.status === 200 ? await r.json() : (r.status === 404 ? {} : await r.json())};
+    },
+  };
+
+  const labelModal = new bootstrap.Modal(document.getElementById('labelModal'));
+  const deleteModal = new bootstrap.Modal(document.getElementById('deleteLabelModal'));
+  let labelToDelete = null;
+
+  function escHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function loadLabels() {
+    const data = await API.get('/api/v1/labels/?with_usage=1');
+    const container = document.getElementById('labelsContainer');
+    const labels = data.labels || [];
+    if (labels.length === 0) {
+      container.innerHTML = '<div class="empty-state">' +
+        '<i class="bi bi-tags"></i><div>Меток пока нет</div>' +
+        '<div class="small mt-2">Создайте первую метку — её можно будет вешать на партии и накладные, а также фильтровать по ней в виджетах.</div>' +
+        '</div>';
+      return;
+    }
+    container.innerHTML = `
+      <table class="labels-table">
+        <thead>
+          <tr>
+            <th style="width:280px">Метка</th>
+            <th>Описание</th>
+            <th style="width:120px">Использований</th>
+            <th style="width:140px;text-align:right">Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${labels.map(l => `
+            <tr data-label-id="${l.id}">
+              <td><span class="label-chip" style="background:${escHtml(l.color)}">${escHtml(l.name)}</span></td>
+              <td class="text-muted">${escHtml(l.description) || '—'}</td>
+              <td><span class="usage-badge ${l.usage_count === 0 ? 'zero' : ''}">${l.usage_count}</span></td>
+              <td style="text-align:right">
+                <button class="btn btn-sm btn-outline-secondary" data-edit-id="${l.id}" title="Редактировать">
+                  <i class="bi bi-pencil"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger" data-delete-id="${l.id}" title="Удалить">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+    container.querySelectorAll('[data-edit-id]').forEach(btn => {
+      btn.addEventListener('click', () => openEdit(labels.find(l => l.id === Number(btn.dataset.editId))));
+    });
+    container.querySelectorAll('[data-delete-id]').forEach(btn => {
+      btn.addEventListener('click', () => openDelete(labels.find(l => l.id === Number(btn.dataset.deleteId))));
+    });
+  }
+
+  function openCreate() {
+    document.getElementById('labelModalTitle').textContent = 'Новая метка';
+    document.getElementById('labelId').value = '';
+    document.getElementById('labelName').value = '';
+    document.getElementById('labelColor').value = '#6c757d';
+    document.getElementById('labelColorText').value = '#6c757d';
+    document.getElementById('labelDescription').value = '';
+    document.getElementById('labelError').classList.add('d-none');
+    updatePreview();
+    labelModal.show();
+    setTimeout(() => document.getElementById('labelName').focus(), 200);
+  }
+
+  function openEdit(label) {
+    document.getElementById('labelModalTitle').textContent = 'Редактировать метку';
+    document.getElementById('labelId').value = label.id;
+    document.getElementById('labelName').value = label.name;
+    document.getElementById('labelColor').value = label.color;
+    document.getElementById('labelColorText').value = label.color;
+    document.getElementById('labelDescription').value = label.description;
+    document.getElementById('labelError').classList.add('d-none');
+    updatePreview();
+    labelModal.show();
+  }
+
+  function openDelete(label) {
+    labelToDelete = label;
+    document.getElementById('deleteLabelName').textContent = label.name;
+    const usage = document.getElementById('deleteLabelUsage');
+    if (label.usage_count > 0) {
+      usage.classList.remove('d-none');
+      document.getElementById('deleteLabelUsageCount').textContent = label.usage_count;
+    } else {
+      usage.classList.add('d-none');
+    }
+    deleteModal.show();
+  }
+
+  function updatePreview() {
+    const name = document.getElementById('labelName').value.trim() || 'Метка';
+    const color = document.getElementById('labelColorText').value || '#6c757d';
+    const preview = document.getElementById('labelPreview');
+    preview.style.background = color;
+    preview.textContent = name;
+  }
+
+  async function saveLabel() {
+    const id = document.getElementById('labelId').value;
+    const payload = {
+      name: document.getElementById('labelName').value.trim(),
+      color: document.getElementById('labelColorText').value.trim() || '#6c757d',
+      description: document.getElementById('labelDescription').value.trim(),
+    };
+    if (!payload.name) {
+      showError('Название обязательно');
+      return;
+    }
+    const url = id ? `/api/v1/labels/${id}/` : '/api/v1/labels/';
+    const result = id ? await API.put(url, payload) : await API.post(url, payload);
+    if (result.status >= 200 && result.status < 300) {
+      labelModal.hide();
+      await loadLabels();
+    } else {
+      showError(result.data.error || 'Ошибка сохранения');
+    }
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('labelError');
+    el.textContent = msg;
+    el.classList.remove('d-none');
+  }
+
+  async function deleteLabel() {
+    if (!labelToDelete) return;
+    const url = `/api/v1/labels/${labelToDelete.id}/?force=1`;
+    const result = await API.del(url);
+    if (result.status === 200) {
+      deleteModal.hide();
+      await loadLabels();
+    } else {
+      alert('Ошибка удаления: ' + (result.data.error || 'неизвестная ошибка'));
+    }
+  }
+
+  // Event wiring
+  document.getElementById('btnAddLabel').addEventListener('click', openCreate);
+  document.getElementById('labelSaveBtn').addEventListener('click', saveLabel);
+  document.getElementById('deleteLabelConfirmBtn').addEventListener('click', deleteLabel);
+  document.getElementById('labelColor').addEventListener('input', e => {
+    document.getElementById('labelColorText').value = e.target.value;
+    updatePreview();
+  });
+  document.getElementById('labelColorText').addEventListener('input', e => {
+    const v = e.target.value;
+    if (/^#[0-9a-f]{6}$/i.test(v)) {
+      document.getElementById('labelColor').value = v;
+    }
+    updatePreview();
+  });
+  document.getElementById('labelName').addEventListener('input', updatePreview);
+
+  loadLabels();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,488 @@
+{% extends 'cargo/base.html' %}
+
+{% block title %}Команда — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Команда{% endblock %}
+
+{% block extra_head %}
+<style>
+  .team-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .team-table th { background:#fafafa; padding:8px 10px; text-align:left; font-weight:600;
+                   color:#616161; font-size:11px; border-bottom:1px solid #e0e0e0; }
+  .team-table td { padding:8px 10px; border-bottom:1px solid #f0f0f0; vertical-align:middle; }
+  .team-row { cursor:pointer; transition:background .12s; }
+  .team-row:hover { background:#e8f0fe; }
+  .team-row.expanded { background:#eff6ff; border-bottom-color:#2563eb; }
+  .team-status { display:inline-block; width:10px; height:10px; border-radius:50%;
+                 background:#22c55e; margin-right:6px; vertical-align:middle; }
+  .team-status.off { background:#9ca3af; }
+  .team-tz { font-family:'Roboto Mono',monospace; font-size:11px; color:#6b7280; }
+  .team-cap { font-weight:600; color:#1976d2; }
+  .team-edit-panel { background:#f9fafb; padding:14px 18px; border-bottom:1px solid #e5e7eb; }
+  .team-edit-panel.hidden { display:none; }
+  .team-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px 18px; }
+  .team-field label { display:block; font-size:11px; color:#6b7280; margin-bottom:3px; font-weight:500; }
+  .schedule-grid { display:grid; grid-template-columns: 50px repeat(2, 1fr) auto; gap:6px; align-items:center; margin-bottom:4px; }
+  .schedule-grid input[type=time] { font-size:12px; padding:3px 6px; height:28px; }
+  .schedule-grid .day-name { font-weight:600; font-size:12px; color:#374151; }
+  .schedule-grid .day-off { color:#9ca3af; font-style:italic; font-size:11px; grid-column:2 / 4; }
+
+  .exc-table { width:100%; font-size:12px; border-collapse:collapse; }
+  .exc-table th, .exc-table td { padding:5px 8px; border-bottom:1px solid #f0f0f0; }
+  .exc-table th { background:#fafafa; font-size:10px; color:#6b7280; text-align:left; }
+  .exc-kind {
+    display:inline-block; padding:1px 7px; border-radius:3px; font-size:10px; font-weight:600;
+  }
+  .exc-kind.vacation { background:#dbeafe; color:#1d4ed8; }
+  .exc-kind.sick     { background:#fee2e2; color:#991b1b; }
+  .exc-kind.day_off  { background:#fef3c7; color:#854d0e; }
+  .exc-kind.holiday  { background:#dcfce7; color:#166534; }
+  .exc-kind.other    { background:#f3f4f6; color:#374151; }
+
+  /* Toast container */
+  .toast-area { position:fixed; top:60px; right:20px; z-index:9999; display:flex; flex-direction:column; gap:8px; }
+  .ct-toast {
+    background:#fff; border:1px solid #d1d5db; border-radius:6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.12);
+    padding:10px 14px; min-width:240px; max-width:380px;
+    display:flex; align-items:flex-start; gap:8px; font-size:13px;
+    animation: toastIn .25s ease-out;
+  }
+  .ct-toast.success { border-left:4px solid #10b981; }
+  .ct-toast.error   { border-left:4px solid #ef4444; }
+  .ct-toast.info    { border-left:4px solid #3b82f6; }
+  .ct-toast i.bi { font-size:18px; flex-shrink:0; line-height:1; }
+  .ct-toast.success i.bi { color:#10b981; }
+  .ct-toast.error   i.bi { color:#ef4444; }
+  .ct-toast.info    i.bi { color:#3b82f6; }
+  .ct-toast .toast-close { background:none; border:none; cursor:pointer; color:#9ca3af; padding:0 0 0 8px; font-size:14px; }
+  @keyframes toastIn { from {opacity:0; transform:translateX(20px);} to {opacity:1; transform:translateX(0);} }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="toast-area" id="toastArea"></div>
+
+<div class="ct-card mb-3">
+  <div class="table-toolbar">
+    <div>
+      <strong>Команда и графики работы</strong>
+      <span class="text-muted ms-2" style="font-size:12px;">
+        Кликните по строке, чтобы открыть редактор графика, таймзоны и отпусков.
+      </span>
+    </div>
+    <div class="text-muted" style="font-size:12px">
+      <i class="bi bi-info-circle"></i> Изменения сохраняются сразу.
+    </div>
+  </div>
+
+  <table class="team-table">
+    <thead>
+      <tr>
+        <th style="width:30px"></th>
+        <th>Сотрудник</th>
+        <th>Роль</th>
+        <th>Часовой пояс</th>
+        <th>Часов/неделю</th>
+        <th>Override (мин/день)</th>
+        <th style="width:100px;text-align:right">Активен</th>
+      </tr>
+    </thead>
+    <tbody id="teamTbody">
+      <tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:24px">Загрузка…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Скрытый шаблон редактора -->
+<template id="editPanelTpl">
+  <tr class="team-edit-row">
+    <td colspan="7" class="team-edit-panel">
+      <div class="team-grid">
+        <!-- Левая колонка: основные параметры -->
+        <div>
+          <h6 style="font-size:13px;font-weight:600;margin-bottom:10px;color:#374151">Параметры</h6>
+          <div class="team-field" style="margin-bottom:8px">
+            <label>Часовой пояс (IANA)</label>
+            <input type="text" class="form-control form-control-sm" data-f="timezone"
+                   placeholder="Europe/Moscow" list="tzList">
+          </div>
+          <div class="team-field" style="margin-bottom:8px">
+            <label>Основная роль</label>
+            <select class="form-select form-select-sm" data-f="primary_role">
+              <option value="">— не указана —</option>
+            </select>
+          </div>
+          <div class="team-field" style="margin-bottom:8px">
+            <label>Override дневного лимита (минут, 0 = по графику)</label>
+            <input type="number" class="form-control form-control-sm" data-f="daily_capacity_minutes" min="0" max="1440">
+          </div>
+          <div class="team-field" style="margin-bottom:8px">
+            <label>Заметки</label>
+            <input type="text" class="form-control form-control-sm" data-f="notes" maxlength="200">
+          </div>
+          <div class="team-field" style="margin-bottom:12px">
+            <label class="form-check-label" style="display:flex;align-items:center;gap:6px;font-size:12px">
+              <input type="checkbox" class="form-check-input" data-f="is_active_op">
+              Учитывать в распределении нагрузки
+            </label>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn-cdek-primary btn-save-profile">
+              <i class="bi bi-check-lg me-1"></i>Сохранить
+            </button>
+            <button class="btn-cdek-secondary btn-cancel-edit">Отмена</button>
+          </div>
+        </div>
+
+        <!-- Правая колонка: график -->
+        <div>
+          <h6 style="font-size:13px;font-weight:600;margin-bottom:10px;color:#374151">График работы (локальное время)</h6>
+          <div data-f="schedule"></div>
+          <div style="color:#9ca3af;font-size:11px;margin-top:6px">
+            <i class="bi bi-info-circle"></i> Снимите галочку — день выходной.
+          </div>
+        </div>
+      </div>
+
+      <hr style="margin:14px 0">
+
+      <!-- Отпуска / больничные -->
+      <h6 style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151">
+        Отпуска и больничные
+      </h6>
+      <div data-exc-list>
+        <div style="color:#9ca3af;font-size:11px">Загрузка…</div>
+      </div>
+      <form class="row g-2 mt-2" data-exc-form style="font-size:12px">
+        <div class="col-2">
+          <select class="form-select form-select-sm" data-exc-f="kind">
+            <option value="vacation">Отпуск</option>
+            <option value="sick">Больничный</option>
+            <option value="day_off">Отгул</option>
+            <option value="holiday">Праздник</option>
+            <option value="other">Иное</option>
+          </select>
+        </div>
+        <div class="col-2"><input type="date" class="form-control form-control-sm" data-exc-f="date_from"></div>
+        <div class="col-2"><input type="date" class="form-control form-control-sm" data-exc-f="date_to"></div>
+        <div class="col-4"><input type="text" class="form-control form-control-sm" data-exc-f="note" placeholder="Комментарий (необязательно)"></div>
+        <div class="col-2"><button type="submit" class="btn-cdek-primary w-100">Добавить</button></div>
+      </form>
+    </td>
+  </tr>
+</template>
+
+<datalist id="tzList">
+  <option value="Europe/Moscow">
+  <option value="Europe/Kaliningrad">
+  <option value="Europe/Samara">
+  <option value="Asia/Yekaterinburg">
+  <option value="Asia/Omsk">
+  <option value="Asia/Krasnoyarsk">
+  <option value="Asia/Irkutsk">
+  <option value="Asia/Yakutsk">
+  <option value="Asia/Vladivostok">
+  <option value="Asia/Magadan">
+  <option value="Asia/Kamchatka">
+</datalist>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CSRF = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+const API = {
+  get:    (url)       => fetch(url, {headers:{'X-CSRFToken':CSRF}}),
+  post:   (url, data) => fetch(url, {method:'POST',   headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(data)}),
+  put:    (url, data) => fetch(url, {method:'PUT',    headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(data)}),
+  delete: (url)       => fetch(url, {method:'DELETE', headers:{'X-CSRFToken':CSRF}}),
+};
+
+const DAYS = [
+  {key:'mon', label:'ПН'}, {key:'tue', label:'ВТ'}, {key:'wed', label:'СР'},
+  {key:'thu', label:'ЧТ'}, {key:'fri', label:'ПТ'}, {key:'sat', label:'СБ'}, {key:'sun', label:'ВС'},
+];
+
+let TEAM = { roles: [], profiles: [] };
+let expandedUserId = null;
+
+function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtMinH(m) { if (!m) return '—'; const h = Math.floor(m/60), r=m%60; return r ? `${h}ч${r}м` : `${h}ч`; }
+
+function showToast(msg, kind = 'info', autohide = 3500) {
+  const area = document.getElementById('toastArea');
+  const t = document.createElement('div');
+  const icon = kind === 'success' ? 'bi-check-circle-fill' :
+               kind === 'error'   ? 'bi-x-circle-fill' : 'bi-info-circle-fill';
+  t.className = `ct-toast ${kind}`;
+  t.innerHTML = `<i class="bi ${icon}"></i><div style="flex:1">${escHtml(msg)}</div><button class="toast-close">×</button>`;
+  t.querySelector('.toast-close').onclick = () => t.remove();
+  area.appendChild(t);
+  if (autohide) setTimeout(() => { t.style.opacity = 0; setTimeout(() => t.remove(), 200); }, autohide);
+}
+
+function weeklyHours(schedule) {
+  if (!schedule || typeof schedule !== 'object') return 0;
+  let total = 0;
+  for (const day of DAYS) {
+    for (const pair of (schedule[day.key] || [])) {
+      if (!pair || pair.length !== 2) continue;
+      const [h1, m1] = pair[0].split(':').map(Number);
+      const [h2, m2] = pair[1].split(':').map(Number);
+      const diff = (h2*60+m2) - (h1*60+m1);
+      if (diff > 0) total += diff;
+    }
+  }
+  return total;
+}
+
+async function loadTeam() {
+  const res = await API.get('/api/v1/team/profiles/');
+  if (!res.ok) {
+    document.getElementById('teamTbody').innerHTML =
+      `<tr><td colspan="7" style="text-align:center;color:#ef4444;padding:24px">Ошибка загрузки (${res.status})</td></tr>`;
+    return;
+  }
+  TEAM = await res.json();
+  renderTable();
+}
+
+function renderTable() {
+  const tbody = document.getElementById('teamTbody');
+  if (!TEAM.profiles.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:24px">Нет сотрудников</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '';
+  for (const p of TEAM.profiles) {
+    const tr = document.createElement('tr');
+    tr.className = 'team-row';
+    tr.dataset.userId = p.user_id;
+    const roleLabel = (TEAM.roles.find(r => r.value === p.primary_role) || {}).label || '—';
+    const weekMin = weeklyHours(p.work_schedule);
+    tr.innerHTML = `
+      <td><i class="bi bi-chevron-right" style="font-size:11px;color:#9ca3af"></i></td>
+      <td>
+        <span class="team-status ${p.is_active_op ? '' : 'off'}"></span>
+        <strong>${escHtml(p.full_name)}</strong>
+        <span class="text-muted ms-1" style="font-size:11px">@${escHtml(p.username)}</span>
+      </td>
+      <td>${escHtml(roleLabel)}</td>
+      <td><span class="team-tz">${escHtml(p.timezone)}</span></td>
+      <td><span class="team-cap">${fmtMinH(weekMin)}</span></td>
+      <td>${p.daily_capacity_minutes ? p.daily_capacity_minutes + ' мин' : '<span style="color:#9ca3af">—</span>'}</td>
+      <td style="text-align:right">${p.is_active_op ? '<span class="status-chip released">Да</span>' : '<span class="status-chip draft">Нет</span>'}</td>`;
+    tr.onclick = () => toggleEdit(p.user_id);
+    tbody.appendChild(tr);
+  }
+  // Если был открыт — переоткрываем
+  if (expandedUserId !== null) {
+    const stillExists = TEAM.profiles.some(p => p.user_id === expandedUserId);
+    if (stillExists) toggleEdit(expandedUserId, /*force_open*/true);
+    else expandedUserId = null;
+  }
+}
+
+function buildScheduleEditor(container, schedule) {
+  container.innerHTML = '';
+  for (const day of DAYS) {
+    const intervals = schedule[day.key] || [];
+    const hasWork = intervals.length > 0;
+    const start = hasWork ? intervals[0][0] : '09:00';
+    const end   = hasWork ? intervals[0][1] : '21:00';
+    const row = document.createElement('div');
+    row.className = 'schedule-grid';
+    row.innerHTML = `
+      <label style="display:flex;align-items:center;gap:4px">
+        <input type="checkbox" data-day="${day.key}" data-role="enabled" ${hasWork ? 'checked' : ''}>
+        <span class="day-name">${day.label}</span>
+      </label>
+      <input type="time" data-day="${day.key}" data-role="start" value="${start}" ${hasWork ? '' : 'disabled'}>
+      <input type="time" data-day="${day.key}" data-role="end"   value="${end}"   ${hasWork ? '' : 'disabled'}>
+      <span style="font-size:10px;color:#9ca3af" data-day-summary="${day.key}">${hasWork ? '' : 'выходной'}</span>`;
+    container.appendChild(row);
+  }
+  // toggle inputs
+  container.querySelectorAll('input[data-role=enabled]').forEach(cb => {
+    cb.onchange = () => {
+      const day = cb.dataset.day;
+      const enabled = cb.checked;
+      const inputs = container.querySelectorAll(`input[data-day="${day}"][data-role!="enabled"]`);
+      inputs.forEach(i => { i.disabled = !enabled; });
+      const sum = container.querySelector(`[data-day-summary="${day}"]`);
+      if (sum) sum.textContent = enabled ? '' : 'выходной';
+    };
+  });
+}
+
+function readScheduleEditor(container) {
+  const out = {};
+  for (const day of DAYS) {
+    const enabled = container.querySelector(`input[data-day="${day.key}"][data-role=enabled]`).checked;
+    if (!enabled) { out[day.key] = []; continue; }
+    const start = container.querySelector(`input[data-day="${day.key}"][data-role=start]`).value || '09:00';
+    const end   = container.querySelector(`input[data-day="${day.key}"][data-role=end]`).value   || '21:00';
+    out[day.key] = [[start, end]];
+  }
+  return out;
+}
+
+function toggleEdit(userId, forceOpen = false) {
+  const tbody = document.getElementById('teamTbody');
+  // Закрыть текущую открытую панель если другая
+  if (expandedUserId !== null && expandedUserId !== userId) {
+    const oldRow = tbody.querySelector(`tr[data-user-id="${expandedUserId}"]`);
+    const oldPanel = oldRow ? oldRow.nextElementSibling : null;
+    if (oldRow) {
+      oldRow.classList.remove('expanded');
+      oldRow.querySelector('.bi-chevron-down')?.classList.replace('bi-chevron-down', 'bi-chevron-right');
+    }
+    if (oldPanel?.classList.contains('team-edit-row')) oldPanel.remove();
+  }
+  if (expandedUserId === userId && !forceOpen) {
+    // toggle off
+    const row = tbody.querySelector(`tr[data-user-id="${userId}"]`);
+    const panel = row?.nextElementSibling;
+    if (row) {
+      row.classList.remove('expanded');
+      row.querySelector('.bi-chevron-down')?.classList.replace('bi-chevron-down', 'bi-chevron-right');
+    }
+    if (panel?.classList.contains('team-edit-row')) panel.remove();
+    expandedUserId = null;
+    return;
+  }
+  // Открыть новую
+  const row = tbody.querySelector(`tr[data-user-id="${userId}"]`);
+  if (!row) return;
+  const profile = TEAM.profiles.find(p => p.user_id === userId);
+  if (!profile) return;
+  row.classList.add('expanded');
+  row.querySelector('.bi-chevron-right')?.classList.replace('bi-chevron-right', 'bi-chevron-down');
+
+  const tpl = document.getElementById('editPanelTpl').content.cloneNode(true);
+  const panelRow = tpl.querySelector('tr');
+  // Заполнить поля
+  panelRow.querySelector('[data-f=timezone]').value = profile.timezone;
+  panelRow.querySelector('[data-f=daily_capacity_minutes]').value = profile.daily_capacity_minutes || 0;
+  panelRow.querySelector('[data-f=notes]').value = profile.notes || '';
+  panelRow.querySelector('[data-f=is_active_op]').checked = !!profile.is_active_op;
+  // Роли
+  const roleSel = panelRow.querySelector('[data-f=primary_role]');
+  for (const r of TEAM.roles) {
+    const o = document.createElement('option');
+    o.value = r.value; o.textContent = r.label;
+    if (r.value === profile.primary_role) o.selected = true;
+    roleSel.appendChild(o);
+  }
+  // График
+  const schedCnt = panelRow.querySelector('[data-f=schedule]');
+  buildScheduleEditor(schedCnt, profile.work_schedule);
+  // Кнопки
+  panelRow.querySelector('.btn-save-profile').onclick = (e) => {
+    e.stopPropagation();
+    saveProfile(userId, panelRow);
+  };
+  panelRow.querySelector('.btn-cancel-edit').onclick = (e) => {
+    e.stopPropagation();
+    toggleEdit(userId);
+  };
+  // Блокируем закрытие при клике внутрь
+  panelRow.onclick = (e) => e.stopPropagation();
+  // Форма исключений
+  const excForm = panelRow.querySelector('[data-exc-form]');
+  excForm.onsubmit = (e) => { e.preventDefault(); addException(userId, panelRow); };
+
+  row.parentNode.insertBefore(panelRow, row.nextSibling);
+  expandedUserId = userId;
+
+  // Загрузим исключения
+  loadExceptions(userId, panelRow);
+}
+
+async function saveProfile(userId, panelRow) {
+  const payload = {
+    timezone:               panelRow.querySelector('[data-f=timezone]').value.trim() || 'Europe/Moscow',
+    primary_role:           panelRow.querySelector('[data-f=primary_role]').value,
+    daily_capacity_minutes: parseInt(panelRow.querySelector('[data-f=daily_capacity_minutes]').value) || 0,
+    notes:                  panelRow.querySelector('[data-f=notes]').value,
+    is_active_op:           panelRow.querySelector('[data-f=is_active_op]').checked,
+    work_schedule:          readScheduleEditor(panelRow.querySelector('[data-f=schedule]')),
+  };
+  const btn = panelRow.querySelector('.btn-save-profile');
+  btn.disabled = true; btn.textContent = 'Сохранение…';
+  try {
+    const res = await API.put(`/api/v1/team/profiles/${userId}/`, payload);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showToast(data.error || `Ошибка ${res.status}`, 'error');
+    } else {
+      // Обновить локальную копию
+      const idx = TEAM.profiles.findIndex(p => p.user_id === userId);
+      if (idx !== -1) TEAM.profiles[idx] = data;
+      renderTable();
+      showToast(`Профиль обновлён: ${data.full_name}`, 'success');
+    }
+  } catch (e) {
+    showToast('Ошибка сети', 'error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>Сохранить';
+  }
+}
+
+async function loadExceptions(userId, panelRow) {
+  const list = panelRow.querySelector('[data-exc-list]');
+  const res = await API.get(`/api/v1/team/exceptions/?user=${userId}`);
+  if (!res.ok) { list.innerHTML = '<div style="color:#ef4444">Ошибка загрузки</div>'; return; }
+  const data = await res.json();
+  if (!data.items.length) {
+    list.innerHTML = '<div style="color:#9ca3af;font-size:11px">Нет отпусков/больничных</div>';
+    return;
+  }
+  let html = '<table class="exc-table"><thead><tr><th>Тип</th><th>Период</th><th>Комментарий</th><th></th></tr></thead><tbody>';
+  for (const e of data.items) {
+    html += `<tr>
+      <td><span class="exc-kind ${escHtml(e.kind)}">${escHtml(e.kind_label)}</span></td>
+      <td>${escHtml(e.date_from)} — ${escHtml(e.date_to)}</td>
+      <td>${escHtml(e.note || '')}</td>
+      <td style="text-align:right">
+        <button class="btn-cdek-icon" data-del-exc="${e.id}" title="Удалить">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  list.innerHTML = html;
+  list.querySelectorAll('[data-del-exc]').forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); deleteException(btn.dataset.delExc, userId, panelRow); };
+  });
+}
+
+async function addException(userId, panelRow) {
+  const payload = {
+    user_id:   userId,
+    kind:      panelRow.querySelector('[data-exc-f=kind]').value,
+    date_from: panelRow.querySelector('[data-exc-f=date_from]').value,
+    date_to:   panelRow.querySelector('[data-exc-f=date_to]').value || panelRow.querySelector('[data-exc-f=date_from]').value,
+    note:      panelRow.querySelector('[data-exc-f=note]').value,
+  };
+  if (!payload.date_from) { showToast('Укажите дату начала', 'error'); return; }
+  const res = await API.post('/api/v1/team/exceptions/', payload);
+  const data = await res.json();
+  if (!res.ok || data.error) { showToast(data.error || 'Ошибка', 'error'); return; }
+  showToast('Добавлено', 'success');
+  // Очистим форму
+  ['date_from','date_to','note'].forEach(f => panelRow.querySelector(`[data-exc-f=${f}]`).value = '');
+  loadExceptions(userId, panelRow);
+}
+
+async function deleteException(excId, userId, panelRow) {
+  if (!confirm('Удалить запись?')) return;
+  const res = await API.delete(`/api/v1/team/exceptions/${excId}/`);
+  if (!res.ok) { showToast('Ошибка удаления', 'error'); return; }
+  showToast('Удалено', 'success');
+  loadExceptions(userId, panelRow);
+}
+
+loadTeam();
+</script>
+{% endblock %}

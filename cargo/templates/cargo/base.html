@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}CargoTrack Pro{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+  <style>
+    /* ── Переменные СДЭК-стиля ── */
+    :root {
+      --cdek-purple:       #3b1f78;
+      --cdek-purple-dark:  #2a1457;
+      --cdek-purple-hover: rgba(255,255,255,.10);
+      --cdek-purple-active:rgba(255,255,255,.18);
+      --cdek-blue:         #1976d2;
+      --cdek-blue-dark:    #1565c0;
+      --cdek-bg:           #f0f2f5;
+      --cdek-border:       #e0e0e0;
+      --cdek-text:         #212121;
+      --cdek-text-muted:   #757575;
+      --cdek-header-bg:    #fafafa;
+      --cdek-row-hover:    #e8f0fe;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Roboto', sans-serif;
+      font-size: 13px;
+      background: var(--cdek-bg);
+      color: var(--cdek-text);
+      margin: 0;
+    }
+
+    /* ── Сайдбар ── */
+    .app-shell { display: flex; min-height: 100vh; }
+
+    .sidebar {
+      width: 220px;
+      flex-shrink: 0;
+      background: linear-gradient(180deg, var(--cdek-purple) 0%, var(--cdek-purple-dark) 100%);
+      display: flex;
+      flex-direction: column;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 18px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.12);
+      text-decoration: none;
+    }
+    .sidebar-logo-icon {
+      width: 32px; height: 32px;
+      background: #ff6b00;
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 16px; font-weight: 800;
+      flex-shrink: 0;
+    }
+    .sidebar-logo-text {
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      line-height: 1.1;
+    }
+    .sidebar-logo-sub {
+      color: rgba(255,255,255,.55);
+      font-size: 10px;
+      font-weight: 400;
+    }
+
+    .sidebar-nav { padding: 8px 0; flex: 1; }
+
+    .sidebar-section {
+      padding: 12px 14px 4px;
+      color: rgba(255,255,255,.4);
+      font-size: 10px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+
+    .sidebar-link {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 18px;
+      color: rgba(255,255,255,.82);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 400;
+      transition: background .15s, color .15s;
+      border-left: 3px solid transparent;
+    }
+    .sidebar-link i { font-size: 16px; flex-shrink: 0; opacity: .8; }
+    .sidebar-link:hover {
+      background: var(--cdek-purple-hover);
+      color: #fff;
+    }
+    .sidebar-link.active {
+      background: var(--cdek-purple-active);
+      color: #fff;
+      border-left-color: #ff9800;
+      font-weight: 500;
+    }
+    .sidebar-link.active i { opacity: 1; }
+
+    .sidebar-divider {
+      height: 1px;
+      background: rgba(255,255,255,.1);
+      margin: 8px 14px;
+    }
+
+    .sidebar-bottom {
+      padding: 12px 14px;
+      border-top: 1px solid rgba(255,255,255,.1);
+    }
+    .sidebar-user {
+      display: flex; align-items: center; gap: 8px;
+      color: rgba(255,255,255,.7);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .sidebar-user i { font-size: 18px; }
+
+    /* ── Основной контент ── */
+    .app-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    /* ── Топбар ── */
+    .topbar {
+      background: #fff;
+      border-bottom: 1px solid var(--cdek-border);
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      flex-shrink: 0;
+    }
+    .topbar-breadcrumb {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 13px; color: var(--cdek-text-muted);
+    }
+    .topbar-breadcrumb .current { color: var(--cdek-text); font-weight: 500; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+    /* ── Контентная зона ── */
+    .page-content {
+      flex: 1;
+      padding: 16px 20px;
+      overflow-x: auto;
+    }
+
+    /* ── Карточки ── */
+    .ct-card {
+      background: #fff;
+      border: 1px solid var(--cdek-border);
+      border-radius: 4px;
+    }
+
+    /* ── Панель фильтров ── */
+    .filter-panel {
+      background: #fff;
+      border: 1px solid var(--cdek-border);
+      border-radius: 4px;
+      padding: 16px 18px 12px;
+      margin-bottom: 12px;
+    }
+    .filter-panel .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px 14px;
+    }
+    .filter-field label {
+      display: block;
+      font-size: 11px;
+      color: var(--cdek-text-muted);
+      margin-bottom: 3px;
+      font-weight: 500;
+    }
+    .filter-field .form-control,
+    .filter-field .form-select {
+      font-size: 12px;
+      height: 30px;
+      padding: 3px 8px;
+      border-color: #d0d0d0;
+      border-radius: 3px;
+    }
+    .filter-field .form-control:focus,
+    .filter-field .form-select:focus {
+      border-color: var(--cdek-blue);
+      box-shadow: 0 0 0 2px rgba(25,118,210,.12);
+    }
+    .filter-actions {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      padding-top: 18px;
+    }
+
+    /* ── Кнопки ── */
+    .btn-cdek-primary {
+      background: var(--cdek-blue);
+      color: #fff;
+      border: none;
+      border-radius: 3px;
+      padding: 5px 18px;
+      font-size: 12px;
+      font-weight: 500;
+      font-family: 'Roboto', sans-serif;
+      cursor: pointer;
+      transition: background .15s;
+      height: 30px;
+      letter-spacing: .3px;
+    }
+    .btn-cdek-primary:hover { background: var(--cdek-blue-dark); color: #fff; }
+
+    .btn-cdek-secondary {
+      background: #fff;
+      color: var(--cdek-text);
+      border: 1px solid #bdbdbd;
+      border-radius: 3px;
+      padding: 5px 18px;
+      font-size: 12px;
+      font-weight: 400;
+      font-family: 'Roboto', sans-serif;
+      cursor: pointer;
+      transition: background .15s;
+      height: 30px;
+    }
+    .btn-cdek-secondary:hover { background: #f5f5f5; }
+
+    .btn-cdek-icon {
+      background: transparent;
+      border: 1px solid #bdbdbd;
+      border-radius: 3px;
+      width: 30px; height: 30px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 14px; color: #555; cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-cdek-icon:hover { background: #f0f0f0; }
+
+    /* ── Таблица ── */
+    .ct-table-wrap { overflow-x: auto; }
+
+    .ct-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .ct-table thead tr {
+      background: var(--cdek-header-bg);
+      border-bottom: 1px solid var(--cdek-border);
+    }
+    .ct-table th {
+      padding: 7px 10px;
+      color: #616161;
+      font-size: 11px;
+      font-weight: 500;
+      white-space: nowrap;
+      border-right: 1px solid #ececec;
+      text-align: left;
+      user-select: none;
+      position: relative;
+    }
+    .ct-table th:last-child { border-right: none; }
+    .ct-table th a {
+      color: #616161;
+      text-decoration: none;
+      display: inline-flex; align-items: center; gap: 3px;
+    }
+    .ct-table th a:hover { color: var(--cdek-blue); }
+
+    .ct-table td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #f0f0f0;
+      vertical-align: middle;
+      color: var(--cdek-text);
+    }
+    .ct-table tbody tr:hover { background: var(--cdek-row-hover); cursor: pointer; }
+    .ct-table tbody tr:last-child td { border-bottom: none; }
+
+    /* ── Тablo toolbar ── */
+    .table-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--cdek-border);
+      background: #fff;
+    }
+    .table-count {
+      font-size: 12px;
+      color: var(--cdek-text-muted);
+    }
+    .table-count strong { color: var(--cdek-text); }
+
+    /* ── Статусные бейджи ── */
+    .status-chip {
+      display: inline-block;
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 3px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .status-chip.draft     { background: #eeeeee; color: #616161; }
+    .status-chip.formed    { background: #e3f2fd; color: #1565c0; }
+    .status-chip.dispatched{ background: #e8eaf6; color: #3949ab; }
+    .status-chip.arrived   { background: #fff8e1; color: #f57f17; }
+    .status-chip.customs   { background: #fff3e0; color: #e65100; }
+    .status-chip.released  { background: #e8f5e9; color: #2e7d32; }
+
+    .route-chip {
+      font-size: 11px;
+      background: #e8f0fe;
+      color: #1a237e;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+
+    /* ── Переопределение Bootstrap моноспейса ── */
+    .font-monospace, code, pre {
+      font-family: 'Roboto Mono', monospace !important;
+    }
+
+    /* ── AWB ссылка ── */
+    .awb-link {
+      font-family: 'Roboto Mono', monospace, monospace;
+      font-weight: 700;
+      color: var(--cdek-purple);
+      font-size: 12px;
+    }
+    .awb-link:hover { color: var(--cdek-blue); }
+
+    /* ── Алерты ── */
+    .ct-alert {
+      padding: 8px 12px;
+      border-radius: 4px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+    .ct-alert.success { background: #e8f5e9; color: #2e7d32; border-left: 3px solid #4caf50; }
+    .ct-alert.warning { background: #fff8e1; color: #e65100; border-left: 3px solid #ff9800; }
+    .ct-alert.error   { background: #ffebee; color: #c62828; border-left: 3px solid #f44336; }
+    .ct-alert.info    { background: #e3f2fd; color: #1565c0; border-left: 3px solid #2196f3; }
+
+    /* ── Хранение ── */
+    .storage-ok   { color: #2e7d32; font-weight: 500; }
+    .storage-warn { color: #e65100; font-weight: 500; }
+    .storage-crit { color: #c62828; font-weight: 600; }
+    .paid-badge {
+      font-size: 9px;
+      background: #fff3e0;
+      color: #bf360c;
+      border: 1px solid #ffcc80;
+      border-radius: 2px;
+      padding: 1px 4px;
+      display: inline-block;
+    }
+
+    /* ── Фильтр попап ── */
+    .col-filter-popup {
+      position: fixed; z-index: 9999;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.15);
+      padding: 10px;
+      min-width: 200px;
+      max-width: 280px;
+      max-height: 360px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    .col-filter-popup .filter-values { max-height: 200px; overflow-y: auto; }
+    .col-filter-popup label {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 2px; cursor: pointer; border-radius: 2px;
+    }
+    .col-filter-popup label:hover { background: #f5f5f5; }
+    .col-filter-popup .footer-btns {
+      display: flex; gap: 6px; padding-top: 8px;
+      border-top: 1px solid #eee; margin-top: 6px;
+    }
+    .filter-btn {
+      border: none; background: transparent; color: #bdbdbd;
+      font-size: 10px; padding: 0 2px; cursor: pointer;
+      border-radius: 2px; line-height: 1; flex-shrink: 0;
+    }
+    .filter-btn:hover, .filter-btn.active { color: var(--cdek-blue); background: #e3f2fd; }
+
+    /* ── Drag-and-drop ── */
+    th[draggable="true"] { cursor: grab; }
+    th[draggable="true"]:active { cursor: grabbing; }
+    th.drag-over { outline: 2px dashed var(--cdek-blue); outline-offset: -2px; background: #e3f2fd !important; }
+    th.dragging { opacity: .4; }
+    .drag-handle { color: #ccc; font-size: 10px; margin-right: 2px; cursor: grab; }
+
+    /* ── Адаптивность ── */
+    @media (max-width: 1024px) {
+      .sidebar { display: none; }
+      .filter-panel .filter-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ── Сайдбар ── -->
+  <aside class="sidebar">
+    <a class="sidebar-logo" href="/">
+      <div class="sidebar-logo-icon">CT</div>
+      <div>
+        <div class="sidebar-logo-text">CargoTrack</div>
+        <div class="sidebar-logo-sub">Pro</div>
+      </div>
+    </a>
+
+    <nav class="sidebar-nav">
+      <div class="sidebar-section">Навигация</div>
+
+      <a href="{% url 'dashboard' %}" class="sidebar-link {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
+        <i class="bi bi-speedometer2"></i> Дашборд
+      </a>
+      <a href="{% url 'cargo_list' %}" class="sidebar-link {% if request.resolver_match.url_name == 'cargo_list' %}active{% endif %}">
+        <i class="bi bi-boxes"></i> Партии (MAWB)
+      </a>
+      <a href="{% url 'all_hawbs' %}" class="sidebar-link {% if request.resolver_match.url_name == 'all_hawbs' %}active{% endif %}">
+        <i class="bi bi-list-ul"></i> Накладные (HAWB)
+      </a>
+      <a href="{% url 'goods_list' %}" class="sidebar-link {% if request.resolver_match.url_name == 'goods_list' %}active{% endif %}">
+        <i class="bi bi-grid-3x3-gap"></i> Товары
+      </a>
+
+      <a href="{% url 'workflow_list' %}" class="sidebar-link {% if request.resolver_match.url_name == 'workflow_list' or request.resolver_match.url_name == 'workflow_editor' %}active{% endif %}">
+        <i class="bi bi-diagram-3"></i> Бизнес-процессы
+      </a>
+
+      <a href="{% url 'sla_policies' %}" class="sidebar-link {% if request.resolver_match.url_name == 'sla_policies' %}active{% endif %}">
+        <i class="bi bi-hourglass-split"></i> SLA-нормативы
+      </a>
+
+      {% if user.is_staff %}
+      <a href="{% url 'team_page' %}" class="sidebar-link {% if request.resolver_match.url_name == 'team_page' %}active{% endif %}">
+        <i class="bi bi-people"></i> Команда
+      </a>
+      {% endif %}
+
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section">Справочники</div>
+
+      <a href="{% url 'faq' %}" class="sidebar-link {% if request.resolver_match.url_name == 'faq' %}active{% endif %}">
+        <i class="bi bi-question-circle"></i> Статусы
+      </a>
+      <a href="{% url 'labels_page' %}" class="sidebar-link {% if request.resolver_match.url_name == 'labels_page' %}active{% endif %}">
+        <i class="bi bi-tags"></i> Метки
+      </a>
+      {% if user.is_staff %}
+      <a href="/admin/" class="sidebar-link">
+        <i class="bi bi-gear"></i> Администрирование
+      </a>
+      {% endif %}
+    </nav>
+
+    {% if user.is_authenticated %}
+    <div class="sidebar-bottom">
+      <div class="sidebar-user">
+        <i class="bi bi-person-circle"></i>
+        <span>{{ user.get_full_name|default:user.username }}</span>
+      </div>
+      <a href="{% url 'logout' %}" class="btn-cdek-secondary w-100 text-center text-decoration-none d-block"
+         style="line-height:20px">
+        <i class="bi bi-box-arrow-right me-1"></i>Выйти
+      </a>
+    </div>
+    {% endif %}
+  </aside>
+
+  <!-- ── Основной контент ── -->
+  <div class="app-main">
+
+    <!-- Топбар -->
+    <div class="topbar">
+      <div class="topbar-breadcrumb">
+        <i class="bi bi-house" style="font-size:14px"></i>
+        <span>/</span>
+        <span class="current">{% block breadcrumb %}CargoTrack Pro{% endblock %}</span>
+      </div>
+      <div class="topbar-actions">
+        {% block topbar_actions %}{% endblock %}
+      </div>
+    </div>
+
+    <!-- Алерты -->
+    <div style="padding: 0 20px">
+      {% if messages %}
+        {% for msg in messages %}
+        <div class="ct-alert {% if msg.tags == 'success' %}success{% elif msg.tags == 'warning' %}warning{% elif msg.tags == 'error' %}error{% else %}info{% endif %} mt-2">
+          {{ msg }}
+        </div>
+        {% endfor %}
+      {% endif %}
+    </div>
+
+    <!-- Страничный контент -->
+    <div class="page-content">
+      {% block content %}{% endblock %}
+    </div>
+
+  </div><!-- /app-main -->
+</div><!-- /app-shell -->
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

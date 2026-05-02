@@ -1,0 +1,571 @@
+{% extends "cargo/base.html" %}
+{% load cargo_filters %}
+{% block title %}Все накладные HAWB — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<style>
+  .th-hdr { background: #f0f4f8; color: #374151 !important; font-size: 11px;
+            text-transform: uppercase; letter-spacing: .4px; }
+  .th-hdr a { color: #374151 !important; text-decoration: none; display: flex;
+              align-items: center; gap: 3px; }
+  .th-hdr a:hover { color: #2563eb !important; }
+  .th-hdr a i { font-size: 9px; opacity: .7; }
+  th[draggable="true"] { cursor: grab; user-select: none; }
+  th[draggable="true"]:active { cursor: grabbing; }
+  th.drag-over { outline: 2px dashed #2563eb; outline-offset: -2px; background: #eff6ff !important; }
+  th.dragging { opacity: .4; }
+  .drag-handle { color:#cbd5e1; font-size:10px; margin-right:3px; }
+  /* Масштабирование и перенос текста */
+  #hawbTable { table-layout:fixed; width:100%; }
+  #hawbTable th, #hawbTable td { overflow:hidden; word-break:break-word;
+                                  white-space:normal; vertical-align:middle; }
+  #hawbTable .th-hdr { white-space:normal; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h5 class="mb-0 fw-bold">
+    <i class="bi bi-list-ul me-2 text-primary"></i>Все индивидуальные накладные (HAWB)
+  </h5>
+  <div class="d-flex gap-2">
+    <span class="badge bg-secondary fs-6">{{ total }}</span>
+    <a href="{% url 'export_hawbs_excel' %}?q={{ q }}&logistics_status={{ filter_logistics }}&cargo_type={{ filter_type }}&shipment_type={{ filter_ship }}&unreleased={{ filter_unreleased }}"
+       class="btn btn-sm btn-success">
+      <i class="bi bi-file-earmark-excel me-1"></i>Excel
+    </a>
+  </div>
+</div>
+
+{% if cql %}
+<div class="alert {% if cql_error %}alert-warning{% else %}alert-info{% endif %} py-2 mb-2 d-flex align-items-center justify-content-between" style="font-size:12px">
+  <div>
+    <i class="bi bi-funnel-fill me-1"></i>
+    <span style="color:#6b7280">Активный CQL-фильтр:</span>
+    <code style="background:rgba(0,0,0,0.04); padding:2px 6px; border-radius:4px">{{ cql }}</code>
+    {% if cql_error %}<span class="ms-2 text-danger">⚠ {{ cql_error }}</span>{% endif %}
+  </div>
+  <div>
+    <a href="{% url 'all_hawbs' %}" class="btn btn-sm btn-outline-secondary py-0">Убрать фильтр</a>
+  </div>
+</div>
+{% endif %}
+
+<!-- Фильтры -->
+<div class="filter-bar mb-3">
+  <form method="get" class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm"
+             placeholder="HAWB, MAWB, получатель, ИНН, рег. номер ДТ...">
+    </div>
+    <div class="col-md-2">
+      <select name="logistics_status" class="form-select form-select-sm">
+        <option value="">Все лог. статусы</option>
+        {% for code, label in logistics_choices %}
+        <option value="{{ code }}" {% if filter_logistics == code %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <select name="cargo_type" class="form-select form-select-sm">
+        <option value="">Тип груза</option>
+        <option value="B2B" {% if filter_type == 'B2B' %}selected{% endif %}>B2B</option>
+        <option value="B2C" {% if filter_type == 'B2C' %}selected{% endif %}>B2C</option>
+        <option value="C2C" {% if filter_type == 'C2C' %}selected{% endif %}>C2C</option>
+      </select>
+    </div>
+    <div class="col-md-2">
+      <select name="shipment_type" class="form-select form-select-sm">
+        <option value="">Тип отправки</option>
+        <option value="IMPORT" {% if filter_ship == 'IMPORT' %}selected{% endif %}>Импорт</option>
+        <option value="EXPORT" {% if filter_ship == 'EXPORT' %}selected{% endif %}>Экспорт</option>
+      </select>
+    </div>
+    <div class="col-auto">
+      <div class="form-check form-check-inline">
+        <input class="form-check-input" type="checkbox" name="unreleased" id="unrel"
+               value="1" {% if filter_unreleased %}checked{% endif %}>
+        <label class="form-check-label small" for="unrel">Только невыпущенные</label>
+      </div>
+    </div>
+    <div class="col-auto d-flex gap-1">
+      <button type="submit" class="btn btn-sm btn-primary">
+        <i class="bi bi-search me-1"></i>Найти
+      </button>
+      {% if q or filter_logistics or filter_type or filter_ship or filter_unreleased %}
+      <a href="{% url 'all_hawbs' %}" class="btn btn-sm btn-outline-secondary">Сброс</a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+<!-- Таблица -->
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle" id="hawbTable" style="font-size:12px">
+        <thead style="border-bottom: 2px solid #cbd5e1">
+
+          {% with s=sort d=direction q=q fs=filter_logistics ft=filter_type fsh=filter_ship fu=filter_unreleased %}
+          <tr>
+
+            <th class="th-hdr px-2" draggable="true" data-col="0">
+              <span class="drag-handle">⠿</span>
+              <a href="?sort=hawb_number&dir={% if s == 'hawb_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                № HAWB
+                {% if s == 'hawb_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="1">
+              <a href="?sort=cargo_type&dir={% if s == 'cargo_type' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Тип груза
+                {% if s == 'cargo_type' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="2">
+              <a href="?sort=shipment_type&dir={% if s == 'shipment_type' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Тип отправки
+                {% if s == 'shipment_type' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="3">
+              <a href="?sort=mawb__awb_number&dir={% if s == 'mawb__awb_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                MAWB
+                {% if s == 'mawb__awb_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="4">
+              <a href="?sort=mawb__departure_iata&dir={% if s == 'mawb__departure_iata' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Маршрут
+                {% if s == 'mawb__departure_iata' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="5">
+              <a href="?sort=mawb__flight_date&dir={% if s == 'mawb__flight_date' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Дата рейса
+                {% if s == 'mawb__flight_date' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="6">
+              <a href="?sort=mawb__flight_number&dir={% if s == 'mawb__flight_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Номер рейса
+                {% if s == 'mawb__flight_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="7">
+              <a href="?sort=scan_into_bond&dir={% if s == 'scan_into_bond' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Размещение на СВХ
+                {% if s == 'scan_into_bond' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="8">
+              <a href="?sort=mawb__warehouse_license&dir={% if s == 'mawb__warehouse_license' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                № Лицензии СВХ
+                {% if s == 'mawb__warehouse_license' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="9">Ответственный</th>
+
+            <th class="th-hdr text-end" draggable="true" data-col="10">
+              <a href="?sort=weight&dir={% if s == 'weight' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Вес, кг
+                {% if s == 'weight' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr text-center" draggable="true" data-col="11">
+              <a href="?sort=pieces_declared&dir={% if s == 'pieces_declared' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Мест
+                {% if s == 'pieces_declared' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr text-center" draggable="true" data-col="12">Документы</th>
+
+            <th class="th-hdr text-center" draggable="true" data-col="12b" title="Согласовано / Всего товаров">Товары</th>
+
+            <th class="th-hdr" draggable="true" data-col="13">
+              <a href="?sort=customs_declaration_number&dir={% if s == 'customs_declaration_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Рег. номер ДТ
+                {% if s == 'customs_declaration_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="14">
+              <a href="?sort=logistics_status&dir={% if s == 'logistics_status' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Статус накладной
+                {% if s == 'logistics_status' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="15">Таймер СВХ</th>
+
+          </tr>
+          {% endwith %}
+
+        </thead>
+        <tbody>
+          {% for hawb in hawbs %}
+          <tr onclick="window.location='{% url 'hawb_detail' hawb.pk %}'" style="cursor:pointer"
+              class="{% if hawb.svh_overdue %}table-warning{% endif %}">
+
+            <!-- № HAWB -->
+            <td class="px-2 font-monospace fw-bold" style="font-size:12px;color:#1e3a5f">
+              {{ hawb.hawb_number }}
+            </td>
+
+            <!-- Тип груза -->
+            <td>
+              <span class="badge {% if hawb.cargo_type == 'B2B' %}bg-primary{% elif hawb.cargo_type == 'B2C' %}bg-info text-dark{% else %}bg-secondary{% endif %}"
+                    style="font-size:10px">{{ hawb.cargo_type }}</span>
+            </td>
+
+            <!-- Тип отправки -->
+            <td>
+              <span class="badge {% if hawb.shipment_type == 'IMPORT' %}bg-success{% else %}bg-warning text-dark{% endif %}"
+                    style="font-size:10px">{{ hawb.get_shipment_type_display }}</span>
+            </td>
+
+            <!-- MAWB -->
+            <td class="font-monospace" style="font-size:11px">
+              {% if hawb.mawb %}
+                <a href="{% url 'cargo_detail' hawb.mawb.awb_number %}"
+                   class="text-decoration-none fw-semibold" style="color:#1e3a5f"
+                   onclick="event.stopPropagation()">
+                  {{ hawb.mawb.awb_number }}
+                </a>
+              {% else %}
+                <span class="text-muted fst-italic" style="font-size:10px">Не привязан</span>
+              {% endif %}
+            </td>
+
+            <!-- Маршрут -->
+            <td>
+              {% if hawb.mawb %}
+                <span class="route-badge">
+                  {{ hawb.mawb.departure_iata|default:"?" }}→{{ hawb.mawb.arrival_iata|default:"?" }}
+                </span>
+              {% else %}—{% endif %}
+            </td>
+
+            <!-- Дата рейса -->
+            <td class="small">
+              {% if hawb.mawb and hawb.mawb.flight_date %}
+                {{ hawb.mawb.flight_date|date:"d.m.Y" }}
+              {% else %}—{% endif %}
+            </td>
+
+            <!-- Номер рейса -->
+            <td class="small font-monospace">
+              {% if hawb.mawb and hawb.mawb.flight_number %}
+                {{ hawb.mawb.flight_number }}
+              {% else %}—{% endif %}
+            </td>
+
+            <!-- Размещение на СВХ -->
+            <td class="small">
+              {% if hawb.scan_into_bond %}
+                {{ hawb.scan_into_bond|date:"d.m.Y H:i" }}
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+
+            <!-- № Лицензии СВХ -->
+            <td class="small">
+              {% if hawb.mawb %}{{ hawb.mawb.warehouse_license|default:"—" }}{% else %}—{% endif %}
+            </td>
+
+            <!-- Ответственный -->
+            <td class="small">
+              {% if hawb.assigned_to %}
+                <div class="d-flex align-items-center gap-1">
+                  <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0"
+                       style="width:22px;height:22px;font-size:10px;font-weight:700">
+                    {{ hawb.assigned_to.first_name|first|default:hawb.assigned_to.username|first|upper }}
+                  </div>
+                  {{ hawb.assigned_to.get_full_name|default:hawb.assigned_to.username|truncatechars:14 }}
+                </div>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+
+            <!-- Вес -->
+            <td class="text-end pe-2 small fw-semibold">
+              {{ hawb.weight|floatformat:2|default:"—" }}
+            </td>
+
+            <!-- Мест -->
+            <td class="text-center small">
+              {{ hawb.pieces_declared }}
+            </td>
+
+            <!-- Документы (с попапом) -->
+            <td class="text-center">
+              <span class="badge {% if hawb.docs_ready %}bg-success{% else %}bg-warning text-dark{% endif %} px-2"
+                    style="font-size:11px;cursor:help"
+                    data-bs-toggle="popover"
+                    data-bs-placement="left"
+                    data-bs-html="true"
+                    data-bs-trigger="hover focus"
+                    data-bs-content="<div style='font-size:12px;min-width:170px'>
+                      <div class='d-flex justify-content-between mb-1'>
+                        <span>Инвойс</span>
+                        <span class='{% if hawb.doc_invoice %}text-success{% else %}text-danger{% endif %}'>
+                          {% if hawb.doc_invoice %}✓{% else %}✗{% endif %}
+                        </span>
+                      </div>
+                      <div class='d-flex justify-content-between mb-1'>
+                        <span>Упак. лист</span>
+                        <span class='{% if hawb.doc_packing_list %}text-success{% else %}text-danger{% endif %}'>
+                          {% if hawb.doc_packing_list %}✓{% else %}✗{% endif %}
+                        </span>
+                      </div>
+                      <div class='d-flex justify-content-between mb-1'>
+                        <span>Разреш. доки</span>
+                        <span class='{% if hawb.doc_permit %}text-success{% else %}text-danger{% endif %}'>
+                          {% if hawb.doc_permit %}✓{% else %}✗{% endif %}
+                        </span>
+                      </div>
+                      <div class='d-flex justify-content-between'>
+                        <span>Тех. описание</span>
+                        <span class='{% if hawb.doc_tech_desc %}text-success{% else %}text-danger{% endif %}'>
+                          {% if hawb.doc_tech_desc %}✓{% else %}✗{% endif %}
+                        </span>
+                      </div>
+                    </div>">
+                {% if hawb.docs_ready %}<i class="bi bi-check-all me-1"></i>{% endif %}
+                {{ hawb.docs_count }}/{{ hawb.docs_required }}
+              </span>
+            </td>
+
+            <!-- Товары: согласовано/всего -->
+            <td class="text-center">
+              {% if hawb.total_goods_count > 0 %}
+                <span class="badge {% if hawb.approved_goods_count == hawb.total_goods_count %}bg-success{% elif hawb.approved_goods_count > 0 %}bg-warning text-dark{% else %}bg-secondary{% endif %}"
+                      style="font-size:11px"
+                      title="Согласовано {{ hawb.approved_goods_count }} из {{ hawb.total_goods_count }}">
+                  {{ hawb.approved_goods_count }}/{{ hawb.total_goods_count }}
+                </span>
+              {% else %}
+                <span class="text-muted" style="font-size:11px">—</span>
+              {% endif %}
+            </td>
+
+            <!-- Рег. номер ДТ -->
+            <td class="font-monospace" style="font-size:11px">
+              {{ hawb.customs_declaration_number|default:"—" }}
+            </td>
+
+            <!-- Статус накладной -->
+            <td style="min-width:150px">
+              <span class="badge bg-{{ hawb.status_color }} {% if hawb.status_color == 'warning' %}text-dark{% endif %}"
+                    style="font-size:10px;white-space:normal;line-height:1.4">
+                {{ hawb.logistics_status_display }}
+              </span>
+              {% if hawb.customs_status and hawb.is_on_customs %}
+              <div class="mt-1">
+                <span class="badge bg-{{ hawb.customs_status_color }} {% if hawb.customs_status_color == 'warning' %}text-dark{% endif %}"
+                      style="font-size:9px">
+                  <i class="bi bi-shield-check me-1"></i>{{ hawb.customs_status_label }}
+                </span>
+              </div>
+              {% endif %}
+            </td>
+
+            <!-- Таймер СВХ -->
+            <td class="small {% if hawb.svh_overdue %}text-danger fw-bold{% else %}text-muted{% endif %}">
+              {% if hawb.scan_into_bond %}
+                <i class="bi bi-clock{% if hawb.svh_overdue %}-fill{% endif %} me-1"></i>
+                {{ hawb.svh_timer_display }}
+                {% if hawb.svh_overdue %}
+                  <span class="badge bg-danger ms-1" style="font-size:9px">просрочка</span>
+                {% endif %}
+              {% else %}—{% endif %}
+            </td>
+
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="17" class="text-center text-muted py-5">
+              <i class="bi bi-inbox d-block" style="font-size:2.5rem"></i>
+              <div class="mt-2">Накладные не найдены</div>
+              <a href="{% url 'hawb_create_standalone' %}" class="btn btn-sm btn-primary mt-2">
+                <i class="bi bi-plus-lg me-1"></i>Создать первый HAWB
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Popovers
+document.querySelectorAll('[data-bs-toggle="popover"]').forEach(el => {
+  new bootstrap.Popover(el, { sanitize: false });
+});
+
+// Drag-and-drop столбцов
+(function() {
+  const table = document.getElementById('hawbTable');
+  if (!table) return;
+  const STORAGE_KEY = 'hawbTableColOrder';
+  let dragSrc = null;
+
+  function getHeaders() {
+    return Array.from(table.querySelector('thead tr').querySelectorAll('th'));
+  }
+
+  // Перемещает столбец без сохранения (используется при restore)
+  function moveColumnSilent(fromIdx, toIdx) {
+    if (fromIdx === toIdx) return;
+    table.querySelectorAll('tr').forEach(row => {
+      const cells = Array.from(row.children);
+      if (cells.length <= Math.max(fromIdx, toIdx)) return;
+      const moving = cells[fromIdx];
+      const target = cells[toIdx];
+      if (moving && target) {
+        if (fromIdx < toIdx) row.insertBefore(moving, target.nextSibling);
+        else row.insertBefore(moving, target);
+      }
+    });
+  }
+
+  function saveOrder() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(getHeaders().map(th => th.dataset.col)));
+  }
+
+  function restoreOrder() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+      if (!saved || !Array.isArray(saved)) return;
+      for (let ti = 0; ti < saved.length; ti++) {
+        const colId = saved[ti];
+        if (!colId) continue;
+        const headers = getHeaders();
+        const ci = headers.findIndex(th => th.dataset.col === colId);
+        if (ci !== -1 && ci !== ti) moveColumnSilent(ci, ti);
+      }
+    } catch(e) {}
+  }
+
+  // Вешаем обработчики один раз — они привязаны к DOM-элементам
+  // и не требуют переинициализации после перестановки столбцов
+  function initDrag() {
+    getHeaders().forEach(th => {
+      th.querySelectorAll('a').forEach(a => a.setAttribute('draggable', 'false'));
+
+      th.addEventListener('dragstart', e => {
+        dragSrc = th;
+        e.dataTransfer.effectAllowed = 'move';
+        setTimeout(() => th.classList.add('dragging'), 0);
+      });
+      th.addEventListener('dragend', () => {
+        th.classList.remove('dragging');
+        getHeaders().forEach(h => h.classList.remove('drag-over'));
+        dragSrc = null;
+      });
+      th.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        getHeaders().forEach(h => h.classList.remove('drag-over'));
+        if (th !== dragSrc) th.classList.add('drag-over');
+      });
+      th.addEventListener('dragleave', () => {
+        th.classList.remove('drag-over');
+      });
+      th.addEventListener('drop', e => {
+        e.preventDefault();
+        th.classList.remove('drag-over');
+        if (!dragSrc || dragSrc === th) return;
+        const ths = getHeaders();
+        const si = ths.indexOf(dragSrc);
+        const di = ths.indexOf(th);
+        if (si >= 0 && di >= 0) {
+          moveColumnSilent(si, di);
+          saveOrder(); // сохраняем только итоговый порядок
+        }
+      });
+    });
+  }
+
+  restoreOrder();
+  initDrag(); // вызывается один раз при загрузке
+})();
+
+// ── Масштабирование столбцов ──
+(function(tableId, storageKey) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  function saveWidths() {
+    const ths = table.querySelectorAll('thead tr:first-child th');
+    localStorage.setItem(storageKey, JSON.stringify(Array.from(ths).map(th => th.offsetWidth + 'px')));
+  }
+  function restoreWidths() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey));
+      if (!saved) return;
+      table.querySelectorAll('thead tr:first-child th').forEach((th, i) => {
+        if (saved[i]) { th.style.width = saved[i]; th.style.minWidth = saved[i]; }
+      });
+    } catch(e) {}
+  }
+  function addResizers() {
+    table.querySelectorAll('thead tr:first-child th').forEach(th => {
+      if (th.querySelector('.col-resizer')) return;
+      th.style.position = 'relative';
+      const r = document.createElement('div');
+      r.className = 'col-resizer';
+      r.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:6px;cursor:col-resize;z-index:10;border-right:2px solid transparent;';
+      r.addEventListener('mouseenter', () => r.style.borderRightColor = '#2563eb');
+      r.addEventListener('mouseleave', () => r.style.borderRightColor = 'transparent');
+      let startX, startW;
+      r.addEventListener('mousedown', e => {
+        e.preventDefault(); e.stopPropagation();
+        startX = e.pageX; startW = th.offsetWidth;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        const line = document.createElement('div');
+        line.id = 'rsz-line';
+        line.style.cssText = `position:fixed;top:0;bottom:0;width:2px;background:#2563eb;opacity:.4;z-index:9999;pointer-events:none;left:${e.clientX}px`;
+        document.body.appendChild(line);
+        const onMove = e => {
+          const w = Math.max(30, startW + e.pageX - startX);
+          th.style.width = w + 'px'; th.style.minWidth = w + 'px';
+          const l = document.getElementById('rsz-line'); if (l) l.style.left = e.clientX + 'px';
+        };
+        const onUp = () => {
+          document.body.style.cursor = ''; document.body.style.userSelect = '';
+          r.style.borderRightColor = 'transparent';
+          const l = document.getElementById('rsz-line'); if (l) l.remove();
+          saveWidths();
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+      th.appendChild(r);
+    });
+  }
+  restoreWidths();
+  addResizers();
+})('hawbTable', 'hawbTableWidths');
+</script>
+{% endblock %}

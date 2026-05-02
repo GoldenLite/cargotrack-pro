@@ -1,0 +1,50 @@
+# Секреты и локальная конфигурация
+.env
+.env.local
+.env.*.local
+
+# База данных
+db.sqlite3
+db.sqlite3-journal
+db.sqlite3.bak*
+*.sqlite3
+
+# Логи
+*.log
+cargotrack.log
+
+# Сборка статики
+staticfiles/
+media/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
+ENV/
+
+# Локальные кэши инструментов
+.playwright-mcp/
+.claude/settings.local.json
+.claude/.credentials.json

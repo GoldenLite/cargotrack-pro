@@ -1,0 +1,292 @@
+{% extends "cargo/base.html" %}
+{% load static %}
+{% block title %}SLA-нормативы — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<style>
+  .sla-table { font-size: 13px; }
+  .sla-table th { background: #f8fafc; color: #374151; font-weight: 600; }
+  .sla-table td { vertical-align: middle; }
+  .sla-badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+  .sla-badge-cargo { background:#eef2ff; color:#4338ca; }
+  .sla-badge-hawb  { background:#fffbeb; color:#92400e; }
+  .sla-inactive { opacity: 0.5; }
+  .sla-hours-input { width: 80px; font-size: 13px; }
+  .sla-pct-input   { width: 60px; font-size: 13px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-3">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h4 class="mb-0"><i class="bi bi-hourglass-split me-2"></i>SLA-нормативы</h4>
+    <div class="d-flex gap-2">
+      <select id="filterEntity" class="form-select form-select-sm" style="width:auto">
+        <option value="">Все сущности</option>
+        <option value="cargo">Партии</option>
+        <option value="hawb">Накладные</option>
+      </select>
+      <button class="btn btn-primary btn-sm" id="btnAdd">
+        <i class="bi bi-plus-lg me-1"></i>Добавить норматив
+      </button>
+    </div>
+  </div>
+
+  <div class="alert alert-info small">
+    <i class="bi bi-info-circle me-1"></i>
+    SLA считается с момента входа сущности в указанный этап/статус.
+    Перекрыть норматив на конкретном шаге процесса можно в редакторе бизнес-процесса.
+  </div>
+
+  <div class="card shadow-sm">
+    <div class="table-responsive">
+      <table class="table table-hover sla-table mb-0">
+        <thead>
+          <tr>
+            <th style="width:40px">#</th>
+            <th>Название</th>
+            <th style="width:120px">Сущность</th>
+            <th style="width:180px">Поле</th>
+            <th style="width:200px">Значение</th>
+            <th style="width:120px">Норматив (часы)</th>
+            <th style="width:120px">Порог жёлтой, %</th>
+            <th style="width:90px" class="text-center">Активно</th>
+            <th style="width:70px"></th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: add/edit policy -->
+<div class="modal fade" id="policyModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="policyModalTitle">Новый SLA-норматив</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="fId">
+        <div class="mb-2">
+          <label class="form-label small">Название (необязательно)</label>
+          <input type="text" id="fName" class="form-control form-control-sm"
+                 placeholder="Например: HAWB прибыл в страну назначения — 4ч">
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small">Сущность</label>
+            <select id="fEntity" class="form-select form-select-sm">
+              <option value="cargo">Партия (MAWB)</option>
+              <option value="hawb">Накладная (HAWB)</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small">Поле статуса</label>
+            <select id="fField" class="form-select form-select-sm"></select>
+          </div>
+        </div>
+        <div class="mt-2">
+          <label class="form-label small">Значение статуса</label>
+          <select id="fValue" class="form-select form-select-sm"></select>
+        </div>
+        <div class="row g-2 mt-2">
+          <div class="col-6">
+            <label class="form-label small">Норматив (часы)</label>
+            <input type="number" id="fHours" class="form-control form-control-sm"
+                   step="0.25" min="0.01" value="4">
+          </div>
+          <div class="col-6">
+            <label class="form-label small">Порог жёлтой зоны, %</label>
+            <input type="number" id="fWarn" class="form-control form-control-sm"
+                   step="1" min="1" max="99" value="75">
+          </div>
+        </div>
+        <div class="form-check mt-3">
+          <input class="form-check-input" type="checkbox" id="fActive" checked>
+          <label class="form-check-label" for="fActive">Активно</label>
+        </div>
+        <div id="formError" class="alert alert-danger mt-2 d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Отмена</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnSave">Сохранить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const STATUS_CHOICES = {{ status_choices|safe }};
+const FIELD_OPTIONS_BY_ENTITY = {
+  cargo: [['stage', 'Этап партии']],
+  hawb:  [['logistics_status', 'Лог. статус'], ['customs_status', 'Там. статус']],
+};
+
+function getCookie(name) {
+  const m = document.cookie.match(new RegExp('(^|; )' + name + '=([^;]*)'));
+  return m ? decodeURIComponent(m[2]) : '';
+}
+const csrftoken = getCookie('csrftoken');
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadPolicies() {
+  const et = document.getElementById('filterEntity').value;
+  const url = '/api/v1/sla-policies/' + (et ? '?entity_type=' + et : '');
+  const resp = await fetch(url);
+  const data = await resp.json();
+  renderTable(data.policies || []);
+}
+
+function renderTable(rows) {
+  const tbody = document.getElementById('tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">Нет нормативов — добавьте первый</td></tr>';
+    return;
+  }
+  const valueLabel = (field, value) => {
+    const list = STATUS_CHOICES[field] || [];
+    const m = list.find(o => o.value === value);
+    return m ? m.label : value;
+  };
+  tbody.innerHTML = rows.map((p, i) => `
+    <tr class="${p.is_active ? '' : 'sla-inactive'}">
+      <td class="text-muted small">${i + 1}</td>
+      <td>${escHtml(p.name || '—')}</td>
+      <td><span class="sla-badge sla-badge-${p.entity_type}">${escHtml(p.entity_type_display)}</span></td>
+      <td class="small">${escHtml(p.status_field_display)}</td>
+      <td class="small">${escHtml(valueLabel(p.status_field, p.status_value))}
+        <div class="text-muted" style="font-size:10px">${escHtml(p.status_value)}</div>
+      </td>
+      <td><strong>${p.hours}</strong> <span class="text-muted small">ч</span></td>
+      <td>${p.warning_threshold_pct}%</td>
+      <td class="text-center">
+        <input type="checkbox" ${p.is_active ? 'checked' : ''}
+               onchange="toggleActive(${p.id}, this.checked)">
+      </td>
+      <td>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="editPolicy(${p.id})" title="Редактировать">
+          <i class="bi bi-pencil"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-danger py-0 px-2" onclick="deletePolicy(${p.id})" title="Удалить">
+          <i class="bi bi-trash"></i>
+        </button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+let _cache = [];
+async function refreshCache() {
+  const resp = await fetch('/api/v1/sla-policies/');
+  const data = await resp.json();
+  _cache = data.policies || [];
+  renderTable(_cache);
+}
+
+function syncFieldOptions() {
+  const ent = document.getElementById('fEntity').value;
+  const sel = document.getElementById('fField');
+  const opts = FIELD_OPTIONS_BY_ENTITY[ent] || [];
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${escHtml(l)}</option>`).join('');
+  syncValueOptions();
+}
+
+function syncValueOptions() {
+  const field = document.getElementById('fField').value;
+  const sel = document.getElementById('fValue');
+  const opts = STATUS_CHOICES[field] || [];
+  sel.innerHTML = opts.map(o => `<option value="${o.value}">${escHtml(o.label)}</option>`).join('');
+}
+
+function openModal(policy) {
+  document.getElementById('formError').classList.add('d-none');
+  if (policy) {
+    document.getElementById('policyModalTitle').textContent = 'Редактирование SLA';
+    document.getElementById('fId').value    = policy.id;
+    document.getElementById('fName').value  = policy.name || '';
+    document.getElementById('fEntity').value = policy.entity_type;
+    syncFieldOptions();
+    document.getElementById('fField').value = policy.status_field;
+    syncValueOptions();
+    document.getElementById('fValue').value = policy.status_value;
+    document.getElementById('fHours').value = policy.hours;
+    document.getElementById('fWarn').value  = policy.warning_threshold_pct;
+    document.getElementById('fActive').checked = policy.is_active;
+  } else {
+    document.getElementById('policyModalTitle').textContent = 'Новый SLA-норматив';
+    document.getElementById('fId').value    = '';
+    document.getElementById('fName').value  = '';
+    document.getElementById('fEntity').value = 'hawb';
+    syncFieldOptions();
+    document.getElementById('fHours').value = 4;
+    document.getElementById('fWarn').value  = 75;
+    document.getElementById('fActive').checked = true;
+  }
+  new bootstrap.Modal(document.getElementById('policyModal')).show();
+}
+
+async function save() {
+  const id = document.getElementById('fId').value;
+  const body = {
+    name: document.getElementById('fName').value,
+    entity_type: document.getElementById('fEntity').value,
+    status_field: document.getElementById('fField').value,
+    status_value: document.getElementById('fValue').value,
+    hours: parseFloat(document.getElementById('fHours').value),
+    warning_threshold_pct: parseInt(document.getElementById('fWarn').value, 10),
+    is_active: document.getElementById('fActive').checked,
+  };
+  const url = id ? `/api/v1/sla-policies/${id}/` : '/api/v1/sla-policies/';
+  const resp = await fetch(url, {
+    method: id ? 'PUT' : 'POST',
+    headers: {'Content-Type':'application/json','X-CSRFToken': csrftoken},
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({error: 'Ошибка сохранения'}));
+    const box = document.getElementById('formError');
+    box.textContent = err.error || 'Ошибка';
+    box.classList.remove('d-none');
+    return;
+  }
+  bootstrap.Modal.getInstance(document.getElementById('policyModal')).hide();
+  refreshCache();
+}
+
+async function deletePolicy(id) {
+  if (!confirm('Удалить SLA-норматив?')) return;
+  await fetch(`/api/v1/sla-policies/${id}/`, {
+    method: 'DELETE',
+    headers: {'X-CSRFToken': csrftoken},
+  });
+  refreshCache();
+}
+
+async function toggleActive(id, v) {
+  await fetch(`/api/v1/sla-policies/${id}/`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json','X-CSRFToken': csrftoken},
+    body: JSON.stringify({is_active: v}),
+  });
+  refreshCache();
+}
+
+function editPolicy(id) {
+  const p = _cache.find(x => x.id === id);
+  if (p) openModal(p);
+}
+
+document.getElementById('btnAdd').addEventListener('click', () => openModal(null));
+document.getElementById('btnSave').addEventListener('click', save);
+document.getElementById('fEntity').addEventListener('change', syncFieldOptions);
+document.getElementById('fField').addEventListener('change', syncValueOptions);
+document.getElementById('filterEntity').addEventListener('change', loadPolicies);
+refreshCache();
+</script>
+{% endblock %}

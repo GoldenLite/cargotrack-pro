@@ -1,0 +1,755 @@
+{% extends "cargo/base.html" %}
+{% load static cargo_filters l10n %}
+{% block title %}HAWB — {{ cargo.awb_number }} — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'cargo/css/sla_cell.css' %}">
+<script src="{% static 'cargo/js/sla_cell.js' %}"></script>
+<style>
+  .filter-btn {
+    border:none; background:transparent; color:#b0bec5;
+    font-size:10px; padding:0 2px; cursor:pointer;
+    border-radius:3px; line-height:1; flex-shrink:0;
+    transition:color .15s,background .15s;
+  }
+  .filter-btn:hover { color:#2563eb; background:#eff6ff; }
+  .filter-btn.active { color:#2563eb; background:#dbeafe; }
+  .col-filter-popup {
+    position:fixed; z-index:10000;
+    background:#fff; border:1px solid #dee2e6;
+    border-radius:8px; box-shadow:0 6px 24px rgba(0,0,0,.15);
+    padding:10px; min-width:200px; max-width:300px;
+    max-height:360px; overflow-y:auto; font-size:12px;
+  }
+  .col-filter-popup .filter-values { max-height:200px; overflow-y:auto; margin:0; }
+  .col-filter-popup label { display:flex; align-items:center; gap:6px;
+    padding:3px 2px; cursor:pointer; border-radius:3px; }
+  .col-filter-popup label:hover { background:#f8fafc; }
+  .col-filter-popup .footer-btns { display:flex; gap:6px; padding-top:8px;
+    border-top:1px solid #e2e8f0; margin-top:6px; }
+  #hawbTable th { white-space:normal; }
+  .th-cell { display:flex; align-items:center; gap:3px; flex-wrap:nowrap; }
+  .hawb-row-released { background-color: rgba(25, 135, 84, 0.13) !important; }
+  .hawb-row-released:hover { background-color: rgba(25, 135, 84, 0.22) !important; }
+  .hawb-row-filed { background-color: rgba(255, 140, 0, 0.13) !important; }
+  .hawb-row-filed:hover { background-color: rgba(255, 140, 0, 0.22) !important; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <div>
+    <a href="{% url 'cargo_detail' cargo.awb_number %}" class="text-muted text-decoration-none small">
+      <i class="bi bi-arrow-left me-1"></i>{{ cargo.awb_number }}
+    </a>
+    <h5 class="mb-0 fw-bold mt-1">
+      <i class="bi bi-list-ul me-2 text-primary"></i>
+      Индивидуальные накладные (HAWB) — <span class="font-monospace">{{ cargo.awb_number }}</span>
+    </h5>
+  </div>
+  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addHawbModal">
+    <i class="bi bi-plus-lg me-1"></i>Добавить HAWB
+  </button>
+</div>
+
+<!-- Статистика -->
+<div class="row g-3 mb-3">
+  <div class="col-6 col-md-3">
+    <div class="card border-0 shadow-sm text-center py-2">
+      <div class="fs-3 fw-bold text-primary">{{ total_hawbs }}</div>
+      <small class="text-muted">Всего HAWB</small>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card border-0 shadow-sm text-center py-2">
+      <div class="fs-3 fw-bold text-success">{{ docs_complete }}</div>
+      <small class="text-muted"><i class="bi bi-folder-check me-1"></i>Документы готовы</small>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card border-0 shadow-sm text-center py-2">
+      <div class="fs-3 fw-bold text-success">{{ released }}</div>
+      <small class="text-muted"><i class="bi bi-check2-circle me-1"></i>Выпущено</small>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card border-0 shadow-sm text-center py-2">
+      <div class="fs-3 fw-bold text-danger">{% if total_hawbs %}{{ total_hawbs|add:"-0" }}{% else %}0{% endif %}</div>
+      <small class="text-muted"><i class="bi bi-hourglass-split me-1"></i>В обработке</small>
+    </div>
+  </div>
+</div>
+
+<!-- Таблица -->
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle" id="hawbTable">
+        <thead>
+          <tr style="background:#f0f4f8;border-bottom:2px solid #cbd5e1;font-size:12px">
+            <th class="px-3" style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=hawb_number&dir={% if sort == 'hawb_number' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  № HAWB {% if sort == 'hawb_number' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=customs_status&dir={% if sort == 'customs_status' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  Тамож. статус {% if sort == 'customs_status' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                Получатель / ИНН
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=weight&dir={% if sort == 'weight' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  Вес {% if sort == 'weight' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=pieces_declared&dir={% if sort == 'pieces_declared' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  Места {% if sort == 'pieces_declared' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=customs_declaration_number&dir={% if sort == 'customs_declaration_number' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  Рег. номер ДТ {% if sort == 'customs_declaration_number' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                <a href="?sort=invoice_value&dir={% if sort == 'invoice_value' and direction == 'asc' %}desc{% else %}asc{% endif %}"
+                   class="text-decoration-none" style="color:#374151">
+                  Стоимость {% if sort == 'invoice_value' %}<i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th class="text-center" style="color:#374151">
+              <div class="th-cell justify-content-center">
+                Документы
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th class="text-center" style="color:#374151">
+              <div class="th-cell justify-content-center">
+                Готовность
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                Ответственный
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th style="color:#374151">
+              <div class="th-cell">
+                Таймер
+                <button class="filter-btn" type="button" title="Фильтр">▼</button>
+              </div>
+            </th>
+            <th class="text-center" style="color:#374151">
+              <div class="th-cell">SLA лог.</div>
+            </th>
+            <th class="text-center" style="color:#374151">
+              <div class="th-cell">SLA там.</div>
+            </th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for hawb in hawbs %}
+          <tr class="{% if hawb.customs_status == 'RELEASED' %}hawb-row-released{% elif hawb.customs_status == 'FILED' %}hawb-row-filed{% endif %}">
+
+            <!-- Номер — ссылка на карточку HAWB -->
+            <td class="px-3 font-monospace fw-bold" style="font-size:13px">
+              <a href="{% url 'hawb_detail' hawb.pk %}" class="text-decoration-none" style="color:#1e3a5f">
+                {{ hawb.hawb_number }}
+              </a>
+            </td>
+
+            <!-- Таможенный статус -->
+            <td>
+              {% if hawb.customs_status %}
+              <span class="badge bg-{{ hawb.customs_status_color }}{% if hawb.customs_status_color == 'warning' or hawb.customs_status_color == 'info' %} text-dark{% endif %}"
+                    style="font-size:11px;white-space:normal;max-width:130px">
+                {% if hawb.customs_status == 'RELEASED' %}<i class="bi bi-check2-circle me-1"></i>
+                {% elif hawb.customs_status == 'FILED' %}<i class="bi bi-send me-1"></i>
+                {% elif hawb.customs_status == 'EXAMINATION' %}<i class="bi bi-search me-1"></i>
+                {% elif hawb.customs_status == 'HOLD' %}<i class="bi bi-pause-circle me-1"></i>
+                {% elif hawb.customs_status == 'REJECTED' %}<i class="bi bi-x-circle me-1"></i>
+                {% elif hawb.customs_status == 'BROKER_CHECK' %}<i class="bi bi-eye me-1"></i>
+                {% elif hawb.customs_status == 'READY_TO_FILE' %}<i class="bi bi-clock me-1"></i>
+                {% endif %}
+                {{ hawb.customs_status_label }}
+              </span>
+              {% else %}
+              <span class="text-muted" style="font-size:12px">—</span>
+              {% endif %}
+            </td>
+
+            <!-- Получатель -->
+            <td class="small">
+              <div class="fw-semibold">{{ hawb.consignee_name|default:"—"|truncatechars:22 }}</div>
+              {% if hawb.consignee_inn %}<div class="text-muted" style="font-size:10px">ИНН: {{ hawb.consignee_inn }}</div>{% endif %}
+            </td>
+
+            <!-- Вес -->
+            <td class="small text-end pe-2">{{ hawb.weight|floatformat:2|default:"—" }}<span class="text-muted"> кг</span></td>
+
+            <!-- Места -->
+            <td class="text-center small">
+              {{ hawb.pieces_declared }}
+            </td>
+
+            <!-- Рег. номер ДТ -->
+            <td class="font-monospace" style="font-size:11px">{{ hawb.customs_declaration_number|default:"—" }}</td>
+
+            <!-- Стоимость -->
+            <td class="small text-end pe-2">
+              {% if hawb.invoice_value %}{{ hawb.invoice_value }}<span class="text-muted ms-1">{{ hawb.invoice_currency }}</span>
+              {% else %}—{% endif %}
+            </td>
+
+            <!-- Документы — одна ячейка с тултипом -->
+            <td class="text-center">
+              {% with tooltip="Инвойс: "|add:hawb.doc_invoice|yesno:"✓,✗"|add:" | Упак.лист: "|add:hawb.doc_packing_list|yesno:"✓,✗"|add:" | Разреш.: "|add:hawb.doc_permit|yesno:"✓,✗"|add:" | Тех.описание: "|add:hawb.doc_tech_desc|yesno:"✓,✗" %}
+              <span class="badge {% if hawb.docs_ready %}bg-success{% else %}bg-warning text-dark{% endif %} px-2"
+                    style="font-size:11px;cursor:help"
+                    data-bs-toggle="popover"
+                    data-bs-placement="left"
+                    data-bs-html="true"
+                    data-bs-trigger="hover focus"
+                    data-bs-content="
+                      <div style='font-size:12px;min-width:160px'>
+                        <div class='d-flex justify-content-between gap-3'>
+                          <span>Инвойс</span>
+                          {% if hawb.doc_invoice %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}
+                        </div>
+                        <div class='d-flex justify-content-between gap-3'>
+                          <span>Упак. лист</span>
+                          {% if hawb.doc_packing_list %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}
+                        </div>
+                        <div class='d-flex justify-content-between gap-3'>
+                          <span>Разреш. доки</span>
+                          {% if hawb.doc_permit %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}
+                        </div>
+                        <div class='d-flex justify-content-between gap-3'>
+                          <span>Тех. описание</span>
+                          {% if hawb.doc_tech_desc %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}
+                        </div>
+                      </div>">
+                {% if hawb.docs_ready %}
+                  <i class="bi bi-check-all me-1"></i>{{ hawb.docs_count }}/{{ hawb.docs_required }}
+                {% else %}
+                  {{ hawb.docs_count }}/{{ hawb.docs_required }}
+                {% endif %}
+              </span>
+              {% endwith %}
+            </td>
+
+            <!-- Готовность -->
+            <td class="text-center">
+              {% if hawb.docs_ready %}
+                <span class="badge bg-success px-2" style="font-size:10px">
+                  <i class="bi bi-check-all me-1"></i>Готово
+                </span>
+              {% else %}
+                <span class="badge bg-warning text-dark px-2" style="font-size:10px">
+                  Не готово
+                </span>
+              {% endif %}
+            </td>
+
+            <!-- Ответственный -->
+            <td class="small">
+              {% if hawb.assigned_to %}
+                <div class="d-flex align-items-center gap-1">
+                  <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0"
+                       style="width:24px;height:24px;font-size:11px;font-weight:700">
+                    {{ hawb.assigned_to.first_name|first|default:hawb.assigned_to.username|first|upper }}
+                  </div>
+                  <span>{{ hawb.assigned_to.get_full_name|default:hawb.assigned_to.username|truncatechars:16 }}</span>
+                </div>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+
+
+            <!-- Таймер -->
+            <td class="small text-muted">
+              <i class="bi bi-clock me-1"></i>
+              {{ hawb.status_timer_display }}
+            </td>
+
+            <!-- SLA (логистика) -->
+            <td class="text-center">
+              {% if hawb.sla_logistics %}
+                <div class="sla-cell"
+                     data-deadline="{{ hawb.sla_logistics.deadline_iso }}"
+                     data-total="{{ hawb.sla_logistics.total_seconds }}"
+                     data-warn="{{ hawb.sla_logistics.warning_threshold_pct }}">
+                  <div class="sla-bar"><div class="sla-fill"></div></div>
+                  <div class="sla-text"></div>
+                </div>
+              {% else %}
+                <span class="sla-dash">—</span>
+              {% endif %}
+            </td>
+
+            <!-- SLA (таможня) -->
+            <td class="text-center">
+              {% if hawb.sla_customs %}
+                <div class="sla-cell"
+                     data-deadline="{{ hawb.sla_customs.deadline_iso }}"
+                     data-total="{{ hawb.sla_customs.total_seconds }}"
+                     data-warn="{{ hawb.sla_customs.warning_threshold_pct }}">
+                  <div class="sla-bar"><div class="sla-fill"></div></div>
+                  <div class="sla-text"></div>
+                </div>
+              {% else %}
+                <span class="sla-dash">—</span>
+              {% endif %}
+            </td>
+
+            <!-- Редактировать -->
+            <td>
+              <button class="btn btn-outline-secondary btn-sm py-0 px-2"
+                      data-bs-toggle="modal"
+                      data-bs-target="#editModal{{ hawb.pk }}"
+                      title="Редактировать">
+                <i class="bi bi-pencil"></i>
+              </button>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="17" class="text-center text-muted py-5">
+              <i class="bi bi-inbox d-block" style="font-size:2.5rem"></i>
+              <div class="mt-2">HAWB не добавлены</div>
+              <button class="btn btn-sm btn-primary mt-2" data-bs-toggle="modal" data-bs-target="#addHawbModal">
+                <i class="bi bi-plus-lg me-1"></i>Добавить первый HAWB
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════ МОДАЛЬНЫЕ ОКНА РЕДАКТИРОВАНИЯ ═══════ -->
+{% for hawb in hawbs %}
+<div class="modal fade" id="editModal{{ hawb.pk }}" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#1e3a5f;color:#fff">
+        <h6 class="modal-title fw-bold">
+          <i class="bi bi-pencil me-2"></i>Редактировать HAWB <span class="font-monospace">{{ hawb.hawb_number }}</span>
+        </h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'hawb_update' hawb.pk %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <div class="row g-3">
+
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Ответственный</label>
+              <select name="assigned_to" class="form-select form-select-sm">
+                <option value="">— не назначен —</option>
+                {% for u in all_users %}
+                <option value="{{ u.pk }}" {% if hawb.assigned_to_id == u.pk %}selected{% endif %}>
+                  {{ u.get_full_name|default:u.username }}
+                </option>
+                {% endfor %}
+              </select>
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Номер ТД</label>
+              <input type="text" name="customs_declaration_number"
+                     value="{{ hawb.customs_declaration_number }}"
+                     class="form-control form-control-sm font-monospace"
+                     placeholder="10000/010125/0000000">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Вес (кг)</label>
+              <input type="number" name="weight" value="{{ hawb.weight|default_if_none:''|unlocalize }}"
+                     class="form-control form-control-sm" step="0.01" min="0">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" value="{{ hawb.pieces_declared }}"
+                     class="form-control form-control-sm" min="1">
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Получатель</label>
+              <input type="text" name="consignee_name" value="{{ hawb.consignee_name }}"
+                     class="form-control form-control-sm">
+            </div>
+
+            <!-- Документы -->
+            <div class="col-12">
+              <label class="form-label small fw-semibold mb-2">
+                <i class="bi bi-folder-check me-1 text-primary"></i>
+                Документы для таможенного оформления
+              </label>
+              <div class="row g-2">
+
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100
+                    {% if hawb.doc_invoice %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_invoice"
+                           id="di_{{ hawb.pk }}" {% if hawb.doc_invoice %}checked{% endif %}>
+                    <label class="form-check-label" for="di_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-receipt me-1 text-primary"></i>Инвойс</div>
+                      <div class="text-muted" style="font-size:11px">Коммерческий инвойс от отправителя</div>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100
+                    {% if hawb.doc_packing_list %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_packing_list"
+                           id="dpl_{{ hawb.pk }}" {% if hawb.doc_packing_list %}checked{% endif %}>
+                    <label class="form-check-label" for="dpl_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-box me-1 text-primary"></i>Упаковочный лист</div>
+                      <div class="text-muted" style="font-size:11px">Packing list с перечнем вложений</div>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100
+                    {% if hawb.doc_permit %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_permit"
+                           id="dpe_{{ hawb.pk }}" {% if hawb.doc_permit %}checked{% endif %}>
+                    <label class="form-check-label" for="dpe_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-file-earmark-check me-1 text-primary"></i>Разрешительные документы</div>
+                      <div class="text-muted" style="font-size:11px">Лицензии, сертификаты, разрешения</div>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100
+                    {% if hawb.doc_tech_desc %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_tech_desc"
+                           id="dtd_{{ hawb.pk }}" {% if hawb.doc_tech_desc %}checked{% endif %}>
+                    <label class="form-check-label" for="dtd_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-file-earmark-text me-1 text-primary"></i>Техническое описание</div>
+                      <div class="text-muted" style="font-size:11px">Описание товара, спецификация</div>
+                    </label>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- Прогресс-бар готовности -->
+              <div class="mt-2">
+                <div class="d-flex justify-content-between mb-1">
+                  <small class="text-muted">Готовность документов</small>
+                  <small class="fw-semibold {% if hawb.docs_ready %}text-success{% else %}text-warning{% endif %}">
+                    {{ hawb.docs_count }}/4
+                    {% if hawb.docs_ready %}<i class="bi bi-check-all ms-1"></i>{% endif %}
+                  </small>
+                </div>
+                <div class="progress" style="height:6px">
+                  <div class="progress-bar {% if hawb.docs_ready %}bg-success{% else %}bg-warning{% endif %}"
+                       style="width:{% widthratio hawb.docs_count 4 100 %}%"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Примечания</label>
+              <textarea name="notes" class="form-control form-control-sm" rows="2"
+                        placeholder="Дополнительная информация...">{{ hawb.notes }}</textarea>
+            </div>
+
+          </div>
+        </div>
+        <div class="modal-footer py-2 d-flex justify-content-between align-items-center">
+          <form method="post" action="{% url 'hawb_delete' hawb.pk %}"
+                onsubmit="return confirm('Удалить HAWB {{ hawb.hawb_number }}? Это действие нельзя отменить.')">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm btn-outline-danger">
+              <i class="bi bi-trash me-1"></i>Удалить
+            </button>
+          </form>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" class="btn btn-sm btn-primary px-3">
+              <i class="bi bi-check-lg me-1"></i>Сохранить
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+
+<!-- ═══════ МОДАЛЬНОЕ ОКНО ДОБАВЛЕНИЯ ═══════ -->
+<div class="modal fade" id="addHawbModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#1e3a5f;color:#fff">
+        <h6 class="modal-title fw-bold"><i class="bi bi-plus-lg me-2"></i>Добавить HAWB</h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'hawb_create' cargo.awb_number %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Номер HAWB *</label>
+              <input type="text" name="hawb_number" class="form-control form-control-sm font-monospace"
+                     placeholder="000-00000000" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Ответственный</label>
+              <select name="assigned_to" class="form-select form-select-sm">
+                <option value="">— не назначен —</option>
+                {% for u in all_users %}
+                <option value="{{ u.pk }}">{{ u.get_full_name|default:u.username }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label small text-muted mb-1">Получатель</label>
+              <input type="text" name="consignee_name" class="form-control form-control-sm"
+                     placeholder="ООО Название / Иванов И.И.">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small text-muted mb-1">ИНН</label>
+              <input type="text" name="consignee_inn" class="form-control form-control-sm" placeholder="7700000000">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Телефон</label>
+              <input type="text" name="consignee_phone" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Вес (кг)</label>
+              <input type="number" name="weight" class="form-control form-control-sm" step="0.01">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" class="form-control form-control-sm" value="1" min="1">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Стоимость</label>
+              <input type="number" name="invoice_value" class="form-control form-control-sm" step="0.01">
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Описание товара</label>
+              <input type="text" name="description" class="form-control form-control-sm"
+                     placeholder="Краткое описание содержимого...">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-sm btn-primary px-3">
+            <i class="bi bi-plus-lg me-1"></i>Создать HAWB
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('[data-bs-toggle="popover"]').forEach(el => {
+  new bootstrap.Popover(el, { sanitize: false });
+});
+
+// ── Excel-подобная фильтрация столбцов ──
+(function() {
+  const table = document.getElementById('hawbTable');
+  if (!table) return;
+
+  const activeFilters = {};
+  const textFilters   = {};
+
+  function getCellText(row, colIdx) {
+    const cell = row.cells[colIdx];
+    return cell ? cell.textContent.replace(/\s+/g, ' ').trim() : '';
+  }
+
+  function applyFilters() {
+    Array.from(table.tBodies[0].rows).forEach(row => {
+      let show = true;
+      for (const [ci, vals] of Object.entries(activeFilters)) {
+        if (!vals || vals.size === 0) continue;
+        const t = getCellText(row, +ci);
+        if (!vals.has(t)) { show = false; break; }
+      }
+      if (show) {
+        for (const [ci, txt] of Object.entries(textFilters)) {
+          if (!txt) continue;
+          const t = getCellText(row, +ci);
+          if (!t.toLowerCase().includes(txt.toLowerCase())) { show = false; break; }
+        }
+      }
+      row.style.display = show ? '' : 'none';
+    });
+  }
+
+  function getUnique(colIdx) {
+    const vals = new Set();
+    Array.from(table.tBodies[0].rows).forEach(r => vals.add(getCellText(r, colIdx)));
+    return [...vals].sort();
+  }
+
+  function updateBtnStyle(btn, colIdx) {
+    const on = activeFilters[colIdx]?.size || textFilters[colIdx];
+    btn.classList.toggle('active', !!on);
+  }
+
+  function openPopup(btn, th, colIdx) {
+    document.querySelectorAll('.col-filter-popup').forEach(p => p.remove());
+
+    const uniq = getUnique(colIdx);
+    const cur  = activeFilters[colIdx];
+    const curT = textFilters[colIdx] || '';
+
+    const popup = document.createElement('div');
+    popup.className = 'col-filter-popup';
+
+    const escVal = v => v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    popup.innerHTML = `
+      <div style="margin-bottom:8px">
+        <input type="text" class="form-control form-control-sm" id="flt-txt-${colIdx}"
+               placeholder="Поиск..." value="${escVal(curT)}" autocomplete="off">
+      </div>
+      <div style="padding:4px 0;border-bottom:1px solid #e2e8f0;margin-bottom:4px">
+        <label style="font-size:12px;cursor:pointer;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="flt-all-${colIdx}"
+                 ${!cur || cur.size >= uniq.length ? 'checked' : ''}>
+          <strong>(Выбрать всё)</strong>
+        </label>
+      </div>
+      <div class="filter-values" id="flt-vals-${colIdx}">
+        ${uniq.map(v => `
+          <label>
+            <input type="checkbox" value="${escVal(v)}"
+                   ${!cur || cur.has(v) ? 'checked' : ''}>
+            <span title="${escVal(v)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px">${escVal(v) || '<em style="color:#aaa">(пусто)</em>'}</span>
+          </label>`).join('')}
+      </div>
+      <div class="footer-btns">
+        <button class="btn btn-sm btn-primary" id="flt-ok-${colIdx}" style="font-size:12px">ОК</button>
+        <button class="btn btn-sm btn-outline-secondary" id="flt-clr-${colIdx}" style="font-size:12px">Сбросить</button>
+      </div>`;
+
+    document.body.appendChild(popup);
+
+    const rect = th.getBoundingClientRect();
+    popup.style.top  = (rect.bottom + 2) + 'px';
+    popup.style.left = rect.left + 'px';
+    requestAnimationFrame(() => {
+      const pr = popup.getBoundingClientRect();
+      if (pr.right > window.innerWidth - 8)
+        popup.style.left = Math.max(4, window.innerWidth - popup.offsetWidth - 8) + 'px';
+      if (pr.bottom > window.innerHeight - 8)
+        popup.style.top = (rect.top - popup.offsetHeight - 2) + 'px';
+    });
+
+    const allCb  = popup.querySelector(`#flt-all-${colIdx}`);
+    const valCbs = () => Array.from(popup.querySelectorAll(`#flt-vals-${colIdx} input[type=checkbox]`));
+    const txtIn  = popup.querySelector(`#flt-txt-${colIdx}`);
+
+    txtIn.addEventListener('input', () => {
+      const q = txtIn.value.toLowerCase();
+      valCbs().forEach(cb => {
+        cb.closest('label').style.display = cb.value.toLowerCase().includes(q) ? '' : 'none';
+      });
+    });
+
+    allCb.addEventListener('change', () => valCbs().forEach(cb => cb.checked = allCb.checked));
+    popup.querySelector(`#flt-vals-${colIdx}`).addEventListener('change', () => {
+      allCb.checked = valCbs().every(c => c.checked);
+    });
+
+    popup.querySelector(`#flt-ok-${colIdx}`).addEventListener('click', () => {
+      const txt     = txtIn.value.trim();
+      const checked = valCbs().filter(c => c.checked).map(c => c.value);
+      const allOn   = checked.length === uniq.length;
+
+      if (txt) textFilters[colIdx] = txt; else delete textFilters[colIdx];
+      if (!allOn) activeFilters[colIdx] = new Set(checked); else delete activeFilters[colIdx];
+
+      applyFilters();
+      updateBtnStyle(btn, colIdx);
+      popup.remove();
+    });
+
+    popup.querySelector(`#flt-clr-${colIdx}`).addEventListener('click', () => {
+      delete activeFilters[colIdx];
+      delete textFilters[colIdx];
+      applyFilters();
+      updateBtnStyle(btn, colIdx);
+      popup.remove();
+    });
+
+    setTimeout(() => {
+      document.addEventListener('click', function outside(e) {
+        if (!popup.contains(e.target) && e.target !== btn) {
+          popup.remove();
+          document.removeEventListener('click', outside);
+        }
+      });
+    }, 50);
+  }
+
+  Array.from(table.querySelector('thead tr').querySelectorAll('th')).forEach((th, idx) => {
+    const btn = th.querySelector('.filter-btn');
+    if (!btn) return;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const isOpen = document.querySelector('.col-filter-popup');
+      document.querySelectorAll('.col-filter-popup').forEach(p => p.remove());
+      if (!isOpen) openPopup(btn, th, idx);
+    });
+  });
+})();
+</script>
+{% endblock %}

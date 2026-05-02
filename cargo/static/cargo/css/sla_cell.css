@@ -1,0 +1,36 @@
+/* SLA cell: progress bar with countdown and hue gradient green→yellow→red */
+.sla-cell {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 80px;
+  max-width: 140px;
+  font-size: 10px;
+  line-height: 1.2;
+  user-select: none;
+}
+.sla-bar {
+  position: relative;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.sla-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  border-radius: 3px;
+  transition: width .3s linear, background-color .3s linear;
+}
+.sla-text {
+  text-align: center;
+  font-family: 'Roboto Mono', monospace;
+  color: #374151;
+}
+.sla-cell.sla-breached .sla-text { color: #b91c1c; font-weight: 600; }
+.sla-cell.sla-breached .sla-fill { background: #dc2626 !important; }
+.sla-dash {
+  color: #9ca3af;
+  font-size: 12px;
+}

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — CargoTrack Pro</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+  <style>
+    body { background: #1e3a5f; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .login-card { width: 380px; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+    .logo-area { background: #1e3a5f; color: #fff; border-radius: 16px 16px 0 0; padding: 2rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="login-card bg-white overflow-hidden">
+    <div class="logo-area">
+      <i class="bi bi-box-seam-fill text-warning" style="font-size:2.5rem"></i>
+      <h4 class="fw-bold mt-2 mb-0">CargoTrack Pro</h4>
+      <small class="text-white-50">Система отслеживания грузов</small>
+    </div>
+    <div class="p-4">
+      {% if form.errors %}
+      <div class="alert alert-danger py-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>Неверный логин или пароль.
+      </div>
+      {% endif %}
+      <form method="post">
+        {% csrf_token %}
+        <div class="mb-3">
+          <label class="form-label text-muted small">Логин</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-person"></i></span>
+            <input type="text" name="username" class="form-control" placeholder="Введите логин" autofocus>
+          </div>
+        </div>
+        <div class="mb-4">
+          <label class="form-label text-muted small">Пароль</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-lock"></i></span>
+            <input type="password" name="password" class="form-control" placeholder="Введите пароль">
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary w-100 fw-semibold">
+          <i class="bi bi-box-arrow-in-right me-2"></i>Войти
+        </button>
+        <input type="hidden" name="next" value="{{ next }}">
+      </form>
+    </div>
+  </div>
+</body>
+</html>

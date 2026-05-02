@@ -1,0 +1,11 @@
+<th>
+  <a href="?sort={{ field }}&dir={% if sort == field and direction == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&stage={{ filter_stage }}"
+     class="text-white text-decoration-none d-flex align-items-center gap-1">
+    {{ label }}
+    {% if sort == field %}
+      <i class="bi bi-caret-{% if direction == 'asc' %}up{% else %}down{% endif %}-fill" style="font-size:10px"></i>
+    {% else %}
+      <i class="bi bi-chevron-expand opacity-50" style="font-size:10px"></i>
+    {% endif %}
+  </a>
+</th>

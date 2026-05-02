@@ -1,0 +1,133 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - link "CT CargoTrack Pro" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - generic [ref=e5]: CT
+      - generic [ref=e6]:
+        - generic [ref=e7]: CargoTrack
+        - generic [ref=e8]: Pro
+    - navigation [ref=e9]:
+      - generic [ref=e10]: Навигация
+      - link " Дашборд" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e12]: 
+        - text: Дашборд
+      - link " Партии (MAWB)" [ref=e13] [cursor=pointer]:
+        - /url: /list/
+        - generic [ref=e14]: 
+        - text: Партии (MAWB)
+      - link " Накладные (HAWB)" [ref=e15] [cursor=pointer]:
+        - /url: /hawbs/
+        - generic [ref=e16]: 
+        - text: Накладные (HAWB)
+      - link " Товары" [ref=e17] [cursor=pointer]:
+        - /url: /goods/
+        - generic [ref=e18]: 
+        - text: Товары
+      - link " Бизнес-процессы" [ref=e19] [cursor=pointer]:
+        - /url: /workflows/
+        - generic [ref=e20]: 
+        - text: Бизнес-процессы
+      - link " SLA-нормативы" [ref=e21] [cursor=pointer]:
+        - /url: /sla/
+        - generic [ref=e22]: 
+        - text: SLA-нормативы
+      - generic [ref=e24]: Справочники
+      - link " Статусы" [ref=e25] [cursor=pointer]:
+        - /url: /faq/
+        - generic [ref=e26]: 
+        - text: Статусы
+      - link " Метки" [ref=e27] [cursor=pointer]:
+        - /url: /labels/
+        - generic [ref=e28]: 
+        - text: Метки
+      - link " Администрирование" [ref=e29] [cursor=pointer]:
+        - /url: /admin/
+        - generic [ref=e30]: 
+        - text: Администрирование
+    - generic [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]: 
+        - generic [ref=e34]: andy
+      - link " Выйти" [ref=e35] [cursor=pointer]:
+        - /url: /logout/
+        - generic [ref=e36]: 
+        - text: Выйти
+  - generic [ref=e37]:
+    - generic [ref=e38]:
+      - generic [ref=e39]:
+        - generic [ref=e40]: 
+        - generic [ref=e41]: /
+        - generic [ref=e42]: Дашборд
+      - generic [ref=e43]:
+        - button " Добавить виджет" [ref=e44] [cursor=pointer]:
+          - generic [ref=e45]: 
+          - text: Добавить виджет
+        - button " Редактировать" [ref=e46] [cursor=pointer]:
+          - generic [ref=e47]: 
+          - text: Редактировать
+    - generic [ref=e48]:
+      - generic [ref=e50]:
+        - generic [ref=e51]: 
+        - text: Дашборд
+      - generic [ref=e52]:
+        - generic [ref=e55]:
+          - generic [ref=e56]:
+            - generic [ref=e57]: 
+            - generic [ref=e58]: Всего партий
+            - generic [ref=e59]:
+              - button "" [ref=e60] [cursor=pointer]:
+                - generic [ref=e61]: 
+              - button "" [ref=e62] [cursor=pointer]:
+                - generic [ref=e63]: 
+          - generic [ref=e66]: 11 партий
+        - generic [ref=e69]:
+          - generic [ref=e70]:
+            - generic [ref=e71]: 
+            - generic [ref=e72]: Общий вес
+            - generic [ref=e73]:
+              - button "" [ref=e74] [cursor=pointer]:
+                - generic [ref=e75]: 
+              - button "" [ref=e76] [cursor=pointer]:
+                - generic [ref=e77]: 
+          - generic [ref=e80]: 1 619,3 кг
+        - generic [ref=e83]:
+          - generic [ref=e84]:
+            - generic [ref=e85]: 
+            - generic [ref=e86]: Мест получено
+            - generic [ref=e87]:
+              - button "" [ref=e88] [cursor=pointer]:
+                - generic [ref=e89]: 
+              - button "" [ref=e90] [cursor=pointer]:
+                - generic [ref=e91]: 
+          - generic [ref=e94]: 115 мест
+        - generic [ref=e97]:
+          - generic [ref=e98]:
+            - generic [ref=e99]: 
+            - generic [ref=e100]: "Сводная: этапы × тип входа"
+            - generic [ref=e101]:
+              - button "" [ref=e102] [cursor=pointer]:
+                - generic [ref=e103]: 
+              - button "" [ref=e104] [cursor=pointer]:
+                - generic [ref=e105]: 
+              - button "" [ref=e106] [cursor=pointer]:
+                - generic [ref=e107]: 
+          - table [ref=e110]:
+            - rowgroup [ref=e111]:
+              - row "warehouse Кол-во HAWB" [ref=e112]:
+                - columnheader "warehouse" [ref=e113]
+                - columnheader "Кол-во HAWB" [ref=e114]
+            - rowgroup [ref=e115]:
+              - row "СВХ/0001/2019/Ш — ООО Шереметьево-Карго 7" [ref=e116]:
+                - rowheader "СВХ/0001/2019/Ш — ООО Шереметьево-Карго" [ref=e117]
+                - cell "7" [ref=e118] [cursor=pointer]
+              - row "СВХ/0003/2020/В — АО Внуково-Логистика 5" [ref=e119]:
+                - rowheader "СВХ/0003/2020/В — АО Внуково-Логистика" [ref=e120]
+                - cell "5" [ref=e121] [cursor=pointer]
+              - row "СВХ/0002/2018/Д — ЗАО Домодедово-Карго 4" [ref=e122]:
+                - rowheader "СВХ/0002/2018/Д — ЗАО Домодедово-Карго" [ref=e123]
+                - cell "4" [ref=e124] [cursor=pointer]
+              - row "(не указано) 4" [ref=e125]:
+                - rowheader "(не указано)" [ref=e126]
+                - cell "4" [ref=e127] [cursor=pointer]
+      - text:                                        

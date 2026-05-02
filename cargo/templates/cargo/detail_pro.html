@@ -1,0 +1,875 @@
+{% extends "cargo/base.html" %}
+{% load cargo_filters l10n %}
+{% block title %}AWB {{ cargo.awb_number }} — CargoTrack Pro{% endblock %}
+
+{% block content %}
+<!-- Заголовок -->
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <div>
+    <a href="{% url 'cargo_list' %}" class="text-muted text-decoration-none small">
+      <i class="bi bi-arrow-left me-1"></i>Все партии
+    </a>
+    <h5 class="mb-0 fw-bold mt-1">
+      <i class="bi bi-box-seam me-2 text-primary"></i>
+      AWB <span class="font-monospace">{{ cargo.awb_number }}</span>
+    </h5>
+  </div>
+  <div class="d-flex gap-2 align-items-center flex-wrap">
+    {% if cargo.is_draft %}
+    <span class="badge bg-warning text-dark px-3 py-2">
+      <i class="bi bi-pencil me-1"></i>Черновик
+    </span>
+    {% endif %}
+    <span class="badge bg-{{ cargo.stage_color }} px-3 py-2" style="font-size:13px">
+      {{ cargo.stage_display }}
+    </span>
+  </div>
+</div>
+
+<!-- Метки -->
+<div class="mb-3 d-flex align-items-center gap-2 flex-wrap">
+  <span class="text-muted small"><i class="bi bi-tags me-1"></i>Метки:</span>
+  {% url 'api_cargo_labels' cargo.awb_number as tp_url %}
+  {% include "cargo/_tag_picker.html" with tag_picker_endpoint=tp_url tag_picker_id="cargo" %}
+</div>
+
+<!-- Блок этапов -->
+<div class="card mb-3 shadow-sm">
+  <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-signpost-split me-2"></i>Этап партии</span>
+    {% if cargo.is_draft %}
+    <form method="post" action="{% url 'cargo_set_stage' cargo.awb_number %}">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="close_draft">
+      <button type="submit" class="btn btn-sm btn-success px-3"
+              onclick="return confirm('Закрыть черновик и сформировать партию?')">
+        <i class="bi bi-check-lg me-1"></i>Закрыть черновик
+      </button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="card-body py-3">
+    <form method="post" action="{% url 'cargo_set_stage' cargo.awb_number %}">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="set_stage">
+      <div class="d-flex gap-2 flex-wrap align-items-center">
+        {% for code, label in stage_choices %}
+        <button type="submit" name="stage" value="{{ code }}"
+                class="btn btn-sm {% if cargo.stage == code %}btn-primary{% else %}btn-outline-secondary{% endif %}"
+                {% if cargo.is_draft and code != 'DRAFT' %}disabled{% endif %}>
+          {% if code == 'DRAFT' %}<i class="bi bi-pencil me-1"></i>
+          {% elif code == 'FORMED' %}<i class="bi bi-box-seam me-1"></i>
+          {% elif code == 'DISPATCHED' %}<i class="bi bi-airplane me-1"></i>
+          {% elif code == 'ARRIVED' %}<i class="bi bi-building me-1"></i>
+          {% elif code == 'CUSTOMS' %}<i class="bi bi-shield-check me-1"></i>
+          {% elif code == 'RELEASED' %}<i class="bi bi-check-circle me-1"></i>
+          {% endif %}
+          {{ label }}
+        </button>
+        {% if not forloop.last %}
+        <i class="bi bi-chevron-right text-muted"></i>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% if cargo.stage == 'CUSTOMS' %}
+      <div class="mt-2 small text-muted">
+        <i class="bi bi-info-circle me-1"></i>
+        Выпущено: <strong>{{ cargo.released_weight|floatformat:1 }} кг</strong>
+        из <strong>{{ cargo.weight|floatformat:1|default:"?" }} кг</strong>
+        {% if cargo.full_release_check %}
+          — <span class="text-success fw-bold"><i class="bi bi-check-circle-fill me-1"></i>Готово к полному выпуску</span>
+        {% endif %}
+      </div>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+<div class="row g-3">
+  <!-- ЛЕВАЯ КОЛОНКА -->
+  <div class="col-lg-7">
+
+    <!-- Основная информация -->
+    <div class="card mb-3">
+      <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+        <i class="bi bi-info-circle me-2"></i>Основная информация
+      </div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-6">
+            <small class="text-muted">AWB номер</small>
+            <div class="fw-bold font-monospace">{{ cargo.awb_number }}</div>
+          </div>
+          <div class="col-6">
+            <small class="text-muted">Тип отправителя</small>
+            <div>{{ cargo.get_shp_type_display|default:"—" }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Рейс -->
+    <div class="card mb-3">
+      <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+        <i class="bi bi-airplane me-2"></i>Рейс
+      </div>
+      <div class="card-body">
+        <div class="row g-2 align-items-center">
+          <div class="col-auto">
+            <div class="text-center">
+              <div class="fw-bold fs-5" style="color:var(--ct-navy)">{{ cargo.departure_iata|default:"???" }}</div>
+              <small class="text-muted">Откуда</small>
+            </div>
+          </div>
+          <div class="col-auto px-3 text-muted">
+            <i class="bi bi-arrow-right fs-4"></i>
+          </div>
+          <div class="col-auto">
+            <div class="text-center">
+              <div class="fw-bold fs-5 text-success">{{ cargo.arrival_iata|default:"???" }}</div>
+              <small class="text-muted">Куда</small>
+            </div>
+          </div>
+          <div class="col ms-3">
+            <div class="fw-semibold">{{ cargo.flight_number|default:"—" }}</div>
+            <small class="text-muted">
+              {% if cargo.departure_date %}<i class="bi bi-airplane-fill me-1 text-primary"></i>Вылет: {{ cargo.departure_date|date:"d.m.Y" }}{% endif %}
+              {% if cargo.flight_date %} &rarr; <i class="bi bi-airplane-engines me-1 text-success"></i>Прилёт: {{ cargo.flight_date|date:"d.m.Y" }}{% else %}Даты не указаны{% endif %}
+            </small>
+          </div>
+        </div>
+        <hr class="my-2">
+        <div class="row g-2">
+          <div class="col-6">
+            <small class="text-muted">Вид транспорта</small>
+            <div>{{ cargo.get_transportation_mode_display }}</div>
+          </div>
+        </div>
+        {% if cargo.stage != 'DRAFT' and cargo.stage != 'FORMED' %}
+        <hr class="my-2">
+        <form method="post" action="{% url 'cargo_set_stage' cargo.awb_number %}" class="row g-2 align-items-end">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="update_dates">
+          <div class="col-5">
+            <label class="form-label small text-muted mb-1"><i class="bi bi-airplane-fill me-1"></i>Дата вылета</label>
+            <input type="date" name="departure_date" class="form-control form-control-sm"
+                   value="{{ cargo.departure_date|date:'Y-m-d' }}">
+          </div>
+          <div class="col-5">
+            <label class="form-label small text-muted mb-1"><i class="bi bi-airplane-engines me-1"></i>Дата прилёта</label>
+            <input type="date" name="flight_date" class="form-control form-control-sm"
+                   value="{{ cargo.flight_date|date:'Y-m-d' }}">
+          </div>
+          <div class="col-2">
+            <button type="submit" class="btn btn-sm btn-outline-primary w-100">
+              <i class="bi bi-check-lg"></i>
+            </button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Параметры груза -->
+    <div class="card mb-3">
+      <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+        <i class="bi bi-boxes me-2"></i>Параметры груза
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-6 text-center">
+            <div class="fs-4 fw-bold text-primary">{{ cargo.weight|floatformat:2|default:"—" }}</div>
+            <small class="text-muted">Вес, кг</small>
+          </div>
+          <div class="col-6 text-center">
+            <div class="fs-4 fw-bold">{{ cargo.pieces_declared }}</div>
+            <small class="text-muted">Мест</small>
+          </div>
+        </div>
+        {% if cargo.can_correct_weight %}
+        <hr class="my-3">
+        <form method="post" action="{% url 'cargo_set_stage' cargo.awb_number %}" class="d-flex align-items-end gap-2">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="correct_weight">
+          <div class="flex-grow-1">
+            <label class="form-label small text-muted mb-1">
+              <i class="bi bi-arrow-repeat me-1"></i>Корректировка веса (пропорциональный пересчёт HAWB)
+            </label>
+            <input type="number" name="new_weight" step="0.01" min="0.01"
+                   value="{{ cargo.weight|floatformat:2 }}"
+                   class="form-control form-control-sm" required
+                   placeholder="Новый вес партии, кг">
+          </div>
+          <button type="submit" class="btn btn-sm btn-outline-primary"
+                  onclick="return confirm('Пересчитать веса всех накладных пропорционально?')">
+            <i class="bi bi-calculator me-1"></i>Пересчитать
+          </button>
+        </form>
+        <div class="small text-muted mt-1">
+          <i class="bi bi-info-circle me-1"></i>
+          Суммарный вес HAWB: <strong>{{ cargo.hawbs_total_weight|floatformat:2 }} кг</strong>.
+          Доступно на этапах «Отправлена» и «Прибыла».
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Таможня -->
+    <div class="card mb-3">
+      <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+        <i class="bi bi-shield-check me-2"></i>Таможня
+      </div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-6">
+            <small class="text-muted">Номер ТД</small>
+            <div class="font-monospace">{{ cargo.customs_declaration_number|default:"—" }}</div>
+          </div>
+          {% if cargo.is_transit %}
+          <div class="col-6">
+            <span class="badge bg-info">Транзитный груз</span>
+            <div class="small text-muted mt-1">{{ cargo.bonded_transit|default:"" }}</div>
+          </div>
+          {% endif %}
+          <div class="col-12">
+            <small class="text-muted d-block mb-1">Сценарий ТО</small>
+            <form method="post" action="{% url 'cargo_set_stage' cargo.awb_number %}" class="d-inline">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="toggle_self_clearance">
+              {% if cargo.is_self_clearance %}
+                <span class="badge bg-warning text-dark">ТО клиентом</span>
+                <button type="submit" class="btn btn-sm btn-link p-0 ms-2">
+                  <i class="bi bi-arrow-repeat me-1"></i>переключить на «Наше ТО»
+                </button>
+              {% else %}
+                <span class="badge bg-secondary">Наше ТО</span>
+                <button type="submit" class="btn btn-sm btn-link p-0 ms-2">
+                  <i class="bi bi-arrow-repeat me-1"></i>отметить как «ТО клиентом»
+                </button>
+              {% endif %}
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ПРАВАЯ КОЛОНКА -->
+  <div class="col-lg-5">
+
+    <!-- Склад СВХ -->
+    <div class="card mb-3 border-primary">
+      <div class="card-header bg-primary text-white py-2 fw-bold small text-uppercase">
+        <i class="bi bi-building me-2"></i>Склад СВХ
+      </div>
+      <div class="card-body">
+        <div class="mb-2">
+          <div class="fw-bold">{{ cargo.warehouse_name|default:"Склад не указан" }}</div>
+          {% if cargo.warehouse_license %}
+          <div class="badge bg-light text-dark border mt-1">
+            <i class="bi bi-card-text me-1"></i>{{ cargo.warehouse_license }}
+          </div>
+          {% endif %}
+        </div>
+        <div class="row g-2">
+          <div class="col-6">
+            <small class="text-muted">Ячейка хранения</small>
+            <div class="font-monospace fw-semibold">{{ cargo.bond_location|default:"—" }}</div>
+          </div>
+          <div class="col-6">
+            <small class="text-muted">Въезд на склад</small>
+            <div class="small">{% if cargo.scan_into_bond %}{{ cargo.scan_into_bond|date:"d.m.Y H:i" }}{% else %}—{% endif %}</div>
+          </div>
+          <div class="col-6">
+            <small class="text-muted">Выезд со склада</small>
+            <div class="small">{% if cargo.scan_out_of_bond %}{{ cargo.scan_out_of_bond|date:"d.m.Y H:i" }}{% else %}На складе{% endif %}</div>
+          </div>
+        </div>
+        {% with d=cargo.days_in_warehouse %}
+        {% if d != None %}
+        <div class="mt-2 p-2 rounded {% if d > 7 %}bg-danger bg-opacity-10 text-danger{% else %}bg-success bg-opacity-10 text-success{% endif %}">
+          <i class="bi bi-clock me-1"></i>
+          На складе: <strong>{{ d }} дн.</strong>
+          {% if d > 7 %}<small> (превышен лимит 7 дней)</small>{% endif %}
+        </div>
+        {% endif %}
+        {% endwith %}
+      </div>
+    </div>
+
+
+    <!-- Таймер с момента последней смены этапа/статуса -->
+    <div class="card mb-3 border-0">
+      <div class="card-body py-3 bg-light rounded">
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div>
+            <div class="text-muted small mb-1">
+              <i class="bi bi-clock me-1"></i>Время с последней смены статуса
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <span class="fs-4 fw-bold text-primary"
+                    id="statusTimer" data-since="{{ cargo.last_status_change.isoformat }}">
+                {{ cargo.status_timer_display }}
+              </span>
+            </div>
+          </div>
+          {% if cargo.last_status_change %}
+          <div class="text-muted small text-end">
+            <div>Статус изменён:</div>
+            <div class="fw-semibold">{{ cargo.last_status_change|date:"d.m.Y H:i" }}</div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Системная информация -->
+    <div class="card">
+      <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted">
+        <i class="bi bi-info me-2"></i>Системная информация
+      </div>
+      <div class="card-body">
+        <div class="row g-1 small text-muted">
+          <div class="col-6">Создан:</div>
+          <div class="col-6">{{ cargo.created_at|date:"d.m.Y H:i" }}</div>
+          <div class="col-6">Обновлён:</div>
+          <div class="col-6">{{ cargo.updated_at|date:"d.m.Y H:i" }}</div>
+          <div class="col-6">Создал:</div>
+          <div class="col-6">{{ cargo.created_by|default:"—" }}</div>
+          <div class="col-6">Посл. изм. статуса:</div>
+          <div class="col-6">{% if cargo.last_status_change %}{{ cargo.last_status_change|date:"d.m.Y H:i" }}{% else %}—{% endif %}</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════ HAWB ═══════ -->
+<div class="card mt-3 shadow-sm">
+  <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted d-flex align-items-center justify-content-between">
+    <span><i class="bi bi-list-ul me-2"></i>Индивидуальные накладные (HAWB)</span>
+    <div class="d-flex align-items-center gap-2">
+      {% if total_hawbs %}
+      <span class="text-muted small">
+        Всего: <strong>{{ total_hawbs }}</strong>
+        &nbsp;·&nbsp; Docs: <strong class="text-success">{{ docs_complete }}</strong>
+        &nbsp;·&nbsp; Выпущено: <strong class="text-success">{{ released }}</strong>
+      </span>
+      {% endif %}
+      <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addHawbModal">
+        <i class="bi bi-plus-lg me-1"></i>Добавить HAWB
+      </button>
+    </div>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle" style="font-size:13px">
+        <thead>
+          <tr style="background:#f0f4f8;border-bottom:2px solid #cbd5e1;font-size:12px">
+            <th class="px-3" style="color:#374151">№ HAWB</th>
+            <th style="color:#374151">Тамож. статус</th>
+            <th style="color:#374151">Получатель / ИНН</th>
+            <th class="text-end pe-2" style="color:#374151">Вес</th>
+            <th class="text-center" style="color:#374151">Места</th>
+            <th style="color:#374151">Рег. номер ДТ</th>
+            <th class="text-end pe-2" style="color:#374151">Стоимость</th>
+            <th class="text-center" style="color:#374151">Документы</th>
+            <th style="color:#374151">Ответственный</th>
+            <th style="color:#374151">Таймер</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for hawb in hawbs %}
+          <tr class="{% if hawb.customs_status == 'RELEASED' %}hawb-row-released{% elif hawb.customs_status == 'FILED' %}hawb-row-filed{% endif %}">
+
+            <td class="px-3 font-monospace fw-bold">
+              <a href="{% url 'hawb_detail' hawb.pk %}" class="text-decoration-none" style="color:#1e3a5f">
+                {{ hawb.hawb_number }}
+              </a>
+            </td>
+
+            <td>
+              {% if hawb.customs_status %}
+              <span class="badge bg-{{ hawb.customs_status_color }}{% if hawb.customs_status_color == 'warning' or hawb.customs_status_color == 'info' %} text-dark{% endif %}"
+                    style="font-size:11px;white-space:normal;max-width:130px">
+                {% if hawb.customs_status == 'RELEASED' %}<i class="bi bi-check2-circle me-1"></i>
+                {% elif hawb.customs_status == 'FILED' %}<i class="bi bi-send me-1"></i>
+                {% elif hawb.customs_status == 'EXAMINATION' %}<i class="bi bi-search me-1"></i>
+                {% elif hawb.customs_status == 'HOLD' %}<i class="bi bi-pause-circle me-1"></i>
+                {% elif hawb.customs_status == 'REJECTED' %}<i class="bi bi-x-circle me-1"></i>
+                {% elif hawb.customs_status == 'BROKER_CHECK' %}<i class="bi bi-eye me-1"></i>
+                {% elif hawb.customs_status == 'READY_TO_FILE' %}<i class="bi bi-clock me-1"></i>
+                {% endif %}
+                {{ hawb.customs_status_label }}
+              </span>
+              {% else %}
+              <span class="text-muted" style="font-size:12px">—</span>
+              {% endif %}
+            </td>
+
+            <td class="small">
+              <div class="fw-semibold">{{ hawb.consignee_name|default:"—"|truncatechars:22 }}</div>
+              {% if hawb.consignee_inn %}<div class="text-muted" style="font-size:10px">ИНН: {{ hawb.consignee_inn }}</div>{% endif %}
+            </td>
+
+            <td class="small text-end pe-2">{{ hawb.weight|floatformat:2|default:"—" }}<span class="text-muted"> кг</span></td>
+
+            <td class="text-center small">
+              {{ hawb.pieces_declared }}
+            </td>
+
+            <td class="font-monospace" style="font-size:11px">{{ hawb.customs_declaration_number|default:"—" }}</td>
+
+            <td class="small text-end pe-2">
+              {% if hawb.invoice_value %}{{ hawb.invoice_value }}<span class="text-muted ms-1">{{ hawb.invoice_currency }}</span>
+              {% else %}—{% endif %}
+            </td>
+
+            <td class="text-center">
+              <span class="badge {% if hawb.docs_ready %}bg-success{% else %}bg-warning text-dark{% endif %} px-2"
+                    style="font-size:11px"
+                    data-bs-toggle="popover" data-bs-placement="left" data-bs-html="true" data-bs-trigger="hover focus"
+                    data-bs-content="<div style='font-size:12px;min-width:160px'>
+                      <div class='d-flex justify-content-between gap-3'><span>Инвойс</span>{% if hawb.doc_invoice %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}</div>
+                      <div class='d-flex justify-content-between gap-3'><span>Упак. лист</span>{% if hawb.doc_packing_list %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}</div>
+                      <div class='d-flex justify-content-between gap-3'><span>Разреш. доки</span>{% if hawb.doc_permit %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}</div>
+                      <div class='d-flex justify-content-between gap-3'><span>Тех. описание</span>{% if hawb.doc_tech_desc %}<span class='text-success'>✓</span>{% else %}<span class='text-danger'>✗</span>{% endif %}</div>
+                    </div>">
+                {% if hawb.docs_ready %}<i class="bi bi-check-all me-1"></i>{% endif %}{{ hawb.docs_count }}/{{ hawb.docs_required }}
+              </span>
+            </td>
+
+            <td class="small">
+              {% if hawb.assigned_to %}
+                <div class="d-flex align-items-center gap-1">
+                  <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0"
+                       style="width:24px;height:24px;font-size:11px;font-weight:700">
+                    {{ hawb.assigned_to.first_name|first|default:hawb.assigned_to.username|first|upper }}
+                  </div>
+                  <span>{{ hawb.assigned_to.get_full_name|default:hawb.assigned_to.username|truncatechars:16 }}</span>
+                </div>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+
+            <td class="small text-muted">
+              <i class="bi bi-clock me-1"></i>
+              {{ hawb.status_timer_display }}
+            </td>
+
+            <td>
+              <button class="btn btn-outline-secondary btn-sm py-0 px-2"
+                      data-bs-toggle="modal" data-bs-target="#editModal{{ hawb.pk }}" title="Редактировать">
+                <i class="bi bi-pencil"></i>
+              </button>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="11" class="text-center text-muted py-4">
+              <i class="bi bi-inbox d-block" style="font-size:2rem"></i>
+              <div class="mt-2">HAWB не добавлены</div>
+              <button class="btn btn-sm btn-primary mt-2" data-bs-toggle="modal" data-bs-target="#addHawbModal">
+                <i class="bi bi-plus-lg me-1"></i>Добавить первый HAWB
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Модалки редактирования HAWB -->
+{% for hawb in hawbs %}
+<div class="modal fade" id="editModal{{ hawb.pk }}" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#1e3a5f;color:#fff">
+        <h6 class="modal-title fw-bold">
+          <i class="bi bi-pencil me-2"></i>Редактировать HAWB <span class="font-monospace">{{ hawb.hawb_number }}</span>
+        </h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'hawb_update' hawb.pk %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-5">
+              <label class="form-label small text-muted mb-1">Ответственный</label>
+              <select name="assigned_to" class="form-select form-select-sm">
+                <option value="">— не назначен —</option>
+                {% for u in all_users %}
+                <option value="{{ u.pk }}" {% if hawb.assigned_to_id == u.pk %}selected{% endif %}>
+                  {{ u.get_full_name|default:u.username }}
+                </option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-7">
+              <label class="form-label small text-muted mb-1">Номер ТД</label>
+              <input type="text" name="customs_declaration_number"
+                     value="{{ hawb.customs_declaration_number }}"
+                     class="form-control form-control-sm font-monospace"
+                     placeholder="10000/010125/0000000">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Вес (кг)</label>
+              <input type="number" name="weight" value="{{ hawb.weight|default_if_none:''|unlocalize }}"
+                     class="form-control form-control-sm" step="0.01" min="0">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" value="{{ hawb.pieces_declared }}"
+                     class="form-control form-control-sm" min="1">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Получатель</label>
+              <input type="text" name="consignee_name" value="{{ hawb.consignee_name }}"
+                     class="form-control form-control-sm">
+            </div>
+            <div class="col-12">
+              <label class="form-label small fw-semibold mb-2">
+                <i class="bi bi-folder-check me-1 text-primary"></i>Документы для таможенного оформления
+              </label>
+              <div class="row g-2">
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100 {% if hawb.doc_invoice %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_invoice" id="di_{{ hawb.pk }}" {% if hawb.doc_invoice %}checked{% endif %}>
+                    <label class="form-check-label" for="di_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-receipt me-1 text-primary"></i>Инвойс</div>
+                    </label>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100 {% if hawb.doc_packing_list %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_packing_list" id="dpl_{{ hawb.pk }}" {% if hawb.doc_packing_list %}checked{% endif %}>
+                    <label class="form-check-label" for="dpl_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-box me-1 text-primary"></i>Упаковочный лист</div>
+                    </label>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100 {% if hawb.doc_permit %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_permit" id="dpe_{{ hawb.pk }}" {% if hawb.doc_permit %}checked{% endif %}>
+                    <label class="form-check-label" for="dpe_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-file-earmark-check me-1 text-primary"></i>Разрешительные документы</div>
+                    </label>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-check p-3 border rounded-3 h-100 {% if hawb.doc_tech_desc %}bg-success bg-opacity-10 border-success{% else %}bg-light{% endif %}">
+                    <input class="form-check-input" type="checkbox" name="doc_tech_desc" id="dtd_{{ hawb.pk }}" {% if hawb.doc_tech_desc %}checked{% endif %}>
+                    <label class="form-check-label" for="dtd_{{ hawb.pk }}">
+                      <div class="fw-semibold small"><i class="bi bi-file-earmark-text me-1 text-primary"></i>Техническое описание</div>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Примечания</label>
+              <textarea name="notes" class="form-control form-control-sm" rows="2"
+                        placeholder="Дополнительная информация...">{{ hawb.notes }}</textarea>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer py-2 d-flex justify-content-between align-items-center">
+          <form method="post" action="{% url 'hawb_delete' hawb.pk %}"
+                onsubmit="return confirm('Удалить HAWB {{ hawb.hawb_number }}? Это действие нельзя отменить.')">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm btn-outline-danger">
+              <i class="bi bi-trash me-1"></i>Удалить
+            </button>
+          </form>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" class="btn btn-sm btn-primary px-3">
+              <i class="bi bi-check-lg me-1"></i>Сохранить
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+<!-- Модальное окно добавления HAWB -->
+<div class="modal fade" id="addHawbModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#1e3a5f;color:#fff">
+        <h6 class="modal-title fw-bold"><i class="bi bi-plus-lg me-2"></i>Добавить HAWB</h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'hawb_create' cargo.awb_number %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{% url 'cargo_detail' cargo.awb_number %}">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Номер HAWB *</label>
+              <input type="text" name="hawb_number" class="form-control form-control-sm font-monospace"
+                     placeholder="000-00000000" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small text-muted mb-1">Ответственный</label>
+              <select name="assigned_to" class="form-select form-select-sm">
+                <option value="">— не назначен —</option>
+                {% for u in all_users %}
+                <option value="{{ u.pk }}">{{ u.get_full_name|default:u.username }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label small text-muted mb-1">Получатель</label>
+              <input type="text" name="consignee_name" class="form-control form-control-sm"
+                     placeholder="ООО Название / Иванов И.И.">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small text-muted mb-1">ИНН</label>
+              <input type="text" name="consignee_inn" class="form-control form-control-sm" placeholder="7700000000">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Телефон</label>
+              <input type="text" name="consignee_phone" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Вес (кг)</label>
+              <input type="number" name="weight" class="form-control form-control-sm" step="0.01">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Мест</label>
+              <input type="number" name="pieces_declared" class="form-control form-control-sm" value="1" min="1">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted mb-1">Стоимость</label>
+              <input type="number" name="invoice_value" class="form-control form-control-sm" step="0.01">
+            </div>
+            <div class="col-12">
+              <label class="form-label small text-muted mb-1">Описание товара</label>
+              <input type="text" name="description" class="form-control form-control-sm"
+                     placeholder="Краткое описание содержимого...">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-sm btn-primary px-3">
+            <i class="bi bi-plus-lg me-1"></i>Создать HAWB
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- История статусов -->
+<div class="card mt-3">
+  <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted d-flex align-items-center justify-content-between">
+    <span><i class="bi bi-clock-history me-2"></i>История изменений статусов</span>
+    <span class="badge bg-secondary">{{ history|length }} записей</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead>
+          <tr>
+            <th>Дата и время</th>
+            <th>Было</th>
+            <th></th>
+            <th>Стало</th>
+            <th>Пользователь</th>
+            <th>Время в статусе</th>
+            <th>Комментарий</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in history %}
+          <tr>
+            <td class="small text-muted">{{ item.record.changed_at|date:"d.m.Y H:i" }}</td>
+            <td>
+              {% if item.record.old_status %}
+              <span class="badge bg-secondary badge-status">{{ item.record.old_status }}</span>
+              {% else %}—{% endif %}
+            </td>
+            <td class="text-muted"><i class="bi bi-arrow-right"></i></td>
+            <td>
+              <span class="badge badge-status
+                {% if item.record.new_status == 'RLSE' %}bg-success
+                {% elif item.record.new_status == 'REJ' or item.record.new_status == 'HLDP' %}bg-danger
+                {% elif item.record.new_status == 'HOLD' or item.record.new_status == 'EXAM' %}bg-warning text-dark
+                {% else %}bg-primary{% endif %}">
+                {{ item.record.new_status }}
+              </span>
+            </td>
+            <td class="small">{{ item.record.changed_by|default:"—" }}</td>
+            <td class="small text-muted">
+              {% if item.hours != None %}{{ item.hours }} ч.{% else %}—{% endif %}
+            </td>
+            <td class="small text-muted">{{ item.record.comment|default:"—"|truncatechars:50 }}</td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="7" class="text-center text-muted py-3">История изменений пуста</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{# ── Бизнес-процессы для партии ──────────────────────────────────────── #}
+<div id="cargo-wf-block" class="mt-3" style="display:none">
+  <div class="card">
+    <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-diagram-3 me-1"></i>Бизнес-процессы</span>
+      <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#cargoWfStartModal">
+        <i class="bi bi-play-circle me-1"></i>Запустить
+      </button>
+    </div>
+    <div class="card-body p-2" id="cargo-wf-list">
+      <div class="text-muted small text-center py-2">Нет активных процессов</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="cargoWfStartModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">Запустить процесс</h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <select class="form-select form-select-sm" id="cargo-wf-select"></select>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-sm btn-primary" id="cargo-wf-start-confirm">Запустить</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+  .hawb-row-released { background-color: rgba(25, 135, 84, 0.13) !important; }
+  .hawb-row-released:hover { background-color: rgba(25, 135, 84, 0.22) !important; }
+  .hawb-row-filed { background-color: rgba(255, 140, 0, 0.13) !important; }
+  .hawb-row-filed:hover { background-color: rgba(255, 140, 0, 0.22) !important; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('[data-bs-toggle="popover"]').forEach(el => {
+  new bootstrap.Popover(el, { sanitize: false });
+});
+</script>
+<script>
+(function() {
+  const el = document.getElementById('statusTimer');
+  if (!el || !el.dataset.since) return;
+  const since = new Date(el.dataset.since);
+  if (isNaN(since)) return;
+
+  function fmt(totalSeconds) {
+    if (totalSeconds < 60) return totalSeconds + 'с';
+    const m = Math.floor(totalSeconds / 60) % 60;
+    const h = Math.floor(totalSeconds / 3600) % 24;
+    const d = Math.floor(totalSeconds / 86400);
+    if (d > 0) return d + 'д ' + (h ? h + 'ч' : '');
+    if (h > 0) return h + 'ч ' + (m ? m + 'м' : '');
+    return m + 'м';
+  }
+
+  function tick() {
+    const diff = Math.floor((Date.now() - since.getTime()) / 1000);
+    el.textContent = fmt(diff);
+  }
+  tick();
+  setInterval(tick, 30000);
+})();
+</script>
+
+<script>
+// ── Бизнес-процессы партии ─────────────────────────────────────────────────
+(function(){
+  const AWB = '{{ cargo.awb_number }}';
+  const CARGO_ID = {{ cargo.pk }};
+  const wfBlock = document.getElementById('cargo-wf-block');
+  const wfList  = document.getElementById('cargo-wf-list');
+  const wfSelect = document.getElementById('cargo-wf-select');
+
+  function getCsrf() {
+    return document.cookie.split('; ').find(r=>r.startsWith('csrftoken='))?.split('=')[1]||'';
+  }
+  function statusBadge(status) {
+    const map={active:'primary',completed:'success',cancelled:'secondary'};
+    const lbl={active:'Активен',completed:'Завершён',cancelled:'Отменён'};
+    return `<span class="badge bg-${map[status]||'secondary'}">${lbl[status]||status}</span>`;
+  }
+  function renderProgress(inst) {
+    return (inst.steps||[]).map((s,i)=>{
+      const isCur = inst.current_step && s.id===inst.current_step.id;
+      const isDone = inst.progress > i+1 || inst.status==='completed';
+      const cls = isDone?'bg-success':(isCur?'bg-primary':'bg-light border');
+      return `<div class="rounded-circle ${cls}" style="width:12px;height:12px;display:inline-block;margin:0 2px" title="${s.name}"></div>`;
+    }).join('');
+  }
+  function renderInstance(inst) {
+    return `<div class="border rounded p-2 mb-2 small" id="cg-wf-inst-${inst.id}">
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <span class="fw-semibold">${inst.workflow_name}</span>
+        <div>${statusBadge(inst.status)}${inst.status==='active'?`<button class="btn btn-outline-danger ms-1 py-0 px-1 cg-wf-cancel" style="font-size:.75rem" data-id="${inst.id}">Отменить</button>`:''}</div>
+      </div>
+      <div class="mb-1">${renderProgress(inst)} <span class="text-muted ms-1">${inst.progress}/${inst.total_steps}</span></div>
+      <div class="text-muted">Текущий шаг: ${inst.current_step?inst.current_step.name:'—'}</div>
+    </div>`;
+  }
+  function loadInstances() {
+    fetch(`/api/v1/cargo/${AWB}/workflow-instances/`)
+      .then(r=>r.json()).then(data=>{
+        const instances = data.instances||[];
+        wfBlock.style.display='';
+        wfList.innerHTML = instances.length ? instances.map(renderInstance).join('') :
+          '<div class="text-muted small text-center py-2">Нет активных процессов</div>';
+        wfList.querySelectorAll('.cg-wf-cancel').forEach(btn=>{
+          btn.addEventListener('click',()=>cancelInstance(btn.dataset.id));
+        });
+      }).catch(()=>{ wfBlock.style.display=''; });
+  }
+  function cancelInstance(id) {
+    if (!confirm('Отменить процесс?')) return;
+    fetch(`/api/v1/workflow-instances/${id}/cancel/`,{method:'POST',headers:{'X-CSRFToken':getCsrf()}})
+      .then(r=>r.json()).then(d=>{ if(d.error) alert(d.error); else loadInstances(); });
+  }
+  // Заполнить список воркфлоу для cargo
+  fetch('/api/v1/workflows/').then(r=>r.json()).then(data=>{
+    const opts = (data.workflows||[]).filter(w=>w.entity_type==='cargo');
+    wfSelect.innerHTML = '<option value="">— выберите воркфлоу —</option>' +
+      opts.map(w=>`<option value="${w.id}">${w.name}</option>`).join('');
+  });
+  document.getElementById('cargo-wf-start-confirm')?.addEventListener('click',()=>{
+    const wfId = wfSelect.value;
+    if (!wfId) return;
+    fetch(`/api/v1/workflows/${wfId}/start/`,{
+      method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+      body:JSON.stringify({entity_type:'cargo',entity_id:CARGO_ID})
+    }).then(r=>r.json()).then(d=>{
+      if(d.error) alert(d.error);
+      else { bootstrap.Modal.getInstance(document.getElementById('cargoWfStartModal')).hide(); loadInstances(); }
+    });
+  });
+  loadInstances();
+})();
+</script>
+{% endblock %}

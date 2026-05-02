@@ -1,0 +1,1025 @@
+{% extends "cargo/base.html" %}
+{% block title %}{{ workflow.name }} — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}
+<a href="{% url 'workflow_list' %}" style="color:var(--cdek-blue);text-decoration:none">Бизнес-процессы</a>
+<span style="margin:0 6px;color:#9ca3af">/</span>
+{{ workflow.name }}
+{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn-cdek-primary" id="btnAddStep" style="display:inline-flex;align-items:center;gap:4px">
+  <i class="bi bi-plus-lg"></i> Добавить шаг
+</button>
+<button class="btn-cdek-secondary" id="btnAutoLayout" style="display:inline-flex;align-items:center;gap:4px" title="Выровнять автоматически">
+  <i class="bi bi-grid-3x3"></i> Авто-раскладка
+</button>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+/* ── Canvas ────────────────────────────────────────────────────── */
+.wf-canvas-wrap {
+  position:relative; border:1px solid var(--cdek-border); border-radius:8px;
+  background:#f8fafc; overflow:hidden; min-height:600px;
+  background-image:
+    radial-gradient(circle, #e2e8f0 1px, transparent 1px);
+  background-size:20px 20px;
+}
+.wf-canvas {
+  position:relative; width:3000px; height:2000px;
+}
+.wf-svg {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  pointer-events:none; z-index:1;
+}
+.wf-svg line, .wf-svg path { pointer-events:stroke; cursor:pointer; }
+
+/* ── Step block ────────────────────────────────────────────────── */
+.wf-step {
+  position:absolute; min-width:160px; max-width:240px;
+  background:#fff; border:2px solid #3b82f6; border-radius:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,.08); cursor:grab;
+  z-index:10; user-select:none; transition:box-shadow .12s;
+}
+.wf-step:hover { box-shadow:0 4px 16px rgba(0,0,0,.14); }
+.wf-step.dragging { opacity:.8; box-shadow:0 8px 24px rgba(0,0,0,.18); cursor:grabbing; z-index:100; }
+.wf-step.selected { border-color:#1d4ed8; box-shadow:0 0 0 3px rgba(37,99,235,.2); }
+.wf-step-header {
+  padding:8px 10px 6px; border-bottom:1px solid #f0f0f0;
+  display:flex; align-items:center; gap:6px;
+  font-size:12px; font-weight:600; color:#1f2937;
+}
+.wf-step-header .step-icon {
+  width:24px; height:24px; border-radius:6px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:12px; color:#fff; flex-shrink:0;
+}
+.wf-step-header .step-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wf-step-body {
+  padding:6px 10px 8px; font-size:11px; color:#6b7280;
+}
+.wf-step-body .step-tag {
+  display:inline-block; font-size:9px; padding:1px 6px;
+  border-radius:3px; font-weight:500; margin-right:4px;
+}
+.wf-step-body .tag-stage { background:#eff6ff; color:#1d4ed8; }
+.wf-step-body .tag-action { background:#fef3c7; color:#92400e; }
+.wf-step-body .tag-check { background:#fce7f3; color:#9d174d; }
+.wf-step-body .tag-notify { background:#f0fdf4; color:#166534; }
+
+/* ── Connector ports ────────────────────────────────────────── */
+.wf-port {
+  position:absolute; width:12px; height:12px; border-radius:50%;
+  background:#3b82f6; border:2px solid #fff; cursor:crosshair;
+  z-index:20; box-shadow:0 1px 3px rgba(0,0,0,.2);
+  transition:transform .1s;
+}
+.wf-port:hover { transform:scale(1.3); }
+.wf-port-out { bottom:-6px; left:50%; margin-left:-6px; }
+.wf-port-in  { top:-6px;    left:50%; margin-left:-6px; background:#22c55e; }
+
+/* ── Step actions ──────────────────────────────────────────── */
+.wf-step-actions {
+  position:absolute; top:-8px; right:-8px; display:none;
+  gap:2px; z-index:30;
+}
+.wf-step.selected .wf-step-actions { display:flex; }
+.wf-step-actions button {
+  width:22px; height:22px; border:1px solid #e5e7eb; background:#fff;
+  border-radius:4px; font-size:11px; color:#6b7280; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.wf-step-actions button:hover { background:#f3f4f6; color:#374151; }
+.wf-step-actions .btn-del:hover { background:#fee2e2; color:#dc2626; }
+
+/* ── Transition label ──────────────────────────────────────── */
+.wf-tr-label {
+  position:absolute; z-index:15;
+  background:#fff; border:1px solid #e5e7eb; border-radius:4px;
+  padding:2px 6px; font-size:9px; color:#6b7280;
+  cursor:pointer; white-space:nowrap;
+  box-shadow:0 1px 3px rgba(0,0,0,.06);
+}
+.wf-tr-label:hover { border-color:#3b82f6; color:#1d4ed8; }
+
+/* ── Toolbar / panel ──────────────────────────────────────── */
+.wf-panel {
+  background:#fff; border:1px solid var(--cdek-border);
+  border-radius:8px; padding:16px; margin-bottom:12px;
+}
+.wf-panel-title {
+  font-size:13px; font-weight:600; color:#374151;
+  margin-bottom:10px; display:flex; align-items:center; gap:6px;
+}
+
+/* ── Automations list ─────────────────────────────────────── */
+.auto-card {
+  background:#f8fafc; border:1px solid #e5e7eb; border-radius:6px;
+  padding:8px 10px; margin-bottom:6px; font-size:11px;
+  display:flex; align-items:center; gap:8px;
+}
+.auto-card .auto-name { font-weight:500; color:#374151; flex:1; }
+.auto-card .auto-type { font-size:9px; color:#6b7280; background:#f3f4f6; padding:1px 6px; border-radius:3px; }
+.auto-card .auto-actions { display:flex; gap:2px; }
+.auto-card .auto-actions button {
+  width:22px; height:22px; border:none; background:transparent;
+  color:#9ca3af; cursor:pointer; border-radius:3px; font-size:12px;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.auto-card .auto-actions button:hover { background:#f3f4f6; color:#374151; }
+
+/* ── Modals ──────────────────────────────────────────────── */
+.modal-wfe { max-width:520px; }
+.wfe-hint { color:#93c5fd; cursor:help; font-size:13px; line-height:1; }
+.wfe-hint:hover { color:#3b82f6; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex;gap:16px;align-items:stretch;min-height:600px">
+
+  <!-- Left panel: Automations -->
+  <div style="width:280px;flex-shrink:0;display:flex;flex-direction:column;gap:12px">
+    <div class="wf-panel" style="flex:1">
+      <div class="wf-panel-title">
+        <i class="bi bi-lightning-charge" style="color:#f59e0b"></i> Автоматизации
+      </div>
+      <div id="autoList"></div>
+      <button class="btn-cdek-secondary w-100 mt-2" onclick="openAutoModal()" style="font-size:11px;display:flex;align-items:center;justify-content:center;gap:4px">
+        <i class="bi bi-plus-lg"></i> Добавить правило
+      </button>
+    </div>
+
+    <div class="wf-panel">
+      <div class="wf-panel-title">
+        <i class="bi bi-sliders" style="color:var(--cdek-blue)"></i> Настройки процесса
+      </div>
+      <div style="font-size:12px;display:grid;gap:8px" id="wfSettingsPanel">
+        <div>
+          <label style="font-weight:500;color:#6b7280;display:block;margin-bottom:2px">Тип сущности</label>
+          <select id="wfEntityType" class="form-select form-select-sm" onchange="onEntityTypeChange()">
+            <option value="cargo">Партия (MAWB)</option>
+            <option value="hawb">Накладная (HAWB)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-weight:500;color:#6b7280;display:block;margin-bottom:2px">Условия запуска</label>
+          <div id="triggerCondsList" style="display:grid;gap:4px;margin-bottom:4px"></div>
+          <button class="btn btn-outline-secondary btn-sm w-100" style="font-size:11px" onclick="addTriggerCondition()">
+            <i class="bi bi-plus-lg"></i> Добавить условие
+          </button>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="wfAutoStart" checked>
+          <label class="form-check-label" style="font-size:11px;color:#6b7280" for="wfAutoStart">Авто-старт при создании</label>
+        </div>
+        <button class="btn-cdek-primary w-100" style="font-size:11px" onclick="saveWorkflowSettings()">
+          <i class="bi bi-save"></i> Сохранить настройки
+        </button>
+      </div>
+    </div>
+
+    <div class="wf-panel">
+      <div class="wf-panel-title">
+        <i class="bi bi-info-circle" style="color:var(--cdek-blue)"></i> Легенда
+      </div>
+      <div style="font-size:11px;display:grid;gap:4px">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:14px;height:14px;border-radius:4px;background:#3b82f6;display:inline-block"></span>
+          Этап партии
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:14px;height:14px;border-radius:4px;background:#f59e0b;display:inline-block"></span>
+          Действие
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:14px;height:14px;border-radius:4px;background:#ec4899;display:inline-block"></span>
+          Условие/проверка
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="width:14px;height:14px;border-radius:4px;background:#22c55e;display:inline-block"></span>
+          Уведомление
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Canvas -->
+  <div class="wf-canvas-wrap" id="canvasWrap" style="flex:1">
+    <div class="wf-canvas" id="canvas">
+      <svg class="wf-svg" id="svgLayer"></svg>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ Step Modal ════════════ -->
+<div class="modal fade" id="stepModal" tabindex="-1">
+  <div class="modal-dialog modal-wfe">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold" id="stepModalTitle">Добавить шаг</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Название шага</label>
+          <input type="text" id="stepName" class="form-control form-control-sm" placeholder="Например: Прибытие на СВХ">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Тип</label>
+          <select id="stepType" class="form-select form-select-sm" onchange="onStepTypeChange()">
+            <option value="stage">Этап партии</option>
+            <option value="action">Действие</option>
+            <option value="check">Условие/проверка</option>
+            <option value="notify">Уведомление</option>
+          </select>
+        </div>
+        <div class="mb-3" id="stepStageWrap">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Привязка к этапу партии</label>
+          <select id="stepStage" class="form-select form-select-sm">
+            <option value="">— не привязан —</option>
+            <option value="DRAFT">Формирование партии</option>
+            <option value="FORMED">Партия сформирована</option>
+            <option value="DISPATCHED">Партия отправлена</option>
+            <option value="ARRIVED">Партия прибыла</option>
+            <option value="CUSTOMS">Таможенное оформление</option>
+            <option value="RELEASED">Полный выпуск</option>
+          </select>
+        </div>
+        <div class="mb-3" id="stepHawbLogisticsWrap" style="display:none">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Лог. статус накладной</label>
+          <select id="stepHawbLogistics" class="form-select form-select-sm">
+            <option value="">— не привязан —</option>
+            <option value="CREATED">Создан</option>
+            <option value="TO_ORIGIN_WH">В пути на склад отправки</option>
+            <option value="AT_ORIGIN_WH">Принят на склад отправки</option>
+            <option value="CONSOLIDATED">Добавлен в консоль</option>
+            <option value="READY_TO_SHIP">Готов к отправке</option>
+            <option value="EXPORT_CUSTOMS">Экспортная таможня</option>
+            <option value="IN_TRANSIT_EXP">В пути в страну назначения</option>
+            <option value="ARRIVED_DEST">Прибыл в страну назначения</option>
+            <option value="AT_SVH">На СВХ</option>
+            <option value="IMPORT_CUSTOMS">Импортная таможня</option>
+            <option value="READY_DELIVERY">Готов к выдаче</option>
+            <option value="TO_SORT_CENTER">На сортировку</option>
+            <option value="AT_SORT_CENTER">На сортировочном центре</option>
+            <option value="READY_TO_DEST">Готов к доставке</option>
+            <option value="IN_TRANSIT_DEST">В пути к получателю</option>
+            <option value="ARRIVED_FINAL">Прибыл к получателю</option>
+            <option value="DELIVERED">Вручено</option>
+            <option value="RETURNED">Возврат</option>
+            <option value="LOST">Утеря</option>
+          </select>
+        </div>
+        <div class="mb-3" id="stepHawbCustomsWrap" style="display:none">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Там. статус накладной</label>
+          <select id="stepHawbCustoms" class="form-select form-select-sm">
+            <option value="">— не привязан —</option>
+            <option value="BROKER_CHECK">Проверка брокером</option>
+            <option value="READY_TO_FILE">Готов к подаче</option>
+            <option value="FILED">Подан</option>
+            <option value="EXAMINATION">Досмотр</option>
+            <option value="HOLD">Удержан</option>
+            <option value="RELEASED">Выпущен</option>
+            <option value="REJECTED">Отказ</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Цвет</label>
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="colorPicker">
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#3b82f6" checked style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#3b82f6;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#6366f1" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#6366f1;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#f59e0b" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#f59e0b;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#22c55e" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#22c55e;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#ec4899" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#ec4899;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#ef4444" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#ef4444;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+            <label style="cursor:pointer"><input type="radio" name="stepColor" value="#9ca3af" style="display:none"><span style="width:24px;height:24px;border-radius:4px;background:#9ca3af;display:inline-block;border:2px solid transparent" class="color-swatch"></span></label>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label d-flex align-items-center gap-1" style="font-size:12px;font-weight:500;color:#6b7280">
+            SLA (часы), override
+            <span class="wfe-hint" data-bs-toggle="tooltip" data-bs-placement="top"
+              title="Норматив времени на этом шаге для сущностей этого процесса. Оставьте пустым, чтобы использовать глобальный SLAPolicy.">
+              <i class="bi bi-question-circle"></i>
+            </span>
+          </label>
+          <input type="number" id="stepSlaHours" class="form-control form-control-sm"
+                 step="0.25" min="0.01" placeholder="— использовать глобальный —">
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn-cdek-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn-cdek-primary" onclick="saveStep()" style="display:inline-flex;align-items:center;gap:4px">
+          <i class="bi bi-check-lg"></i> Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ Transition Modal ════════════ -->
+<div class="modal fade" id="trModal" tabindex="-1">
+  <div class="modal-dialog modal-wfe">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold">Настройка перехода</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Подпись</label>
+          <input type="text" id="trLabel" class="form-control form-control-sm" placeholder="Например: При успешной проверке">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Условие (CQL)</label>
+          <textarea id="trCondition" class="form-control form-control-sm" rows="2" placeholder="Оставьте пустым — переход всегда доступен"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-sm btn-danger me-auto" onclick="deleteTransition()" style="display:inline-flex;align-items:center;gap:4px">
+          <i class="bi bi-trash3"></i> Удалить
+        </button>
+        <button class="btn-cdek-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn-cdek-primary" onclick="saveTransition()" style="display:inline-flex;align-items:center;gap:4px">
+          <i class="bi bi-check-lg"></i> Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ Automation Modal ════════════ -->
+<div class="modal fade" id="autoModal" tabindex="-1">
+  <div class="modal-dialog modal-wfe">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-bold" id="autoModalTitle">Добавить правило</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:12px;font-weight:500;color:#6b7280">Название</label>
+          <input type="text" id="autoName" class="form-control form-control-sm" placeholder="Например: Назначить на декларанта">
+        </div>
+        <div class="mb-3">
+          <label class="form-label d-flex align-items-center gap-1" style="font-size:12px;font-weight:500;color:#6b7280">
+            Что система сделает
+            <span class="wfe-hint" data-bs-toggle="tooltip" data-bs-placement="top"
+              title="Выберите действие, которое система выполнит автоматически при наступлении события">
+              <i class="bi bi-question-circle"></i>
+            </span>
+          </label>
+          <select id="autoActionType" class="form-select form-select-sm" onchange="updateActionHint()">
+            <option value="assign_user">Назначить пользователя — поставить ответственного</option>
+            <option value="set_field">Установить поле — изменить значение в записи</option>
+            <option value="send_notify">Отправить уведомление — email или сообщение</option>
+            <option value="change_stage">Перевести этап — изменить этап партии</option>
+            <option value="webhook">Вызвать webhook — отправить запрос во внешнюю систему</option>
+            <option value="sla_breach_notify">Уведомить о просрочке SLA — отправить алерт о нарушении норматива</option>
+          </select>
+          <div id="autoActionHint" style="font-size:11px;color:#6b7280;margin-top:5px;padding:6px 10px;background:#f8fafc;border-radius:5px;border-left:3px solid #93c5fd"></div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label d-flex align-items-center gap-1" style="font-size:12px;font-weight:500;color:#6b7280">
+            Когда сработает
+            <span class="wfe-hint" data-bs-toggle="tooltip" data-bs-placement="top"
+              title="Выберите стрелку (переход) между шагами, при прохождении которой выполнится действие. «— любой —» означает, что действие сработает при любом переходе в этом процессе">
+              <i class="bi bi-question-circle"></i>
+            </span>
+          </label>
+          <select id="autoTransition" class="form-select form-select-sm">
+            <option value="">— любой переход (при движении по любой стрелке) —</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn-cdek-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button class="btn-cdek-primary" onclick="saveAutomation()" style="display:inline-flex;align-items:center;gap:4px">
+          <i class="bi bi-check-lg"></i> Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* ════════════════════════════════════════════════════════════
+   CargoTrack Pro — Workflow Editor JS
+════════════════════════════════════════════════════════════ */
+const WF_ID = {{ workflow.id }};
+const CSRF = (()=>{ const m=document.cookie.match(/csrftoken=([^;]+)/); return m?m[1]:''; })();
+const API = {
+  get:    (u)   => fetch(u, {headers:{'X-CSRFToken':CSRF}}),
+  post:   (u,d) => fetch(u, {method:'POST',   headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(d)}),
+  put:    (u,d) => fetch(u, {method:'PUT',     headers:{'Content-Type':'application/json','X-CSRFToken':CSRF}, body:JSON.stringify(d)}),
+  delete: (u)   => fetch(u, {method:'DELETE',  headers:{'X-CSRFToken':CSRF}}),
+};
+
+const STEP_COLORS = {
+  stage:'#3b82f6', action:'#f59e0b', check:'#ec4899', notify:'#22c55e',
+};
+const STEP_ICONS = {
+  stage:'bi-flag-fill', action:'bi-gear-fill', check:'bi-question-diamond-fill', notify:'bi-bell-fill',
+};
+const TAG_CSS = { stage:'tag-stage', action:'tag-action', check:'tag-check', notify:'tag-notify' };
+const TYPE_LABELS = { stage:'Этап', action:'Действие', check:'Условие', notify:'Уведомление' };
+const ACTION_LABELS = {
+  assign_user:'Назначение', set_field:'Поле', send_notify:'Уведомление',
+  change_stage:'Этап', webhook:'Webhook',
+};
+
+// ── State ──────────────────────────────────────────────────────────────────
+let steps = [], transitions = [], automations = [];
+let wfEntityType = '{{ workflow.entity_type }}';
+let wfTriggerConditions = {{ workflow.trigger_conditions|default:"{}"|safe }};
+let selectedStepId = null;
+let editingStepId = null;
+let editingTrId = null;
+let editingAutoId = null;
+
+// drag state
+let dragStep = null, dragOx = 0, dragOy = 0;
+// connector drawing
+let drawingLine = false, drawFromId = null;
+
+const canvas = document.getElementById('canvas');
+const svgLayer = document.getElementById('svgLayer');
+
+// ── Color picker ──────────────────────────────────────────────────────────
+document.querySelectorAll('#colorPicker input[type=radio]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('#colorPicker .color-swatch').forEach(s => s.style.borderColor = 'transparent');
+    if (r.checked) r.nextElementSibling.style.borderColor = '#1f2937';
+  });
+  if (r.checked) r.nextElementSibling.style.borderColor = '#1f2937';
+});
+
+// ── Action hints ──────────────────────────────────────────────────────────
+const ACTION_HINTS = {
+  assign_user:  'Система автоматически поставит ответственного пользователя на накладную или партию.',
+  set_field:    'Система запишет указанное значение в выбранное поле записи (например, приоритет, тип обработки).',
+  send_notify:  'Система отправит email-уведомление или внутреннее сообщение выбранным получателям.',
+  change_stage: 'Система автоматически изменит этап партии (MAWB) на указанный.',
+  webhook:      'Система выполнит HTTP POST-запрос на внешний URL и передаст данные о событии.',
+};
+function updateActionHint() {
+  const val = document.getElementById('autoActionType').value;
+  const hint = document.getElementById('autoActionHint');
+  hint.textContent = ACTION_HINTS[val] || '';
+  hint.style.display = ACTION_HINTS[val] ? '' : 'none';
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // Init Bootstrap tooltips
+  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => {
+    new bootstrap.Tooltip(el, { trigger: 'hover' });
+  });
+  updateActionHint();
+  document.getElementById('btnAddStep').addEventListener('click', () => openStepModal());
+  document.getElementById('btnAutoLayout').addEventListener('click', autoLayout);
+  canvas.addEventListener('click', (e) => {
+    if (e.target === canvas || e.target === svgLayer) {
+      selectStep(null);
+    }
+  });
+  loadWorkflow();
+});
+
+async function loadWorkflow() {
+  const res = await API.get(`/api/v1/workflows/${WF_ID}/`);
+  const data = await res.json();
+  steps = data.steps || [];
+  transitions = data.transitions || [];
+  automations = data.automations || [];
+  wfEntityType = data.entity_type || 'cargo';
+  wfTriggerConditions = data.trigger_conditions || {};
+  renderAll();
+  renderWorkflowSettings();
+}
+
+function renderAll() {
+  renderSteps();
+  renderTransitions();
+  renderAutomations();
+}
+
+// ── Render Steps ─────────────────────────────────────────────────────────
+function renderSteps() {
+  canvas.querySelectorAll('.wf-step').forEach(el => el.remove());
+  steps.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'wf-step' + (s.id === selectedStepId ? ' selected' : '');
+    el.dataset.id = s.id;
+    el.style.left = s.pos_x + 'px';
+    el.style.top = s.pos_y + 'px';
+    el.style.borderColor = s.color || STEP_COLORS[s.step_type] || '#3b82f6';
+
+    const color = s.color || STEP_COLORS[s.step_type] || '#3b82f6';
+    el.innerHTML = `
+      <div class="wf-step-actions">
+        <button title="Редактировать" onclick="event.stopPropagation();openStepModal(${s.id})"><i class="bi bi-pencil"></i></button>
+        <button class="btn-del" title="Удалить" onclick="event.stopPropagation();deleteStep(${s.id})"><i class="bi bi-trash3"></i></button>
+      </div>
+      <div class="wf-step-header">
+        <span class="step-icon" style="background:${color}"><i class="bi ${STEP_ICONS[s.step_type]||'bi-flag-fill'}"></i></span>
+        <span class="step-name">${esc(s.name)}</span>
+      </div>
+      <div class="wf-step-body">
+        <span class="step-tag ${TAG_CSS[s.step_type]||'tag-stage'}">${TYPE_LABELS[s.step_type]||'Этап'}</span>
+        ${s.stage ? '<span class="step-tag tag-stage">' + esc(s.stage) + '</span>' : ''}
+      </div>
+      <div class="wf-port wf-port-in" data-id="${s.id}" data-dir="in"></div>
+      <div class="wf-port wf-port-out" data-id="${s.id}" data-dir="out"></div>
+    `;
+
+    // Click to select
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectStep(s.id);
+    });
+
+    // Drag
+    el.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.wf-port') || e.target.closest('.wf-step-actions')) return;
+      dragStep = s;
+      dragOx = e.clientX - s.pos_x;
+      dragOy = e.clientY - s.pos_y;
+      el.classList.add('dragging');
+      e.preventDefault();
+    });
+
+    canvas.appendChild(el);
+  });
+
+  // Port events for connector drawing
+  canvas.querySelectorAll('.wf-port-out').forEach(port => {
+    port.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      drawingLine = true;
+      drawFromId = parseInt(port.dataset.id);
+      svgLayer.innerHTML += `<line id="drawLine" x1="0" y1="0" x2="0" y2="0"
+        stroke="#3b82f6" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowDraw)"/>`;
+    });
+  });
+}
+
+// ── Render Transitions (SVG arrows) ──────────────────────────────────────
+function renderTransitions() {
+  // Clear SVG except defs
+  svgLayer.innerHTML = `
+    <defs>
+      <marker id="arrowHead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#6b7280"/>
+      </marker>
+      <marker id="arrowDraw" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/>
+      </marker>
+    </defs>
+  `;
+
+  // Remove old labels
+  canvas.querySelectorAll('.wf-tr-label').forEach(el => el.remove());
+
+  transitions.forEach(tr => {
+    const from = steps.find(s => s.id === tr.from_step);
+    const to   = steps.find(s => s.id === tr.to_step);
+    if (!from || !to) return;
+
+    const fromEl = canvas.querySelector(`.wf-step[data-id="${from.id}"]`);
+    const toEl   = canvas.querySelector(`.wf-step[data-id="${to.id}"]`);
+    if (!fromEl || !toEl) return;
+
+    const x1 = from.pos_x + fromEl.offsetWidth / 2;
+    const y1 = from.pos_y + fromEl.offsetHeight;
+    const x2 = to.pos_x + toEl.offsetWidth / 2;
+    const y2 = to.pos_y;
+
+    // Curved path
+    const midY = (y1 + y2) / 2;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`);
+    path.setAttribute('stroke', '#9ca3af');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('marker-end', 'url(#arrowHead)');
+    path.style.pointerEvents = 'stroke';
+    path.style.cursor = 'pointer';
+    path.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openTrModal(tr.id);
+    });
+    svgLayer.appendChild(path);
+
+    // Label
+    if (tr.label) {
+      const lbl = document.createElement('div');
+      lbl.className = 'wf-tr-label';
+      lbl.textContent = tr.label;
+      lbl.style.left = ((x1 + x2) / 2 - 30) + 'px';
+      lbl.style.top  = (midY - 10) + 'px';
+      lbl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openTrModal(tr.id);
+      });
+      canvas.appendChild(lbl);
+    }
+  });
+}
+
+// ── Mouse move / up for drag & connector ─────────────────────────────────
+document.addEventListener('mousemove', (e) => {
+  // Step drag
+  if (dragStep) {
+    const nx = Math.max(0, e.clientX - dragOx);
+    const ny = Math.max(0, e.clientY - dragOy);
+    dragStep.pos_x = nx;
+    dragStep.pos_y = ny;
+    const el = canvas.querySelector(`.wf-step[data-id="${dragStep.id}"]`);
+    if (el) { el.style.left = nx + 'px'; el.style.top = ny + 'px'; }
+    renderTransitions();
+  }
+  // Connector draw
+  if (drawingLine && drawFromId != null) {
+    const line = document.getElementById('drawLine');
+    if (!line) return;
+    const fromEl = canvas.querySelector(`.wf-step[data-id="${drawFromId}"]`);
+    if (!fromEl) return;
+    const from = steps.find(s => s.id === drawFromId);
+    const rect = canvas.getBoundingClientRect();
+    line.setAttribute('x1', from.pos_x + fromEl.offsetWidth / 2);
+    line.setAttribute('y1', from.pos_y + fromEl.offsetHeight);
+    line.setAttribute('x2', e.clientX - rect.left + canvas.parentElement.scrollLeft);
+    line.setAttribute('y2', e.clientY - rect.top + canvas.parentElement.scrollTop);
+  }
+});
+
+document.addEventListener('mouseup', async (e) => {
+  // End step drag
+  if (dragStep) {
+    const el = canvas.querySelector(`.wf-step[data-id="${dragStep.id}"]`);
+    if (el) el.classList.remove('dragging');
+    // Save position
+    await API.put(`/api/v1/workflows/${WF_ID}/steps/${dragStep.id}/`, {
+      pos_x: dragStep.pos_x, pos_y: dragStep.pos_y,
+    });
+    dragStep = null;
+  }
+  // End connector draw
+  if (drawingLine) {
+    const line = document.getElementById('drawLine');
+    if (line) line.remove();
+
+    // Check if dropped on an input port
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (target && target.classList.contains('wf-port-in')) {
+      const toId = parseInt(target.dataset.id);
+      if (toId !== drawFromId) {
+        // Create transition
+        const res = await API.post(`/api/v1/workflows/${WF_ID}/transitions/`, {
+          from_step: drawFromId, to_step: toId,
+        });
+        const tr = await res.json();
+        if (!tr.error) {
+          transitions.push(tr);
+          renderTransitions();
+        }
+      }
+    }
+    drawingLine = false;
+    drawFromId = null;
+  }
+});
+
+// ── Select step ──────────────────────────────────────────────────────────
+function selectStep(id) {
+  selectedStepId = id;
+  canvas.querySelectorAll('.wf-step').forEach(el => {
+    el.classList.toggle('selected', parseInt(el.dataset.id) === id);
+  });
+}
+
+// ── Step Modal ───────────────────────────────────────────────────────────
+function openStepModal(stepId = null) {
+  editingStepId = stepId;
+  document.getElementById('stepModalTitle').textContent = stepId ? 'Редактировать шаг' : 'Добавить шаг';
+  if (stepId) {
+    const s = steps.find(x => x.id === stepId);
+    if (!s) return;
+    document.getElementById('stepName').value = s.name;
+    document.getElementById('stepType').value = s.step_type;
+    document.getElementById('stepStage').value = s.stage || '';
+    document.getElementById('stepHawbLogistics').value = s.hawb_logistics_status || '';
+    document.getElementById('stepHawbCustoms').value = s.hawb_customs_status || '';
+    document.getElementById('stepSlaHours').value = (s.sla_hours_override != null ? s.sla_hours_override : '');
+    const radio = document.querySelector(`#colorPicker input[value="${s.color}"]`);
+    if (radio) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
+  } else {
+    document.getElementById('stepName').value = '';
+    document.getElementById('stepType').value = 'stage';
+    document.getElementById('stepStage').value = '';
+    document.getElementById('stepHawbLogistics').value = '';
+    document.getElementById('stepHawbCustoms').value = '';
+    document.getElementById('stepSlaHours').value = '';
+    const radio = document.querySelector('#colorPicker input[value="#3b82f6"]');
+    if (radio) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
+  }
+  onStepTypeChange();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('stepModal')).show();
+}
+
+function onStepTypeChange() {
+  const t = document.getElementById('stepType').value;
+  const isStage = t === 'stage';
+  // Cargo workflow: show cargo stage selector
+  document.getElementById('stepStageWrap').style.display = (isStage && wfEntityType === 'cargo') ? '' : 'none';
+  // HAWB workflow: show logistics + customs status selectors
+  document.getElementById('stepHawbLogisticsWrap').style.display = (isStage && wfEntityType === 'hawb') ? '' : 'none';
+  document.getElementById('stepHawbCustomsWrap').style.display = (isStage && wfEntityType === 'hawb') ? '' : 'none';
+  // Auto-set color based on type
+  const color = STEP_COLORS[t] || '#3b82f6';
+  const radio = document.querySelector(`#colorPicker input[value="${color}"]`);
+  if (radio && !editingStepId) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
+}
+
+function onEntityTypeChange() {
+  wfEntityType = document.getElementById('wfEntityType').value;
+  onStepTypeChange();
+}
+
+async function saveStep() {
+  const name = document.getElementById('stepName').value.trim();
+  if (!name) { document.getElementById('stepName').focus(); return; }
+  const stepType = document.getElementById('stepType').value;
+  const isStage = stepType === 'stage';
+  const slaRaw = document.getElementById('stepSlaHours').value.trim();
+  const payload = {
+    name,
+    step_type: stepType,
+    stage: (isStage && wfEntityType === 'cargo') ? document.getElementById('stepStage').value : '',
+    hawb_logistics_status: (isStage && wfEntityType === 'hawb') ? document.getElementById('stepHawbLogistics').value : '',
+    hawb_customs_status: (isStage && wfEntityType === 'hawb') ? document.getElementById('stepHawbCustoms').value : '',
+    color: document.querySelector('#colorPicker input:checked')?.value || '#3b82f6',
+    sla_hours_override: slaRaw === '' ? null : parseFloat(slaRaw),
+  };
+  if (editingStepId) {
+    const res = await API.put(`/api/v1/workflows/${WF_ID}/steps/${editingStepId}/`, payload);
+    const data = await res.json();
+    const idx = steps.findIndex(s => s.id === editingStepId);
+    if (idx !== -1) steps[idx] = { ...steps[idx], ...data };
+  } else {
+    // New step — place at center-ish
+    const scrollLeft = document.getElementById('canvasWrap').scrollLeft;
+    const scrollTop  = document.getElementById('canvasWrap').scrollTop;
+    payload.pos_x = scrollLeft + 200 + Math.random() * 100;
+    payload.pos_y = scrollTop + 100 + steps.length * 120;
+    const res = await API.post(`/api/v1/workflows/${WF_ID}/steps/`, payload);
+    const data = await res.json();
+    steps.push(data);
+  }
+  bootstrap.Modal.getInstance(document.getElementById('stepModal'))?.hide();
+  renderAll();
+}
+
+async function deleteStep(id) {
+  if (!confirm('Удалить шаг? Все связанные переходы тоже будут удалены.')) return;
+  await API.delete(`/api/v1/workflows/${WF_ID}/steps/${id}/`);
+  steps = steps.filter(s => s.id !== id);
+  transitions = transitions.filter(t => t.from_step !== id && t.to_step !== id);
+  if (selectedStepId === id) selectedStepId = null;
+  renderAll();
+}
+
+// ── Transition Modal ─────────────────────────────────────────────────────
+function openTrModal(trId) {
+  editingTrId = trId;
+  const tr = transitions.find(t => t.id === trId);
+  if (!tr) return;
+  document.getElementById('trLabel').value = tr.label || '';
+  document.getElementById('trCondition').value = tr.condition || '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('trModal')).show();
+}
+
+async function saveTransition() {
+  if (!editingTrId) return;
+  const payload = {
+    label: document.getElementById('trLabel').value.trim(),
+    condition: document.getElementById('trCondition').value.trim(),
+  };
+  const res = await API.put(`/api/v1/workflows/${WF_ID}/transitions/${editingTrId}/`, payload);
+  const data = await res.json();
+  const idx = transitions.findIndex(t => t.id === editingTrId);
+  if (idx !== -1) transitions[idx] = { ...transitions[idx], ...data };
+  bootstrap.Modal.getInstance(document.getElementById('trModal'))?.hide();
+  renderTransitions();
+}
+
+async function deleteTransition() {
+  if (!editingTrId) return;
+  await API.delete(`/api/v1/workflows/${WF_ID}/transitions/${editingTrId}/`);
+  transitions = transitions.filter(t => t.id !== editingTrId);
+  bootstrap.Modal.getInstance(document.getElementById('trModal'))?.hide();
+  renderTransitions();
+}
+
+// ── Automations ──────────────────────────────────────────────────────────
+function renderAutomations() {
+  const list = document.getElementById('autoList');
+  // Update transition dropdown
+  const trSel = document.getElementById('autoTransition');
+  trSel.innerHTML = '<option value="">— любой —</option>';
+  transitions.forEach(t => {
+    const from = steps.find(s => s.id === t.from_step);
+    const to   = steps.find(s => s.id === t.to_step);
+    trSel.innerHTML += `<option value="${t.id}">${esc(from?.name||'?')} → ${esc(to?.name||'?')}</option>`;
+  });
+
+  if (!automations.length) {
+    list.innerHTML = '<div style="text-align:center;color:#9ca3af;font-size:11px;padding:12px">Нет правил</div>';
+    return;
+  }
+  list.innerHTML = automations.map(a => `
+    <div class="auto-card">
+      <span class="auto-name">${esc(a.name)}</span>
+      <span class="auto-type">${ACTION_LABELS[a.action_type] || a.action_type}</span>
+      <div class="auto-actions">
+        <button onclick="openAutoModal(${a.id})"><i class="bi bi-pencil"></i></button>
+        <button onclick="deleteAutomation(${a.id})"><i class="bi bi-trash3"></i></button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openAutoModal(autoId = null) {
+  editingAutoId = autoId;
+  document.getElementById('autoModalTitle').textContent = autoId ? 'Редактировать правило' : 'Добавить правило';
+  if (autoId) {
+    const a = automations.find(x => x.id === autoId);
+    if (!a) return;
+    document.getElementById('autoName').value = a.name;
+    document.getElementById('autoActionType').value = a.action_type;
+    document.getElementById('autoTransition').value = a.transition || '';
+  } else {
+    document.getElementById('autoName').value = '';
+    document.getElementById('autoActionType').value = 'assign_user';
+    document.getElementById('autoTransition').value = '';
+  }
+  updateActionHint();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('autoModal')).show();
+}
+
+async function saveAutomation() {
+  const name = document.getElementById('autoName').value.trim();
+  if (!name) { document.getElementById('autoName').focus(); return; }
+  const payload = {
+    name,
+    action_type: document.getElementById('autoActionType').value,
+    transition: document.getElementById('autoTransition').value || null,
+  };
+  if (editingAutoId) {
+    const res = await API.put(`/api/v1/workflows/${WF_ID}/automations/${editingAutoId}/`, payload);
+    const data = await res.json();
+    const idx = automations.findIndex(a => a.id === editingAutoId);
+    if (idx !== -1) automations[idx] = { ...automations[idx], ...data };
+  } else {
+    const res = await API.post(`/api/v1/workflows/${WF_ID}/automations/`, payload);
+    const data = await res.json();
+    automations.push(data);
+  }
+  bootstrap.Modal.getInstance(document.getElementById('autoModal'))?.hide();
+  renderAutomations();
+}
+
+async function deleteAutomation(id) {
+  await API.delete(`/api/v1/workflows/${WF_ID}/automations/${id}/`);
+  automations = automations.filter(a => a.id !== id);
+  renderAutomations();
+}
+
+// ── Auto layout ──────────────────────────────────────────────────────────
+async function autoLayout() {
+  if (!steps.length) return;
+  // Simple top-down layout
+  const startX = 300;
+  let y = 60;
+  const xGap = 220;
+  const yGap = 140;
+
+  // Try topological sort
+  const sorted = topoSort();
+  const positions = [];
+
+  // Arrange in rows by depth
+  const depths = {};
+  sorted.forEach((id, i) => { depths[id] = i; });
+
+  let col = 0;
+  sorted.forEach(id => {
+    const s = steps.find(x => x.id === id);
+    if (!s) return;
+    s.pos_x = startX + (col % 3) * xGap;
+    s.pos_y = 60 + Math.floor(col / 3) * yGap;
+    positions.push({ id: s.id, x: s.pos_x, y: s.pos_y });
+    col++;
+  });
+
+  // Save all
+  await API.post(`/api/v1/workflows/${WF_ID}/layout/`, positions);
+  renderAll();
+}
+
+function topoSort() {
+  const visited = new Set();
+  const result = [];
+  const adj = {};
+  steps.forEach(s => { adj[s.id] = []; });
+  transitions.forEach(t => { if (adj[t.from_step]) adj[t.from_step].push(t.to_step); });
+
+  function dfs(id) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    (adj[id] || []).forEach(next => dfs(next));
+    result.unshift(id);
+  }
+
+  // Start from nodes with no incoming
+  const hasIncoming = new Set(transitions.map(t => t.to_step));
+  steps.filter(s => !hasIncoming.has(s.id)).forEach(s => dfs(s.id));
+  steps.forEach(s => dfs(s.id)); // catch any remaining
+
+  return result;
+}
+
+// ── Utils ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Workflow Settings ────────────────────────────────────────────────────
+function renderWorkflowSettings() {
+  document.getElementById('wfEntityType').value = wfEntityType;
+  document.getElementById('wfAutoStart').checked = {{ workflow.auto_start|yesno:"true,false" }};
+  renderTriggerConditions();
+}
+
+function renderTriggerConditions() {
+  const el = document.getElementById('triggerCondsList');
+  el.innerHTML = '';
+  Object.entries(wfTriggerConditions).forEach(([k, v]) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:4px;align-items:center';
+    row.innerHTML = `
+      <input class="form-control form-control-sm" style="width:45%" placeholder="поле" value="${esc(k)}" data-key="${esc(k)}">
+      <input class="form-control form-control-sm" style="width:45%" placeholder="значение" value="${esc(v)}">
+      <button class="btn btn-outline-danger btn-sm px-1 py-0" onclick="removeTriggerCondition(this)" style="font-size:11px"><i class="bi bi-x"></i></button>`;
+    el.appendChild(row);
+  });
+}
+
+function addTriggerCondition() {
+  const el = document.getElementById('triggerCondsList');
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:4px;align-items:center';
+  row.innerHTML = `
+    <input class="form-control form-control-sm" style="width:45%" placeholder="поле" data-key="">
+    <input class="form-control form-control-sm" style="width:45%" placeholder="значение">
+    <button class="btn btn-outline-danger btn-sm px-1 py-0" onclick="removeTriggerCondition(this)" style="font-size:11px"><i class="bi bi-x"></i></button>`;
+  el.appendChild(row);
+}
+
+function removeTriggerCondition(btn) {
+  btn.closest('div').remove();
+}
+
+async function saveWorkflowSettings() {
+  // Collect trigger conditions from DOM
+  const conds = {};
+  document.querySelectorAll('#triggerCondsList > div').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const k = inputs[0].value.trim();
+    const v = inputs[1].value.trim();
+    if (k) conds[k] = v;
+  });
+  const payload = {
+    entity_type: document.getElementById('wfEntityType').value,
+    trigger_conditions: conds,
+    auto_start: document.getElementById('wfAutoStart').checked,
+  };
+  const res = await API.put(`/api/v1/workflows/${WF_ID}/`, payload);
+  const data = await res.json();
+  wfEntityType = data.entity_type;
+  wfTriggerConditions = data.trigger_conditions || {};
+  renderTriggerConditions();
+  // Flash feedback
+  const btn = document.querySelector('#wfSettingsPanel .btn-cdek-primary');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<i class="bi bi-check-lg"></i> Сохранено';
+  setTimeout(() => { btn.innerHTML = orig; }, 1500);
+}
+</script>
+{% endblock %}

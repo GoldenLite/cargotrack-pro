@@ -1,0 +1,960 @@
+{% extends "cargo/base.html" %}
+{% block title %}HAWB {{ hawb.hawb_number }} — CargoTrack Pro{% endblock %}
+
+{% block extra_head %}
+<style>
+  .status-timeline { position:relative; padding-left:28px; }
+  .status-timeline::before { content:''; position:absolute; left:10px; top:0; bottom:0;
+                              width:2px; background:#e2e8f0; }
+  .timeline-item { position:relative; margin-bottom:6px; }
+  .timeline-dot { position:absolute; left:-22px; top:4px; width:14px; height:14px;
+                  border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 2px #cbd5e1; }
+  .timeline-dot.active { box-shadow:0 0 0 2px #2563eb; background:#2563eb !important; }
+  .timeline-dot.done   { box-shadow:0 0 0 2px #10b981; background:#10b981 !important; }
+  .timeline-dot.pending{ background:#e2e8f0 !important; }
+  .customs-nest { border-left:3px solid #f59e0b; background:#fffbeb;
+                  border-radius:0 6px 6px 0; padding:8px 12px; margin:4px 0; }
+  .status-btn { font-size:11px; padding:3px 10px; border-radius:4px; cursor:pointer;
+                border:1px solid #e2e8f0; background:#fff; transition:all .15s; }
+  .status-btn:hover { background:#eff6ff; border-color:#2563eb; color:#2563eb; }
+  .status-btn.active { background:#2563eb; color:#fff; border-color:#2563eb; }
+  .status-btn.done { background:#f0fdf4; color:#16a34a; border-color:#16a34a; }
+  .customs-btn { font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer;
+                 border:1px solid #fbbf24; background:#fff; transition:all .15s; }
+  .customs-btn:hover { background:#fef3c7; }
+  .customs-btn.active { background:#f59e0b; color:#fff; border-color:#f59e0b; }
+  .customs-btn.done { background:#f0fdf4; color:#16a34a; border-color:#16a34a; }
+
+  /* ── Inline Excel-like редактирование товаров ── */
+  .goods-editable-table td.editable-cell {
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 3px;
+    transition: background .1s;
+    min-height: 24px;
+  }
+  .goods-editable-table td.editable-cell:empty::before {
+    content: '—';
+    color: #94a3b8;
+  }
+  .goods-editable-table td.editable-cell:hover {
+    background: #eff6ff;
+    outline: 1px solid #bfdbfe;
+  }
+  .goods-editable-table td.editable-cell.editing {
+    background: #fff;
+    outline: 2px solid #2563eb;
+    padding: 0;
+  }
+  .goods-editable-table td.editable-cell input,
+  .goods-editable-table td.editable-cell select {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: inherit;
+    font-family: inherit;
+    padding: 4px 6px;
+    box-sizing: border-box;
+  }
+  .goods-editable-table td.editable-cell.saving {
+    background: #fefce8;
+  }
+  .goods-editable-table td.editable-cell.saved {
+    background: #f0fdf4;
+    transition: background 1s;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+  <div>
+    <a href="{% url 'all_hawbs' %}" class="text-muted text-decoration-none small">
+      <i class="bi bi-arrow-left me-1"></i>Все накладные
+    </a>
+    <h5 class="mb-0 fw-bold mt-1">
+      <i class="bi bi-box-seam me-2 text-primary"></i>
+      HAWB <span class="font-monospace">{{ hawb.hawb_number }}</span>
+    </h5>
+  </div>
+  <div class="d-flex gap-2 align-items-center flex-wrap">
+    <!-- Логистический статус -->
+    <span class="badge bg-{{ hawb.status_color }} px-3 py-2" style="font-size:13px">
+      {{ hawb.logistics_status_display }}
+    </span>
+    <!-- Таможенный статус (если активен) -->
+    {% if hawb.is_on_customs and hawb.customs_status %}
+    <span class="badge bg-{{ hawb.customs_status_color }} px-2 py-2" style="font-size:12px">
+      <i class="bi bi-shield-check me-1"></i>{{ hawb.customs_status_label }}
+    </span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Метки -->
+<div class="mb-3 d-flex align-items-center gap-2 flex-wrap">
+  <span class="text-muted small"><i class="bi bi-tags me-1"></i>Метки:</span>
+  {% url 'api_hawb_labels' hawb.id as tp_url %}
+  {% include "cargo/_tag_picker.html" with tag_picker_endpoint=tp_url tag_picker_id="hawb" %}
+</div>
+
+<div class="row g-3">
+
+  <!-- ЛЕВАЯ КОЛОНКА — инфо -->
+  <div class="col-lg-4">
+
+    <!-- Основная информация -->
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-info-circle me-2"></i>Основная информация
+      </div>
+      <div class="card-body">
+        <div class="row g-2 small">
+          <div class="col-6"><div class="text-muted">HAWB номер</div><div class="fw-bold font-monospace">{{ hawb.hawb_number }}</div></div>
+          <div class="col-6"><div class="text-muted">MAWB партия</div>
+            {% if hawb.mawb %}
+              <a href="{% url 'cargo_detail' hawb.mawb.awb_number %}" class="fw-bold font-monospace text-decoration-none">{{ hawb.mawb.awb_number }}</a>
+            {% else %}<span class="text-muted fst-italic">Не привязан</span>{% endif %}
+          </div>
+          <div class="col-6"><div class="text-muted">Тип груза</div><div>{{ hawb.get_cargo_type_display }}</div></div>
+          <div class="col-6"><div class="text-muted">Тип отправки</div><div>{{ hawb.get_shipment_type_display }}</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Получатель -->
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-person me-2"></i>Получатель
+      </div>
+      <div class="card-body">
+        <div class="row g-2 small">
+          <div class="col-12"><div class="text-muted">Наименование</div><div class="fw-semibold">{{ hawb.consignee_name|default:"—" }}</div></div>
+          <div class="col-6"><div class="text-muted">ИНН</div><div class="font-monospace">{{ hawb.consignee_inn|default:"—" }}</div></div>
+          <div class="col-6"><div class="text-muted">Город</div><div>{{ hawb.consignee_city|default:"—" }}</div></div>
+          <div class="col-12"><div class="text-muted">Телефон</div><div>{{ hawb.consignee_phone|default:"—" }}</div></div>
+          {% if hawb.consignee_address %}<div class="col-12"><div class="text-muted">Адрес</div><div>{{ hawb.consignee_address }}</div></div>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Параметры -->
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-boxes me-2"></i>Параметры
+      </div>
+      <div class="card-body">
+        <div class="row g-2 small text-center">
+          <div class="col-6"><div class="fs-5 fw-bold text-primary">{{ hawb.weight|floatformat:2|default:"—" }}</div><div class="text-muted">Вес, кг</div></div>
+          <div class="col-6"><div class="fs-5 fw-bold">{{ hawb.pieces_declared }}</div><div class="text-muted">Мест</div></div>
+        </div>
+        <hr class="my-2">
+        <div class="row g-2 small">
+          <div class="col-6"><div class="text-muted">Стоимость</div>
+            <div class="fw-semibold">{% if hawb.invoice_value %}{{ hawb.invoice_value }} {{ hawb.invoice_currency }}{% else %}—{% endif %}</div>
+          </div>
+          <div class="col-6"><div class="text-muted">Рег. номер ДТ</div>
+            <div class="font-monospace" style="font-size:11px">{{ hawb.customs_declaration_number|default:"—" }}</div>
+          </div>
+          {% if hawb.scan_into_bond %}
+          <div class="col-6"><div class="text-muted">Размещение на СВХ</div><div>{{ hawb.scan_into_bond|date:"d.m.Y H:i" }}</div></div>
+          <div class="col-6"><div class="text-muted">На СВХ</div>
+            <div class="{% if hawb.svh_overdue %}text-danger fw-bold{% else %}text-muted{% endif %}">
+              <i class="bi bi-clock me-1"></i>{{ hawb.svh_timer_display }}
+            </div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Ответственный -->
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-person-badge me-2"></i>Ответственный
+      </div>
+      <div class="card-body small">
+        {% if hawb.assigned_to %}
+          <div class="d-flex align-items-center gap-2">
+            <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0" style="width:36px;height:36px;font-size:14px;font-weight:700">
+              {{ hawb.assigned_to.first_name|first|default:hawb.assigned_to.username|first|upper }}
+            </div>
+            <div>
+              <div class="fw-semibold">{{ hawb.assigned_to.get_full_name|default:hawb.assigned_to.username }}</div>
+              <div class="text-muted">{{ hawb.assigned_to.email|default:"" }}</div>
+            </div>
+          </div>
+        {% else %}<span class="text-muted">Не назначен</span>{% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ПРАВАЯ КОЛОНКА — статусы и документы -->
+  <div class="col-lg-8">
+
+    <!-- ═══ ЛОГИСТИЧЕСКИЙ СТАТУС ═══ -->
+    <div class="card mb-3">
+      <div class="card-header py-2 bg-primary text-white fw-bold small text-uppercase d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-truck me-2"></i>Логистический статус</span>
+        <span class="badge bg-white text-primary" style="font-size:11px">{{ hawb.logistics_status_display }}</span>
+      </div>
+      <div class="card-body">
+        <form method="post" action="{% url 'hawb_detail' hawb.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="change_logistics_status">
+          <div class="status-timeline">
+
+            {% for code, label in logistics_status_choices %}
+
+              {# Определяем группу для вложенности таможни #}
+              {% if code == 'EXPORT_CUSTOMS' or code == 'IMPORT_CUSTOMS' %}
+                <!-- Таможенный блок -->
+                <div class="timeline-item">
+                  <div class="timeline-dot {% if hawb.logistics_status == code %}active{% else %}pending{% endif %}"></div>
+                  <button type="submit" name="logistics_status" value="{{ code }}"
+                          class="status-btn {% if hawb.logistics_status == code %}active{% endif %} w-100 text-start mb-1">
+                    <i class="bi bi-shield-check me-1"></i>{{ label }}
+                  </button>
+
+                  {# Показываем текущий таможенный статус если активен — без вложенной формы #}
+                  {% if hawb.logistics_status == code and hawb.customs_status %}
+                  <div class="customs-nest ms-3">
+                    <div class="small text-muted">
+                      <i class="bi bi-shield-check me-1"></i>
+                      Таможенный статус: <strong>{{ hawb.customs_status_label }}</strong>
+                    </div>
+                  </div>
+                  {% endif %}
+                </div>
+
+              {% else %}
+                <div class="timeline-item">
+                  <div class="timeline-dot {% if hawb.logistics_status == code %}active{% else %}pending{% endif %}"></div>
+                  <button type="submit" name="logistics_status" value="{{ code }}"
+                          class="status-btn {% if hawb.logistics_status == code %}active{% endif %} w-100 text-start">
+                    {% if code == 'DELIVERED' %}<i class="bi bi-check2-all me-1 text-success"></i>
+                    {% elif code == 'RETURNED' %}<i class="bi bi-arrow-return-left me-1 text-danger"></i>
+                    {% endif %}
+                    {{ label }}
+                  </button>
+                </div>
+              {% endif %}
+
+            {% endfor %}
+
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ═══ ТАМОЖЕННЫЙ СТАТУС (отдельная карточка) ═══ -->
+    {% if hawb.is_on_customs %}
+    <div class="card mb-3 border-warning">
+      <div class="card-header py-2 fw-bold small text-uppercase d-flex justify-content-between align-items-center"
+           style="background:#fffbeb;color:#92400e">
+        <span><i class="bi bi-shield-check me-2"></i>Таможенный статус</span>
+        {% if hawb.customs_status %}
+        <span class="badge bg-{{ hawb.customs_status_color }} {% if hawb.customs_status_color == 'warning' %}text-dark{% endif %}">
+          {{ hawb.customs_status_label }}
+        </span>
+        {% endif %}
+      </div>
+      <div class="card-body py-3">
+        <form method="post" action="{% url 'hawb_detail' hawb.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="change_customs_status">
+          <div class="d-flex flex-wrap gap-2">
+            {% for ccode, clabel in customs_status_choices %}
+            {% if ccode %}
+            <button type="submit" name="customs_status" value="{{ ccode }}"
+                    class="customs-btn {% if hawb.customs_status == ccode %}active{% endif %}">
+              {% if ccode == 'RELEASED' %}<i class="bi bi-check-circle me-1"></i>{% endif %}
+              {% if ccode == 'HOLD' %}<i class="bi bi-pause-circle me-1"></i>{% endif %}
+              {% if ccode == 'REJECTED' %}<i class="bi bi-x-circle me-1"></i>{% endif %}
+              {{ clabel }}
+            </button>
+            {% endif %}
+            {% endfor %}
+          </div>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- ═══ ЧЕКЛИСТ ДОКУМЕНТОВ (динамический) ═══ -->
+    <div class="card mb-3 border-primary" id="checklistCard">
+      <div class="card-header py-2 bg-primary text-white fw-bold small text-uppercase d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-folder-check me-2"></i>Чеклист документов</span>
+        <div class="d-flex align-items-center gap-2">
+          <!-- Прогресс: получено обязательных / всего обязательных -->
+          <span class="badge {% if checklist_ready %}bg-success{% else %}bg-white text-primary{% endif %} px-2">
+            {% if checklist_ready %}<i class="bi bi-check-all me-1"></i>{% endif %}
+            {{ checklist_received }}/{{ checklist_total }}
+          </span>
+          <!-- Кнопка "Заполнить по шаблону категории" -->
+          <form method="post" action="{% url 'hawb_detail' hawb.pk %}" class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="checklist_populate">
+            <button type="submit" class="btn btn-sm btn-light py-0 px-2"
+                    style="font-size:11px" title="Добавить документы по шаблону категории {{ hawb.cargo_type }}">
+              <i class="bi bi-arrow-repeat me-1"></i>Шаблон {{ hawb.cargo_type }}
+            </button>
+          </form>
+        </div>
+      </div>
+      <div class="card-body p-0">
+
+        <!-- Прогресс-бар -->
+        <div class="px-3 pt-3 pb-1">
+          <div class="d-flex justify-content-between mb-1" style="font-size:12px">
+            <span class="text-muted">
+              Получено: <strong>{{ checklist_received }}</strong>
+              из <strong>{{ checklist_total }}</strong>
+              {% if checklist_required %}
+              (обязательных: {{ checklist_required }})
+              {% endif %}
+            </span>
+            <span class="fw-semibold {% if checklist_ready %}text-success{% else %}text-warning{% endif %}">
+              {% if checklist_ready %}
+                <i class="bi bi-check-circle-fill me-1"></i>Готово к подаче
+              {% else %}
+                <i class="bi bi-clock me-1"></i>Ожидается документов
+              {% endif %}
+            </span>
+          </div>
+          <div class="progress mb-0" style="height:5px;border-radius:3px">
+            {% if checklist_total %}
+            <div class="progress-bar {% if checklist_ready %}bg-success{% else %}bg-warning{% endif %}"
+                 style="width:{% widthratio checklist_received checklist_total 100 %}%;transition:width .3s"></div>
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- Список элементов -->
+        {% if checklist %}
+        <ul class="list-unstyled mb-0" style="max-height:360px;overflow-y:auto">
+          {% for item in checklist %}
+          <li class="d-flex align-items-center gap-2 px-3 py-2 border-bottom
+                      {% if item.is_received %}bg-success bg-opacity-5{% elif item.is_required %}bg-light{% endif %}"
+              style="font-size:13px">
+
+            <!-- Чекбокс "получен" -->
+            <form method="post" action="{% url 'hawb_detail' hawb.pk %}" class="d-flex align-items-center m-0">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="checklist_toggle">
+              <input type="hidden" name="item_id" value="{{ item.pk }}">
+              <button type="submit" class="btn p-0 border-0 bg-transparent flex-shrink-0"
+                      title="{% if item.is_received %}Отметить как не получен{% else %}Отметить как получен{% endif %}">
+                {% if item.is_received %}
+                  <i class="bi bi-check-circle-fill text-success" style="font-size:20px"></i>
+                {% else %}
+                  <i class="bi bi-circle text-muted" style="font-size:20px"></i>
+                {% endif %}
+              </button>
+            </form>
+
+            <!-- Название -->
+            <div class="flex-grow-1 text-truncate">
+              <span class="{% if item.is_received %}text-decoration-line-through text-muted{% endif %}">
+                {{ item.document_type.name }}
+              </span>
+            </div>
+
+            <!-- Бейдж обязательный / доп. -->
+            <form method="post" action="{% url 'hawb_detail' hawb.pk %}" class="d-flex m-0">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="checklist_toggle_required">
+              <input type="hidden" name="item_id" value="{{ item.pk }}">
+              <button type="submit"
+                      class="badge border-0 {% if item.is_required %}bg-danger{% else %}bg-secondary bg-opacity-50 text-dark{% endif %}"
+                      style="font-size:10px;cursor:pointer"
+                      title="Нажмите, чтобы {% if item.is_required %}сделать необязательным{% else %}сделать обязательным{% endif %}">
+                {% if item.is_required %}обяз.{% else %}доп.{% endif %}
+              </button>
+            </form>
+
+            <!-- Удалить -->
+            <form method="post" action="{% url 'hawb_detail' hawb.pk %}" class="m-0">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="checklist_remove">
+              <input type="hidden" name="item_id" value="{{ item.pk }}">
+              <button type="submit" class="btn btn-sm p-0 border-0 bg-transparent text-muted"
+                      title="Удалить из чеклиста"
+                      onclick="return confirm('Удалить «{{ item.document_type.name }}» из чеклиста?')">
+                <i class="bi bi-x-lg" style="font-size:12px"></i>
+              </button>
+            </form>
+
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <div class="px-3 py-3 text-muted small">
+          <i class="bi bi-folder me-1"></i>
+          Чеклист пуст. Нажмите «Шаблон» или добавьте документы вручную.
+        </div>
+        {% endif %}
+
+        <!-- Кнопка добавить + поиск -->
+        <div class="px-3 py-2 border-top bg-light">
+          <button class="btn btn-sm btn-outline-primary w-100"
+                  type="button"
+                  id="checklistAddBtn"
+                  onclick="toggleChecklistSearch()">
+            <i class="bi bi-plus-lg me-1"></i>Добавить документ
+          </button>
+        </div>
+
+        <!-- Панель поиска (скрыта по умолчанию) -->
+        <div id="checklistSearchPanel" class="px-3 pb-3 bg-light border-top" style="display:none">
+          <div class="pt-2 pb-1">
+            <div class="input-group input-group-sm">
+              <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
+              <input type="text"
+                     id="checklistSearchInput"
+                     class="form-control"
+                     placeholder="Поиск документа..."
+                     autocomplete="off"
+                     oninput="searchDocTypes(this.value)">
+              <button class="btn btn-outline-secondary" type="button" onclick="toggleChecklistSearch()">
+                <i class="bi bi-x-lg"></i>
+              </button>
+            </div>
+          </div>
+          <div id="checklistSearchResults"
+               style="max-height:240px;overflow-y:auto;background:#fff;border:1px solid #dee2e6;border-radius:6px">
+            <div class="p-2 text-muted small text-center">Начните вводить название...</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Список документов -->
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white d-flex justify-content-between">
+        <span><i class="bi bi-paperclip me-2"></i>Документы накладной</span>
+        <button class="btn btn-sm btn-outline-primary py-0" data-bs-toggle="collapse" data-bs-target="#addDocForm">
+          <i class="bi bi-plus-lg me-1"></i>Добавить
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="collapse mb-3" id="addDocForm">
+          <div class="p-3 bg-light rounded border">
+            <form method="post" action="{% url 'hawb_detail' hawb.pk %}">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="add_document">
+              <div class="row g-2">
+                <div class="col-md-4">
+                  <select name="doc_type" class="form-select form-select-sm">
+                    {% for code, label in doc_type_choices %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+                  </select>
+                </div>
+                <div class="col-md-8">
+                  <input type="text" name="doc_name" class="form-control form-control-sm" placeholder="Название документа" required>
+                </div>
+                <div class="col-md-4"><input type="text" name="doc_number" class="form-control form-control-sm" placeholder="Номер"></div>
+                <div class="col-md-4"><input type="date" name="issue_date" class="form-control form-control-sm"></div>
+                <div class="col-md-4 d-flex align-items-center">
+                  <div class="form-check"><input class="form-check-input" type="checkbox" name="is_received" id="isr"><label class="form-check-label small" for="isr">Получен</label></div>
+                </div>
+                <div class="col-12"><button type="submit" class="btn btn-sm btn-primary"><i class="bi bi-plus-lg me-1"></i>Добавить</button></div>
+              </div>
+            </form>
+          </div>
+        </div>
+        {% if documents %}
+        <table class="table table-sm table-hover mb-0 align-middle">
+          <thead><tr style="background:#f0f4f8;font-size:11px"><th style="color:#374151">Тип</th><th style="color:#374151">Название / №</th><th style="color:#374151">Дата</th><th class="text-center" style="color:#374151">Получен</th><th></th></tr></thead>
+          <tbody>
+            {% for doc in documents %}
+            <tr>
+              <td><span class="badge bg-light text-dark border" style="font-size:10px">{{ doc.get_doc_type_display }}</span></td>
+              <td class="small"><div class="fw-semibold">{{ doc.name }}</div>{% if doc.number %}<div class="text-muted font-monospace" style="font-size:10px">№ {{ doc.number }}</div>{% endif %}</td>
+              <td class="small text-muted">{% if doc.issue_date %}{{ doc.issue_date|date:"d.m.Y" }}{% else %}—{% endif %}</td>
+              <td class="text-center">
+                <form method="post" action="{% url 'hawb_detail' hawb.pk %}">{% csrf_token %}<input type="hidden" name="action" value="toggle_document"><input type="hidden" name="doc_id" value="{{ doc.pk }}">
+                <button type="submit" class="btn btn-sm p-0 border-0 bg-transparent">{% if doc.is_received %}<i class="bi bi-check-circle-fill text-success" style="font-size:18px"></i>{% else %}<i class="bi bi-circle text-muted" style="font-size:18px"></i>{% endif %}</button></form>
+              </td>
+              <td>
+                <form method="post" action="{% url 'hawb_detail' hawb.pk %}" onsubmit="return confirm('Удалить?')">{% csrf_token %}<input type="hidden" name="action" value="delete_document"><input type="hidden" name="doc_id" value="{{ doc.pk }}">
+                <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1"><i class="bi bi-x"></i></button></form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<p class="text-muted small mb-0"><i class="bi bi-folder me-1"></i>Документы не добавлены</p>{% endif %}
+      </div>
+    </div>
+
+    <!-- Товарные позиции -->
+    <div class="card">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white d-flex justify-content-between">
+        <span><i class="bi bi-list-check me-2"></i>Товарные позиции</span>
+        <button class="btn btn-sm btn-outline-primary py-0" data-bs-toggle="collapse" data-bs-target="#addGoodForm">
+          <i class="bi bi-plus-lg me-1"></i>Добавить
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="collapse mb-3" id="addGoodForm">
+          <div class="p-3 bg-light rounded border">
+            <form method="post" action="{% url 'hawb_detail' hawb.pk %}">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="add_good">
+              <div class="row g-2">
+                <div class="col-md-6"><label class="form-label small text-muted mb-1">Наименование *</label><input type="text" name="name" class="form-control form-control-sm" required></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Код ТН ВЭД</label><input type="text" name="tnved_code" class="form-control form-control-sm font-monospace"></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Торговая марка</label><input type="text" name="brand" class="form-control form-control-sm"></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Изготовитель</label><input type="text" name="manufacturer" class="form-control form-control-sm"></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Модель</label><input type="text" name="model" class="form-control form-control-sm"></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Артикул</label><input type="text" name="article" class="form-control form-control-sm"></div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">Количество</label>
+                  <div class="input-group input-group-sm"><input type="number" name="quantity" value="1" class="form-control" step="0.001" min="0"><input type="text" name="unit" value="шт" class="form-control" style="max-width:50px"></div>
+                </div>
+                <div class="col-md-2"><label class="form-label small text-muted mb-1">Вес нетто</label><input type="number" name="weight_net" class="form-control form-control-sm" step="0.001"></div>
+                <div class="col-md-2"><label class="form-label small text-muted mb-1">Вес брутто</label><input type="number" name="weight_gross" class="form-control form-control-sm" step="0.001"></div>
+                <div class="col-md-2"><label class="form-label small text-muted mb-1">Цена за ед.</label><input type="number" name="unit_price" class="form-control form-control-sm" step="0.01"></div>
+                <div class="col-md-2"><label class="form-label small text-muted mb-1">Итого</label><input type="number" name="total_value" class="form-control form-control-sm" step="0.01"></div>
+                <div class="col-md-2"><label class="form-label small text-muted mb-1">Валюта</label>
+                  <select name="currency" class="form-select form-select-sm">{% for code, label in currency_choices %}<option value="{{ code }}">{{ code }}</option>{% endfor %}</select>
+                </div>
+                <div class="col-12"><button type="submit" class="btn btn-sm btn-primary"><i class="bi bi-plus-lg me-1"></i>Добавить позицию</button></div>
+              </div>
+            </form>
+          </div>
+        </div>
+        {% if goods %}
+        <div class="table-responsive">
+          <table class="table table-sm mb-0 align-middle goods-editable-table" style="font-size:12px" id="goodsEditTable">
+            <thead><tr style="background:#f0f4f8">
+              <th style="color:#374151;min-width:160px">Наименование</th>
+              <th style="color:#374151;min-width:90px">ТН ВЭД</th>
+              <th style="color:#374151;min-width:90px">Марка</th>
+              <th style="color:#374151;min-width:100px">Изготовитель</th>
+              <th style="color:#374151;min-width:90px">Модель</th>
+              <th style="color:#374151;min-width:80px">Артикул</th>
+              <th class="text-end" style="color:#374151;min-width:60px">Кол-во</th>
+              <th style="color:#374151;min-width:40px">Ед.</th>
+              <th class="text-end" style="color:#374151;min-width:65px">Нетто</th>
+              <th class="text-end" style="color:#374151;min-width:65px">Брутто</th>
+              <th class="text-end" style="color:#374151;min-width:75px">Цена ед.</th>
+              <th class="text-end" style="color:#374151;min-width:75px">Итого</th>
+              <th style="color:#374151;min-width:55px">Вал.</th>
+              <th style="color:#374151;min-width:60px">Тип груза</th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              {% for good in goods %}
+              <tr data-good-id="{{ good.pk }}">
+                <td class="editable-cell" data-field="name" data-type="text">{{ good.name }}</td>
+                <td class="editable-cell font-monospace" data-field="tnved_code" data-type="text">{{ good.tnved_code|default:"" }}</td>
+                <td class="editable-cell" data-field="brand" data-type="text">{{ good.brand|default:"" }}</td>
+                <td class="editable-cell" data-field="manufacturer" data-type="text">{{ good.manufacturer|default:"" }}</td>
+                <td class="editable-cell" data-field="model" data-type="text">{{ good.model|default:"" }}</td>
+                <td class="editable-cell" data-field="article" data-type="text">{{ good.article|default:"" }}</td>
+                <td class="editable-cell text-end" data-field="quantity" data-type="number">{{ good.quantity }}</td>
+                <td class="editable-cell" data-field="unit" data-type="text">{{ good.unit }}</td>
+                <td class="editable-cell text-end" data-field="weight_net" data-type="number">{{ good.weight_net|floatformat:3|default:"" }}</td>
+                <td class="editable-cell text-end" data-field="weight_gross" data-type="number">{{ good.weight_gross|floatformat:3|default:"" }}</td>
+                <td class="editable-cell text-end" data-field="unit_price" data-type="number">{{ good.unit_price|floatformat:2|default:"" }}</td>
+                <td class="editable-cell text-end" data-field="total_value" data-type="number">{{ good.total_value|floatformat:2|default:"" }}</td>
+                <td class="editable-cell" data-field="currency" data-type="select"
+                    data-options="USD,EUR,CNY,GBP,RUB" data-value="{{ good.currency }}">{{ good.currency }}</td>
+                <td class="editable-cell" data-field="cargo_type" data-type="select"
+                    data-options="B2C,B2B,C2C,DOC" data-value="{{ good.cargo_type }}">{{ good.cargo_type|default:"" }}</td>
+                <td>
+                  <form method="post" action="{% url 'hawb_detail' hawb.pk %}" onsubmit="return confirm('Удалить позицию?')">
+                    {% csrf_token %}<input type="hidden" name="action" value="delete_good"><input type="hidden" name="good_id" value="{{ good.pk }}">
+                    <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1"><i class="bi bi-x"></i></button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div id="goodsSaveIndicator" class="text-end mt-1" style="font-size:11px;min-height:16px"></div>
+        {% else %}<p class="text-muted small mb-0"><i class="bi bi-inbox me-1"></i>Товарные позиции не добавлены</p>{% endif %}
+      </div>
+    </div>
+
+    {# ── Бизнес-процессы ─────────────────────────────────────────────── #}
+    <div id="wf-instances-block" class="mt-3" style="display:none">
+      <div class="card">
+        <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-diagram-3 me-1"></i>Бизнес-процессы</span>
+          <button class="btn btn-sm btn-outline-secondary" id="wf-start-btn" data-bs-toggle="modal" data-bs-target="#wfStartModal">
+            <i class="bi bi-play-circle me-1"></i>Запустить
+          </button>
+        </div>
+        <div class="card-body p-2" id="wf-instances-list">
+          <div class="text-muted small text-center py-2">Нет активных процессов</div>
+        </div>
+      </div>
+    </div>
+
+    {# Модальное окно ручного запуска #}
+    <div class="modal fade" id="wfStartModal" tabindex="-1">
+      <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+          <div class="modal-header py-2">
+            <h6 class="modal-title">Запустить процесс</h6>
+            <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <select class="form-select form-select-sm" id="wf-select-workflow">
+              <option value="">— выберите воркфлоу —</option>
+            </select>
+          </div>
+          <div class="modal-footer py-2">
+            <button class="btn btn-sm btn-primary" id="wf-start-confirm">Запустить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Чеклист: поиск документов ──────────────────────────────────────────────
+const HAWB_ID    = {{ hawb.pk }};
+const SEARCH_URL = '{% url "document_types_search" %}';
+
+function toggleChecklistSearch() {
+  const panel = document.getElementById('checklistSearchPanel');
+  const input = document.getElementById('checklistSearchInput');
+  const btn   = document.getElementById('checklistAddBtn');
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    btn.innerHTML = '<i class="bi bi-dash-lg me-1"></i>Скрыть поиск';
+    input.focus();
+    searchDocTypes('');
+  } else {
+    panel.style.display = 'none';
+    btn.innerHTML = '<i class="bi bi-plus-lg me-1"></i>Добавить документ';
+    input.value = '';
+  }
+}
+
+let _searchTimer;
+function searchDocTypes(q) {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => _doSearch(q), 200);
+}
+
+function _doSearch(q) {
+  const resultsEl = document.getElementById('checklistSearchResults');
+  resultsEl.innerHTML = '<div class="p-2 text-muted small text-center"><i class="bi bi-hourglass me-1"></i>Поиск...</div>';
+
+  const url = `${SEARCH_URL}?q=${encodeURIComponent(q)}&hawb_id=${HAWB_ID}`;
+  fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.results || data.results.length === 0) {
+        resultsEl.innerHTML = '<div class="p-3 text-muted small text-center">Ничего не найдено</div>';
+        return;
+      }
+
+      let html = '';
+      let lastCat = null;
+      data.results.forEach(dt => {
+        if (dt.category !== lastCat) {
+          html += `<div class="px-3 py-1 text-muted" style="font-size:10px;font-weight:600;background:#f8fafc;border-bottom:1px solid #e2e8f0;text-transform:uppercase;letter-spacing:.5px">${dt.category}</div>`;
+          lastCat = dt.category;
+        }
+        html += `
+          <div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom"
+               style="cursor:pointer;font-size:13px"
+               onmouseover="this.style.background='#eff6ff'"
+               onmouseout="this.style.background=''"
+               onclick="addChecklistItem(${dt.id})">
+            <i class="bi bi-file-earmark-text text-primary flex-shrink-0"></i>
+            <span class="flex-grow-1">${dt.name}</span>
+            <i class="bi bi-plus-circle text-primary"></i>
+          </div>`;
+      });
+      resultsEl.innerHTML = html;
+    })
+    .catch(() => {
+      resultsEl.innerHTML = '<div class="p-2 text-danger small text-center">Ошибка загрузки</div>';
+    });
+}
+
+function addChecklistItem(docTypeId) {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '{% url "hawb_detail" hawb.pk %}';
+  form.style.display = 'none';
+  const fields = {
+    'csrfmiddlewaretoken': '{{ csrf_token }}',
+    'action':            'checklist_add',
+    'document_type_id':  docTypeId,
+    'is_required':       'true',
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    const inp = document.createElement('input');
+    inp.type  = 'hidden';
+    inp.name  = name;
+    inp.value = value;
+    form.appendChild(inp);
+  }
+  document.body.appendChild(form);
+  form.submit();
+}
+
+// ── Inline Excel-like редактирование товарных позиций ─────────────────────
+(function() {
+  const DETAIL_URL = '{% url "hawb_detail" hawb.pk %}';
+  const CSRF = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  const indicator = document.getElementById('goodsSaveIndicator');
+
+  function getCsrf() {
+    return document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  }
+
+  function showIndicator(msg, cls) {
+    if (!indicator) return;
+    indicator.textContent = msg;
+    indicator.className = 'text-end mt-1 ' + cls;
+    if (cls === 'text-success') {
+      setTimeout(() => { indicator.textContent = ''; }, 2000);
+    }
+  }
+
+  function saveCell(cell, goodId, field, value) {
+    cell.classList.add('saving');
+    showIndicator('Сохранение...', 'text-muted');
+
+    const body = new URLSearchParams({
+      csrfmiddlewaretoken: getCsrf(),
+      action: 'update_good',
+      good_id: goodId,
+      field: field,
+      value: value,
+    });
+
+    fetch(DETAIL_URL, { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+      .then(r => r.json())
+      .then(data => {
+        cell.classList.remove('saving');
+        if (data.ok) {
+          cell.classList.add('saved');
+          setTimeout(() => cell.classList.remove('saved'), 1200);
+          showIndicator('Сохранено', 'text-success');
+        } else {
+          showIndicator('Ошибка: ' + (data.error || 'неизвестная'), 'text-danger');
+        }
+      })
+      .catch(() => {
+        cell.classList.remove('saving');
+        showIndicator('Ошибка сети', 'text-danger');
+      });
+  }
+
+  let _activeCancel = null;
+
+  function startEdit(cell) {
+    // Явно отменяем предыдущую активную ячейку (blur не всегда срабатывает на <td>)
+    if (_activeCancel && !cell.classList.contains('editing')) {
+      const prev = _activeCancel;
+      _activeCancel = null;
+      prev();
+    }
+    if (cell.classList.contains('editing')) return;
+
+    const field = cell.dataset.field;
+    const dtype = cell.dataset.type;
+    const goodId = cell.closest('tr').dataset.goodId;
+    const currentText = cell.textContent.trim();
+
+    cell.classList.add('editing');
+    cell.setAttribute('data-original', currentText);
+
+    let input;
+    if (dtype === 'select') {
+      input = document.createElement('select');
+      const options = (cell.dataset.options || '').split(',');
+      const currentVal = cell.dataset.value || currentText;
+      options.forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.trim();
+        o.textContent = opt.trim();
+        if (opt.trim() === currentVal) o.selected = true;
+        input.appendChild(o);
+      });
+    } else {
+      input = document.createElement('input');
+      input.type = dtype === 'number' ? 'number' : 'text';
+      input.value = currentText === '—' ? '' : currentText;
+      if (dtype === 'number') { input.step = 'any'; }
+    }
+
+    cell.textContent = '';
+    cell.appendChild(input);
+    input.focus();
+    if (dtype === 'text') {
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }
+
+    function cancel() {
+      if (!cell.classList.contains('editing')) return;
+      input.removeEventListener('blur', cancel);
+      if (_activeCancel === cancel) _activeCancel = null;
+      cell.classList.remove('editing');
+      cell.textContent = cell.getAttribute('data-original');
+    }
+
+    function commit() {
+      if (!cell.classList.contains('editing')) return;
+      input.removeEventListener('blur', cancel);
+      if (_activeCancel === cancel) _activeCancel = null;
+      const newVal = input.value.trim();
+      const original = cell.getAttribute('data-original');
+      cell.classList.remove('editing');
+      if (dtype === 'select') cell.setAttribute('data-value', newVal);
+      cell.textContent = newVal || '';
+      if (newVal !== (original === '—' ? '' : original)) {
+        saveCell(cell, goodId, field, newVal);
+      }
+    }
+
+    _activeCancel = cancel;
+    input.addEventListener('blur', cancel);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      }
+      if (e.key === 'Escape') {
+        cancel();
+      }
+      // Tab — сохранить и перейти к следующей ячейке
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        commit();
+        const row = cell.closest('tr');
+        const cells = Array.from(row.querySelectorAll('.editable-cell'));
+        const idx = cells.indexOf(cell);
+        const next = cells[e.shiftKey ? idx - 1 : idx + 1];
+        if (next) setTimeout(() => startEdit(next), 0);
+      }
+    });
+  }
+
+  document.querySelectorAll('.goods-editable-table .editable-cell').forEach(cell => {
+    cell.addEventListener('click', () => startEdit(cell));
+  });
+})();
+</script>
+
+<script>
+// ── Бизнес-процессы: загрузка и отображение инстансов ─────────────────────
+(function(){
+  const HAWB_ID = {{ hawb.pk }};
+  const wfBlock = document.getElementById('wf-instances-block');
+  const wfList  = document.getElementById('wf-instances-list');
+  const wfSelect = document.getElementById('wf-select-workflow');
+
+  function statusBadge(status) {
+    const map = {active: 'primary', completed: 'success', cancelled: 'secondary'};
+    const labels = {active: 'Активен', completed: 'Завершён', cancelled: 'Отменён'};
+    return `<span class="badge bg-${map[status]||'secondary'}">${labels[status]||status}</span>`;
+  }
+
+  function renderStep(step, isCurrent) {
+    if (!step) return '<span class="text-muted">—</span>';
+    const cls = isCurrent ? 'fw-bold text-primary' : 'text-muted';
+    return `<span class="${cls}">${step.name}</span>`;
+  }
+
+  function renderProgress(inst) {
+    const steps = inst.steps || [];
+    if (!steps.length) return '';
+    return steps.map((s, i) => {
+      const isCur = inst.current_step && s.id === inst.current_step.id;
+      const isDone = inst.progress > i + 1 || inst.status === 'completed';
+      let cls = isDone ? 'bg-success' : (isCur ? 'bg-primary' : 'bg-light border');
+      return `<div class="wf-step-dot rounded-circle ${cls}" style="width:12px;height:12px;display:inline-block;margin:0 2px" title="${s.name}"></div>`;
+    }).join('');
+  }
+
+  function renderInstance(inst) {
+    return `
+      <div class="border rounded p-2 mb-2 small" id="wf-inst-${inst.id}">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="fw-semibold">${inst.workflow_name}</span>
+          <div>
+            ${statusBadge(inst.status)}
+            ${inst.status==='active'?`<button class="btn btn-xs btn-outline-danger ms-1 py-0 px-1 wf-cancel-btn" data-id="${inst.id}">Отменить</button>`:''}
+          </div>
+        </div>
+        <div class="mb-1">${renderProgress(inst)} <span class="text-muted ms-1">${inst.progress}/${inst.total_steps}</span></div>
+        <div class="text-muted">Текущий шаг: ${inst.current_step ? inst.current_step.name : '—'}</div>
+      </div>`;
+  }
+
+  function loadInstances() {
+    fetch(`/api/v1/hawbs/${HAWB_ID}/workflow-instances/`)
+      .then(r => r.json())
+      .then(data => {
+        const instances = data.instances || [];
+        wfBlock.style.display = '';
+        if (!instances.length) {
+          wfList.innerHTML = '<div class="text-muted small text-center py-2">Нет активных процессов</div>';
+        } else {
+          wfList.innerHTML = instances.map(renderInstance).join('');
+          wfList.querySelectorAll('.wf-cancel-btn').forEach(btn => {
+            btn.addEventListener('click', () => cancelInstance(btn.dataset.id));
+          });
+        }
+      })
+      .catch(() => { wfBlock.style.display = ''; });
+  }
+
+  function cancelInstance(id) {
+    if (!confirm('Отменить бизнес-процесс?')) return;
+    fetch(`/api/v1/workflow-instances/${id}/cancel/`, {method:'POST', headers:{'X-CSRFToken': getCsrf()}})
+      .then(r => r.json())
+      .then(d => { if (d.error) alert(d.error); else loadInstances(); });
+  }
+
+  function getCsrf() {
+    return document.cookie.split('; ').find(r=>r.startsWith('csrftoken='))?.split('=')[1]||'';
+  }
+
+  // Загрузить список доступных воркфлоу для ручного запуска
+  fetch('/api/v1/workflows/')
+    .then(r => r.json())
+    .then(data => {
+      (data.workflows||[]).filter(w => w.entity_type === 'hawb').forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.id; opt.textContent = w.name;
+        wfSelect.appendChild(opt);
+      });
+    });
+
+  document.getElementById('wf-start-confirm')?.addEventListener('click', () => {
+    const wfId = wfSelect.value;
+    if (!wfId) return;
+    fetch(`/api/v1/workflows/${wfId}/start/`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','X-CSRFToken': getCsrf()},
+      body: JSON.stringify({entity_type:'hawb', entity_id: HAWB_ID})
+    }).then(r => r.json()).then(d => {
+      if (d.error) alert(d.error);
+      else { bootstrap.Modal.getInstance(document.getElementById('wfStartModal')).hide(); loadInstances(); }
+    });
+  });
+
+  loadInstances();
+})();
+</script>
+{% endblock %}

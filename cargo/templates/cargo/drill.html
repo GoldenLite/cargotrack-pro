@@ -1,0 +1,309 @@
+{% extends "cargo/base.html" %}
+{% load static %}
+{% block title %}Drill-down — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Drill-down{% if entity_label %} — {{ entity_label }}{% endif %}{% endblock %}
+
+{% block extra_head %}
+<script src="{% static 'cargo/js/cql_builder.js' %}"></script>
+<style>
+.drill-page { padding: 16px; display:flex; flex-direction:column; gap:12px; }
+.drill-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.drill-title { font-size:15px; font-weight:600; color:#111827; margin:0; }
+.drill-title small { font-weight:400; color:#6b7280; }
+.drill-actions { display:flex; gap:8px; align-items:center; }
+.drill-filter-box {
+  background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px 12px;
+}
+.drill-filter-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+.drill-filter-title { font-size:11px; text-transform:uppercase; color:#6b7280; font-weight:600; letter-spacing:.4px; }
+.drill-table-wrap { background:#fff; border:1px solid #e5e7eb; border-radius:8px; overflow:auto; max-height:calc(100vh - 320px); }
+.drill-table { width:100%; border-collapse:collapse; font-size:13px; }
+.drill-table thead th { position:sticky; top:0; background:#f9fafb; color:#374151; font-weight:600; font-size:11px;
+  text-transform:uppercase; letter-spacing:.3px; padding:8px 10px; border-bottom:1px solid #e5e7eb; text-align:left; white-space:nowrap; }
+.drill-table tbody td { padding:8px 10px; border-bottom:1px solid #f3f4f6; }
+.drill-table tbody tr:hover { background:#f9fafb; cursor:pointer; }
+.drill-table .align-right { text-align:right; }
+.drill-table .align-center { text-align:center; }
+.drill-meta { display:flex; align-items:center; gap:12px; font-size:12px; color:#6b7280; }
+.drill-empty { text-align:center; padding:36px 16px; color:#9ca3af; }
+.drill-entity-tabs { display:flex; gap:4px; margin-bottom:8px; }
+.drill-entity-tabs button {
+  padding:5px 10px; font-size:12px; border:1px solid #e5e7eb; border-radius:6px; background:#fff; color:#374151; cursor:pointer;
+}
+.drill-entity-tabs button.active { background:#eff6ff; border-color:#2563eb; color:#1d4ed8; font-weight:600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="drill-page">
+
+  <div class="drill-head">
+    <div>
+      <h1 class="drill-title">
+        <i class="bi bi-funnel me-1" style="color:#2563eb"></i>
+        Результат фильтра
+        {% if widget_title %}<small>— виджет «{{ widget_title }}»</small>{% endif %}
+      </h1>
+      <div class="drill-meta" id="drillMeta"></div>
+    </div>
+    <div class="drill-actions">
+      <a id="drillOpenListBtn" href="#" class="btn btn-sm btn-outline-primary" style="display:none">
+        <i class="bi bi-box-arrow-up-right me-1"></i>Открыть в полном списке
+      </a>
+    </div>
+  </div>
+
+  <!-- Переключатель сущностей -->
+  <div class="drill-entity-tabs" id="drillEntityTabs">
+    {% for e in entities %}
+      <button type="button" data-entity="{{ e.key }}"{% if e.key == entity %} class="active"{% endif %}>
+        {{ e.label }}
+      </button>
+    {% endfor %}
+  </div>
+
+  <div class="drill-filter-box">
+    <div class="drill-filter-header">
+      <span class="drill-filter-title"><i class="bi bi-filter me-1"></i>Фильтр CQL</span>
+      <div>
+        <button id="drillApplyBtn" class="btn btn-sm btn-primary" type="button">
+          <i class="bi bi-arrow-clockwise me-1"></i>Обновить
+        </button>
+        <button id="drillClearBtn" class="btn btn-sm btn-outline-secondary" type="button">
+          <i class="bi bi-x-lg me-1"></i>Очистить
+        </button>
+      </div>
+    </div>
+    <div id="drillCqlBuilderRoot"></div>
+    <textarea id="drillCqlText" class="form-control form-control-sm mt-2" rows="2"
+              placeholder="Оставьте пустым — показывать всё"></textarea>
+    <div id="drillCqlStatus" style="font-size:11px; color:#6b7280; margin-top:4px;"></div>
+  </div>
+
+  <div class="drill-table-wrap" id="drillTableWrap">
+    <div class="drill-empty" id="drillEmpty">Загрузка…</div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  const INITIAL_ENTITY = "{{ entity|escapejs }}";
+  const INITIAL_CQL    = "{{ cql|escapejs }}";
+  const CSRF           = "{{ csrf_token }}";
+
+  // Минимальные CQL_DEFS (копия из dashboard_pro) — нужны для tree-builder.
+  const CQL_DEFS_CARGO = {
+    stage:{t:'str'}, weight:{t:'num'}, pieces_declared:{t:'num'},
+    flight_date:{t:'date'}, departure_date:{t:'date'},
+    warehouse:{t:'str'}, warehouse_name:{t:'str'},
+    assigned_to:{t:'str'}, awb:{t:'str'}, description:{t:'str'},
+    customs_declaration:{t:'str'}, departure_iata:{t:'str'}, arrival_iata:{t:'str'},
+    shp_type:{t:'str'}, transport_mode:{t:'num'},
+    invoice_value:{t:'num'}, is_draft:{t:'bool'},
+    is_self_clearance:{t:'bool'}, is_transit:{t:'bool'},
+    labels:{t:'multi', label:'Метки'},
+  };
+  const CQL_DEFS_HAWB = {
+    hawb_number:{t:'str'}, description:{t:'str'}, cargo_type:{t:'str'},
+    shipment_type:{t:'str'}, consignee:{t:'str'}, consignee_city:{t:'str'},
+    logistics_status:{t:'str'}, customs_status:{t:'str'},
+    weight:{t:'num'}, pieces_declared:{t:'num'},
+    invoice_value:{t:'num'}, customs_declaration:{t:'str'}, release_date:{t:'date'},
+    assigned_to:{t:'str'}, mawb:{t:'str'}, is_standalone:{t:'bool'},
+    warehouse:{t:'str'}, warehouse_name:{t:'str'},
+    labels:{t:'multi', label:'Метки'},
+  };
+
+  // Простые рендереры ячеек (вариант минимальный — расширить при необходимости)
+  const RENDERERS = {
+    text:        (c, it) => esc(it[c.db_fields[0]] ?? ''),
+    link_mono:   (c, it) => `<span style="font-family:monospace">${esc(it[c.db_fields[0]] ?? '')}</span>`,
+    mono:        (c, it) => `<span style="font-family:monospace">${esc(it[c.db_fields[0]] ?? '')}</span>`,
+    number:      (c, it) => {
+      const v = it[c.db_fields[0]];
+      if (v === null || v === undefined || v === '') return '';
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toLocaleString('ru-RU', {maximumFractionDigits: c.decimals ?? 2}) : esc(v);
+    },
+    money:       (c, it) => {
+      const v = it[c.db_fields[0]];
+      if (v === null || v === undefined || v === '') return '';
+      const cur = it[c.db_fields[1]] || '';
+      return `${Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2})} ${esc(cur)}`.trim();
+    },
+    date:        (c, it) => esc(it[c.db_fields[0]] ?? ''),
+    datetime:    (c, it) => esc(it[c.db_fields[0]] ?? ''),
+    bool:        (c, it) => it[c.db_fields[0]] ? '✓' : '',
+    choice:      (c, it) => {
+      const v = it[c.db_fields[0]];
+      return esc((c.choices && c.choices[v]) || v || '');
+    },
+    chip:        (c, it) => {
+      const v = it[c.db_fields[0]];
+      const lbl = (c.choices && c.choices[v]) || v || '';
+      const cls = c.css_map && c.css_map[v] ? ` class="${esc(c.css_map[v])}"` : '';
+      return `<span${cls} style="padding:2px 8px;border-radius:10px;font-size:11px;background:#f3f4f6">${esc(lbl)}</span>`;
+    },
+    route:       (c, it) => esc(`${it[c.db_fields[0]] ?? ''} → ${it[c.db_fields[1]] ?? ''}`.trim().replace(/^→\s*|\s*→$/g,'')),
+    pieces:      (c, it) => {
+      const a = it[c.db_fields[0]]; const d = it[c.db_fields[1]];
+      if (a === undefined && d === undefined) return '';
+      return `${a ?? 0} / ${d ?? 0}`;
+    },
+    user:        (c, it) => esc(it[c.db_fields[0]] ?? ''),
+    consignee:   (c, it) => esc(it[c.db_fields[0]] ?? ''),
+    flight:      (c, it) => esc(`${it[c.db_fields[0]] ?? ''} ${it[c.db_fields[1]] ?? ''}`.trim()),
+    docs:        () => '',
+  };
+
+  function esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  let state = {
+    entity: INITIAL_ENTITY,
+    cql:    INITIAL_CQL,
+    items:  [],
+    columns:[],
+    rowLink:'',
+    total:  0,
+    builder: null,
+  };
+
+  function getCsrfCookie() {
+    const m = document.cookie.match(/csrftoken=([^;]+)/); return m ? m[1] : CSRF;
+  }
+
+  function jsonGet(url) {
+    return fetch(url, { credentials: 'same-origin' }).then(r => r.json());
+  }
+
+  function initBuilder() {
+    const container = document.getElementById('drillCqlBuilderRoot');
+    const textarea = document.getElementById('drillCqlText');
+    if (!container || !textarea || !window.CQLBuilder) {
+      textarea.value = state.cql;
+      return;
+    }
+    const defs = state.entity === 'hawb' ? CQL_DEFS_HAWB : CQL_DEFS_CARGO;
+    if (state.builder && typeof state.builder.destroy === 'function') {
+      try { state.builder.destroy(); } catch (_) {}
+    }
+    textarea.value = state.cql;
+    state.builder = window.CQLBuilder.init({
+      container, textarea,
+      entity:   state.entity || 'cargo',
+      defs,
+      csrftoken: getCsrfCookie(),
+      getMe:    () => '',
+      onChange: () => {},
+      onValidity: () => {},
+    });
+    state.builder.setCQL(state.cql || '');
+  }
+
+  async function reload() {
+    const wrap = document.getElementById('drillTableWrap');
+    wrap.innerHTML = '<div class="drill-empty">Загрузка…</div>';
+    if (!state.entity) {
+      wrap.innerHTML = '<div class="drill-empty">Не указана сущность</div>';
+      return;
+    }
+    // Забираем текущий текст CQL (builder синхронизирует с textarea сам)
+    state.cql = (document.getElementById('drillCqlText').value || '').trim();
+    const url = `/api/v1/widgets/drill/?entity=${encodeURIComponent(state.entity)}`
+              + (state.cql ? `&cql=${encodeURIComponent(state.cql)}` : '');
+    let data;
+    try { data = await jsonGet(url); }
+    catch (e) { wrap.innerHTML = `<div class="drill-empty">Ошибка сети: ${esc(e.message || e)}</div>`; return; }
+    if (data.error) {
+      wrap.innerHTML = `<div class="drill-empty" style="color:#b91c1c">Ошибка: ${esc(data.error)}</div>`;
+      document.getElementById('drillCqlStatus').textContent = data.error;
+      document.getElementById('drillCqlStatus').style.color = '#b91c1c';
+      return;
+    }
+    document.getElementById('drillCqlStatus').textContent = '';
+    state.items   = data.items || [];
+    state.columns = data.columns || [];
+    state.rowLink = data.row_link || '';
+    state.total   = data.total || 0;
+    document.getElementById('drillMeta').innerHTML =
+      `<span>${esc(data.entity_label || state.entity)}</span>`
+      + ` · <span>найдено: <b>${state.total.toLocaleString('ru-RU')}</b></span>`
+      + (data.has_more ? ' · <span style="color:#d97706">показана первая страница</span>' : '');
+    // Ссылка на полный список
+    const openBtn = document.getElementById('drillOpenListBtn');
+    if (openBtn && data.list_url) {
+      const fullUrl = data.list_url + (state.cql ? `?cql=${encodeURIComponent(state.cql)}` : '');
+      openBtn.href = fullUrl;
+      openBtn.style.display = '';
+    } else if (openBtn) {
+      openBtn.style.display = 'none';
+    }
+    renderTable();
+  }
+
+  function renderTable() {
+    const wrap = document.getElementById('drillTableWrap');
+    if (!state.columns.length) {
+      wrap.innerHTML = '<div class="drill-empty">Нет колонок для отображения</div>';
+      return;
+    }
+    if (!state.items.length) {
+      wrap.innerHTML = '<div class="drill-empty">Записей не найдено</div>';
+      return;
+    }
+    let html = '<table class="drill-table"><thead><tr>';
+    for (const c of state.columns) {
+      const alignCls = c.align ? ` class="align-${c.align}"` : '';
+      html += `<th${alignCls}>${esc(c.label)}</th>`;
+    }
+    html += '</tr></thead><tbody>';
+    for (const it of state.items) {
+      const href = state.rowLink ? buildRowLink(state.rowLink, it) : '';
+      const onClick = href ? ` onclick="window.location='${href}'"` : '';
+      html += `<tr${onClick}>`;
+      for (const c of state.columns) {
+        const renderer = RENDERERS[c.type] || RENDERERS.text;
+        const alignCls = c.align ? ` class="align-${c.align}"` : '';
+        html += `<td${alignCls}>${renderer(c, it)}</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  function buildRowLink(tmpl, it) {
+    return tmpl.replace(/\{(\w+)\}/g, (_m, k) => encodeURIComponent(it[k] ?? ''));
+  }
+
+  // ── Wiring ───────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    initBuilder();
+    reload();
+    document.getElementById('drillApplyBtn').addEventListener('click', reload);
+    document.getElementById('drillClearBtn').addEventListener('click', () => {
+      if (state.builder) state.builder.setCQL('');
+      document.getElementById('drillCqlText').value = '';
+      reload();
+    });
+    document.querySelectorAll('#drillEntityTabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('active')) return;
+        state.entity = btn.dataset.entity;
+        state.cql = '';
+        document.querySelectorAll('#drillEntityTabs button').forEach(b => b.classList.toggle('active', b === btn));
+        // Сбросим URL (без перезагрузки) для чистой навигации/bookmarks
+        const q = new URLSearchParams({ entity: state.entity });
+        history.replaceState({}, '', '/drill/?' + q.toString());
+        initBuilder();
+        reload();
+      });
+    });
+  });
+})();
+</script>
+{% endblock %}

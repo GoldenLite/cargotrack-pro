@@ -1,0 +1,174 @@
+{% comment %}
+Tag-picker для меток на сущности.
+Параметры контекста:
+  tag_picker_endpoint  — URL для GET/PUT (например, /api/v1/hawbs/12/labels/)
+  tag_picker_id        — уникальный suffix для DOM id (если на странице несколько)
+{% endcomment %}
+<div class="tag-picker" data-endpoint="{{ tag_picker_endpoint }}" id="tagPicker_{{ tag_picker_id|default:'main' }}">
+  <div class="tp-chips" data-tp-chips></div>
+  <button type="button" class="btn btn-sm btn-outline-secondary tp-add-btn" data-tp-add>
+    <i class="bi bi-plus"></i> Метка
+  </button>
+  <div class="tp-popover" data-tp-popover style="display:none">
+    <input type="text" class="form-control form-control-sm tp-search" data-tp-search placeholder="Поиск или новая метка…">
+    <div class="tp-list" data-tp-list></div>
+    <div class="tp-footer">
+      <button type="button" class="btn btn-sm btn-link tp-create-btn d-none" data-tp-create>
+        <i class="bi bi-plus-circle"></i> Создать <strong data-tp-create-name></strong>
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+.tag-picker { position: relative; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tp-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.tp-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 10px; color: #fff; font-size: 11.5px; font-weight: 600; line-height: 1.4; }
+.tp-chip-x { cursor: pointer; opacity: .7; font-size: 13px; line-height: 1; padding: 0 2px; }
+.tp-chip-x:hover { opacity: 1; }
+.tp-add-btn { padding: 1px 8px; font-size: 11.5px; line-height: 1.4; }
+.tp-popover { position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 1050; background: #fff; border: 1px solid #d1d5db; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.1); width: 280px; padding: 8px; }
+.tp-list { max-height: 220px; overflow-y: auto; margin-top: 6px; }
+.tp-item { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.tp-item:hover { background: #f3f4f6; }
+.tp-item input[type=checkbox] { margin: 0; }
+.tp-footer { margin-top: 6px; padding-top: 6px; border-top: 1px solid #f0f0f0; }
+.tp-empty { padding: 8px; color: #9ca3af; font-size: 11px; text-align: center; }
+</style>
+
+<script>
+(function() {
+  const root = document.getElementById('tagPicker_{{ tag_picker_id|default:"main" }}');
+  if (!root) return;
+  if (root.dataset.tpInit === '1') return;
+  root.dataset.tpInit = '1';
+
+  const csrftoken = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+  const endpoint = root.dataset.endpoint;
+  const popover = root.querySelector('[data-tp-popover]');
+  const search = root.querySelector('[data-tp-search]');
+  const list = root.querySelector('[data-tp-list]');
+  const addBtn = root.querySelector('[data-tp-add]');
+  const chipsBox = root.querySelector('[data-tp-chips]');
+  const createBtn = root.querySelector('[data-tp-create]');
+  const createName = root.querySelector('[data-tp-create-name]');
+
+  let allLabels = [];
+  let selected = [];
+
+  function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function renderChips() {
+    chipsBox.innerHTML = selected.map(l =>
+      `<span class="tp-chip" style="background:${escHtml(l.color)}">${escHtml(l.name)}<span class="tp-chip-x" data-remove-id="${l.id}">&times;</span></span>`
+    ).join('');
+    chipsBox.querySelectorAll('[data-remove-id]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const id = Number(el.dataset.removeId);
+        await save(selected.filter(l => l.id !== id).map(l => l.id));
+      });
+    });
+  }
+
+  function renderList(filter = '') {
+    const f = filter.trim().toLowerCase();
+    const filtered = f ? allLabels.filter(l => l.name.toLowerCase().includes(f)) : allLabels;
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="tp-empty">Нет меток</div>';
+    } else {
+      list.innerHTML = filtered.map(l => {
+        const checked = selected.some(s => s.id === l.id);
+        return `
+          <label class="tp-item">
+            <input type="checkbox" data-toggle-id="${l.id}" ${checked ? 'checked' : ''}>
+            <span class="tp-chip" style="background:${escHtml(l.color)}">${escHtml(l.name)}</span>
+          </label>`;
+      }).join('');
+      list.querySelectorAll('[data-toggle-id]').forEach(cb => {
+        cb.addEventListener('change', async () => {
+          const id = Number(cb.dataset.toggleId);
+          const ids = cb.checked
+            ? [...selected.map(l => l.id), id]
+            : selected.filter(l => l.id !== id).map(l => l.id);
+          await save(ids);
+        });
+      });
+    }
+    // Кнопка создания, если ввод не совпадает с существующей меткой
+    const exact = f && allLabels.some(l => l.name.toLowerCase() === f);
+    if (f && !exact) {
+      createName.textContent = '«' + filter.trim() + '»';
+      createBtn.classList.remove('d-none');
+      createBtn.dataset.createName = filter.trim();
+    } else {
+      createBtn.classList.add('d-none');
+    }
+  }
+
+  async function load() {
+    const [allRes, mineRes] = await Promise.all([
+      fetch('/api/v1/labels/', {credentials: 'same-origin'}).then(r => r.json()),
+      fetch(endpoint, {credentials: 'same-origin'}).then(r => r.json()),
+    ]);
+    allLabels = allRes.labels || [];
+    selected = mineRes.labels || [];
+    renderChips();
+  }
+
+  async function save(ids) {
+    const r = await fetch(endpoint, {
+      method: 'PUT', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrftoken},
+      body: JSON.stringify({label_ids: ids}),
+    });
+    if (!r.ok) {
+      alert('Ошибка сохранения меток');
+      return;
+    }
+    const data = await r.json();
+    selected = data.labels || [];
+    renderChips();
+    renderList(search.value);
+  }
+
+  async function createAndAdd() {
+    const name = createBtn.dataset.createName;
+    if (!name) return;
+    const r = await fetch('/api/v1/labels/', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrftoken},
+      body: JSON.stringify({name}),
+    });
+    if (!r.ok) {
+      const err = await r.json();
+      alert('Ошибка создания: ' + (err.error || ''));
+      return;
+    }
+    const newLabel = await r.json();
+    allLabels.push(newLabel);
+    allLabels.sort((a, b) => a.name.localeCompare(b.name));
+    await save([...selected.map(l => l.id), newLabel.id]);
+    search.value = '';
+    renderList();
+  }
+
+  function togglePopover(open) {
+    if (open === undefined) open = popover.style.display === 'none';
+    popover.style.display = open ? 'block' : 'none';
+    if (open) {
+      search.value = '';
+      renderList();
+      setTimeout(() => search.focus(), 50);
+    }
+  }
+
+  addBtn.addEventListener('click', () => togglePopover());
+  search.addEventListener('input', () => renderList(search.value));
+  createBtn.addEventListener('click', createAndAdd);
+  document.addEventListener('click', e => {
+    if (!root.contains(e.target)) togglePopover(false);
+  });
+
+  load();
+})();
+</script>
