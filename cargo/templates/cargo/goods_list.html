@@ -500,9 +500,11 @@ function rowClick(e, url) {
 (function() {
   const table = document.getElementById('goodsTable');
   if (!table) return;
-  const WKEY = 'goodsTableWidths_v2';
-  // Сбрасываем устаревший ключ v1
+  // v3 после добавления колонок Ссылка / ДЕИ / Ед.ДЕИ — индексные ширины несовместимы
+  const WKEY = 'goodsTableWidths_v3';
+  // Сбрасываем устаревшие ключи
   localStorage.removeItem('goodsTableWidths');
+  localStorage.removeItem('goodsTableWidths_v2');
 
   const MIN_COL_WIDTH = 40; // минимальная ширина колонки в px
 
@@ -768,7 +770,10 @@ function rowClick(e, url) {
 (function() {
   const table = document.getElementById('goodsTable');
   if (!table) return;
-  const COL_ORDER_KEY = 'goodsColOrder_v1';
+  // v2 после добавления колонок Ссылка / ДЕИ / Ед.ДЕИ — старый порядок невалиден
+  const COL_ORDER_KEY = 'goodsColOrder_v2';
+  // Чистим устаревшие ключи
+  localStorage.removeItem('goodsColOrder_v1');
 
   function getHeaderCells() {
     return Array.from(table.querySelectorAll('thead tr:first-child th'));
