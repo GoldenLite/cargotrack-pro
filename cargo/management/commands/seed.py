@@ -124,6 +124,22 @@ GOODS_CATALOG = {
     ],
 }
 
+# Дополнительная единица измерения (ДЕИ) — мапа по артикулу.
+# Значение: (кол-во ДЕИ на 1 единицу основной), название ДЕИ.
+# Например: упаковка из 12 футболок → 12 шт ДЕИ; 1 пара носков отдельно — 1 пар.
+# Категории, где ДЕИ обязательна по ТН ВЭД: одежда, обувь, лампы, шприцы, перчатки.
+GOODS_DEI = {
+    'TEE-12X':    (12, 'шт'),    # Футболка хлопок (12 шт)
+    'SOX-6PR':    (6,  'пар'),   # Носки спортивные (6 пар)
+    'MASK-50':    (50, 'шт'),    # Маска медицинская FFP2 (50шт)
+    'SYR-5ML':    (100, 'шт'),   # Шприц 5мл (100шт)
+    'GLOVE-L':    (100, 'пар'),  # Перчатки (100шт)
+    'SPARK-NGK':  (4,  'шт'),    # Свечи зажигания NGK (4шт)
+    'JACKET-L':   (1,  'шт'),    # Куртка
+    'JEAN-3232':  (1,  'шт'),    # Джинсы
+    'SCARF-G':    (1,  'шт'),    # Шарф
+}
+
 # Статусы согласования + веса вероятности для разных этапов накладной
 APPROVAL_WEIGHTS_BY_STAGE = {
     'DRAFT':       {'pending': 10, 'approved': 0, 'clarification': 0, 'rejected': 0},
@@ -310,7 +326,6 @@ class Command(BaseCommand):
             description     = desc_en,
             description_ru  = desc_ru,
             shp_type        = random.choice(SHP_TYPES),
-            status          = 'CNPK',
             stage           = 'DRAFT',
             is_draft        = True,
             flight_number   = flight_num,
@@ -387,6 +402,22 @@ class Command(BaseCommand):
             gross_unit = net_unit * Decimal('1.15')
             total      = (unit_price * qty).quantize(Decimal('0.01'))
 
+            # ДЕИ: если для артикула задана упаковочная норма — считаем доп. количество
+            dei_per_unit, dei_unit = GOODS_DEI.get(article, (None, ''))
+            if dei_per_unit is not None:
+                quantity_additional = (qty * Decimal(str(dei_per_unit))).quantize(Decimal('0.001'))
+                unit_additional = dei_unit
+            else:
+                quantity_additional = None
+                unit_additional = ''
+
+            # Для B2C — обязательна ссылка на товар. Генерируем фейковый URL карточки
+            if hawb.cargo_type == 'B2C':
+                slug = (article or 'p').lower().replace('/', '-').replace(' ', '-')
+                product_url = f'https://shop.example.com/p/{slug}-{random.randint(1000, 9999)}'
+            else:
+                product_url = ''
+
             approval   = _weighted_choice(weights)
             comment    = ''
             approved_by = None
@@ -413,8 +444,11 @@ class Command(BaseCommand):
                 manufacturer     = mfr,
                 model            = model,
                 article          = article,
+                product_url      = product_url,
                 quantity         = qty,
                 unit             = unit,
+                quantity_additional = quantity_additional,
+                unit_additional  = unit_additional,
                 weight_net       = (net_unit * qty).quantize(Decimal('0.001')),
                 weight_gross     = (gross_unit * qty).quantize(Decimal('0.001')),
                 unit_price       = unit_price,

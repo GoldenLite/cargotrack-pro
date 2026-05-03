@@ -179,11 +179,30 @@ class Command(BaseCommand):
             created_hawbs += 1
 
             # ── Товарные позиции ──
+            # ДЕИ-словарь по артикулу (упаковочные нормы)
+            DEI_MAP = {
+                'TEE-12X': (12, 'шт'), 'SOX-6PR': (6, 'пар'),
+                'MASK-50': (50, 'шт'), 'SYR-5ML': (100, 'шт'),
+                'GLOVE-L': (100, 'пар'), 'SPARK-NGK': (4, 'шт'),
+                'JACKET-L': (1, 'шт'), 'JEAN-3232': (1, 'шт'),
+            }
             for gdata in goods_sel:
                 name, tnved, brand, mfr, model, article, unit, base_price = gdata
                 qty = random.randint(1, 8)
                 price = round(base_price * random.uniform(0.9, 1.1), 2)
                 w_per = round(total_weight / n_goods, 3)
+
+                # ДЕИ
+                dei = DEI_MAP.get(article)
+                quantity_additional = qty * dei[0] if dei else None
+                unit_additional = dei[1] if dei else ''
+
+                # B2C — обязательна ссылка на товар
+                if cargo_type == 'B2C':
+                    slug = (article or 'p').lower().replace('/', '-').replace(' ', '-')
+                    product_url = f'https://shop.example.com/p/{slug}-{random.randint(1000, 9999)}'
+                else:
+                    product_url = ''
 
                 HAWBGood.objects.create(
                     hawb=hawb,
@@ -193,8 +212,11 @@ class Command(BaseCommand):
                     manufacturer=mfr,
                     model=model,
                     article=article,
+                    product_url=product_url,
                     quantity=qty,
                     unit=unit,
+                    quantity_additional=quantity_additional,
+                    unit_additional=unit_additional,
                     weight_net=round(w_per * 0.9, 3),
                     weight_gross=w_per,
                     unit_price=price,

@@ -669,6 +669,13 @@ def hawb_detail(request, hawb_id: int):
         if action == 'add_good':
             name = request.POST.get('name', '').strip()
             if name:
+                # Для B2C обязательна ссылка на товар — проверяем перед созданием
+                product_url = request.POST.get('product_url', '').strip()
+                good_cargo_type = request.POST.get('cargo_type', '').strip()
+                effective_type = good_cargo_type or hawb.cargo_type
+                if effective_type == 'B2C' and not product_url:
+                    messages.error(request, 'Для B2C товаров обязательна ссылка на товар (URL)')
+                    return redirect('hawb_detail', hawb_id=hawb_id)
                 HAWBGood.objects.create(
                     hawb=hawb,
                     name=name,
@@ -677,13 +684,17 @@ def hawb_detail(request, hawb_id: int):
                     manufacturer=request.POST.get('manufacturer', ''),
                     model=request.POST.get('model', ''),
                     article=request.POST.get('article', ''),
+                    product_url=product_url,
                     quantity=request.POST.get('quantity') or 1,
                     unit=request.POST.get('unit', 'шт'),
+                    quantity_additional=request.POST.get('quantity_additional') or None,
+                    unit_additional=request.POST.get('unit_additional', ''),
                     weight_net=request.POST.get('weight_net') or None,
                     weight_gross=request.POST.get('weight_gross') or None,
                     unit_price=request.POST.get('unit_price') or None,
                     total_value=request.POST.get('total_value') or None,
                     currency=request.POST.get('currency', 'USD'),
+                    cargo_type=good_cargo_type,
                 )
                 messages.success(request, 'Товарная позиция добавлена')
             return redirect('hawb_detail', hawb_id=hawb_id)
@@ -702,10 +713,15 @@ def hawb_detail(request, hawb_id: int):
             value = request.POST.get('value', '').strip()
             allowed_fields = {
                 'name', 'tnved_code', 'brand', 'manufacturer', 'model',
-                'article', 'quantity', 'unit', 'weight_net', 'weight_gross',
+                'article', 'product_url',
+                'quantity', 'unit', 'quantity_additional', 'unit_additional',
+                'weight_net', 'weight_gross',
                 'unit_price', 'total_value', 'currency', 'cargo_type',
             }
-            numeric_fields = {'quantity', 'weight_net', 'weight_gross', 'unit_price', 'total_value'}
+            numeric_fields = {
+                'quantity', 'quantity_additional',
+                'weight_net', 'weight_gross', 'unit_price', 'total_value',
+            }
             good = HAWBGood.objects.filter(pk=good_id, hawb=hawb).first()
             if good and field in allowed_fields:
                 if field in numeric_fields:

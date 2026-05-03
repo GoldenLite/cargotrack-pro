@@ -512,8 +512,16 @@
                 <div class="col-md-3"><label class="form-label small text-muted mb-1">Изготовитель</label><input type="text" name="manufacturer" class="form-control form-control-sm"></div>
                 <div class="col-md-3"><label class="form-label small text-muted mb-1">Модель</label><input type="text" name="model" class="form-control form-control-sm"></div>
                 <div class="col-md-3"><label class="form-label small text-muted mb-1">Артикул</label><input type="text" name="article" class="form-control form-control-sm"></div>
+                <div class="col-12"><label class="form-label small text-muted mb-1">
+                  Ссылка на товар <span class="text-muted" style="font-weight:400">(обязательна для B2C — URL карточки товара)</span>
+                </label><input type="url" name="product_url" class="form-control form-control-sm" placeholder="https://shop.example.com/product/123"></div>
                 <div class="col-md-3"><label class="form-label small text-muted mb-1">Количество</label>
                   <div class="input-group input-group-sm"><input type="number" name="quantity" value="1" class="form-control" step="0.001" min="0"><input type="text" name="unit" value="шт" class="form-control" style="max-width:50px"></div>
+                </div>
+                <div class="col-md-3"><label class="form-label small text-muted mb-1">
+                  Кол-во в ДЕИ <span class="text-muted" style="font-weight:400">(если требуется)</span>
+                </label>
+                  <div class="input-group input-group-sm"><input type="number" name="quantity_additional" class="form-control" step="0.001" min="0" placeholder="напр. 30"><input type="text" name="unit_additional" class="form-control" style="max-width:60px" placeholder="пар"></div>
                 </div>
                 <div class="col-md-2"><label class="form-label small text-muted mb-1">Вес нетто</label><input type="number" name="weight_net" class="form-control form-control-sm" step="0.001"></div>
                 <div class="col-md-2"><label class="form-label small text-muted mb-1">Вес брутто</label><input type="number" name="weight_gross" class="form-control form-control-sm" step="0.001"></div>
@@ -537,8 +545,11 @@
               <th style="color:#374151;min-width:100px">Изготовитель</th>
               <th style="color:#374151;min-width:90px">Модель</th>
               <th style="color:#374151;min-width:80px">Артикул</th>
+              <th style="color:#374151;min-width:50px">Ссылка</th>
               <th class="text-end" style="color:#374151;min-width:60px">Кол-во</th>
               <th style="color:#374151;min-width:40px">Ед.</th>
+              <th class="text-end" style="color:#374151;min-width:60px">ДЕИ</th>
+              <th style="color:#374151;min-width:50px">Ед. ДЕИ</th>
               <th class="text-end" style="color:#374151;min-width:65px">Нетто</th>
               <th class="text-end" style="color:#374151;min-width:65px">Брутто</th>
               <th class="text-end" style="color:#374151;min-width:75px">Цена ед.</th>
@@ -556,8 +567,20 @@
                 <td class="editable-cell" data-field="manufacturer" data-type="text">{{ good.manufacturer|default:"" }}</td>
                 <td class="editable-cell" data-field="model" data-type="text">{{ good.model|default:"" }}</td>
                 <td class="editable-cell" data-field="article" data-type="text">{{ good.article|default:"" }}</td>
+                <td class="text-center" style="white-space:nowrap">
+                  {% if good.product_url %}
+                    <a href="{{ good.product_url }}" target="_blank" rel="noopener" title="{{ good.product_url }}" onclick="event.stopPropagation()"><i class="bi bi-box-arrow-up-right text-primary"></i></a>
+                  {% endif %}
+                  <i class="bi bi-pencil text-muted edit-product-url-btn"
+                     style="cursor:pointer;font-size:11px;margin-left:4px"
+                     data-good-id="{{ good.pk }}"
+                     data-current="{{ good.product_url|default:'' }}"
+                     title="Изменить ссылку"></i>
+                </td>
                 <td class="editable-cell text-end" data-field="quantity" data-type="number">{{ good.quantity }}</td>
                 <td class="editable-cell" data-field="unit" data-type="text">{{ good.unit }}</td>
+                <td class="editable-cell text-end" data-field="quantity_additional" data-type="number">{{ good.quantity_additional|floatformat:"-3"|default:"" }}</td>
+                <td class="editable-cell" data-field="unit_additional" data-type="text">{{ good.unit_additional|default:"" }}</td>
                 <td class="editable-cell text-end" data-field="weight_net" data-type="number">{{ good.weight_net|floatformat:3|default:"" }}</td>
                 <td class="editable-cell text-end" data-field="weight_gross" data-type="number">{{ good.weight_gross|floatformat:3|default:"" }}</td>
                 <td class="editable-cell text-end" data-field="unit_price" data-type="number">{{ good.unit_price|floatformat:2|default:"" }}</td>
@@ -851,6 +874,64 @@ function addChecklistItem(docTypeId) {
 
   document.querySelectorAll('.goods-editable-table .editable-cell').forEach(cell => {
     cell.addEventListener('click', () => startEdit(cell));
+  });
+})();
+</script>
+
+<script>
+// ── Редактирование product_url через prompt() (отдельная колонка с иконкой) ──
+(function(){
+  document.querySelectorAll('.edit-product-url-btn').forEach(btn => {
+    btn.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      const goodId = btn.dataset.goodId;
+      const current = btn.dataset.current || '';
+      const next = prompt('Ссылка на товар (URL карточки в интернет-магазине):\nДля очистки — оставьте пустым.', current);
+      if (next === null) return;  // Отмена
+      const trimmed = next.trim();
+      // Простейшая проверка
+      if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+        alert('Ссылка должна начинаться с http:// или https://');
+        return;
+      }
+      const body = new URLSearchParams({
+        csrfmiddlewaretoken: document.querySelector('[name=csrfmiddlewaretoken]').value,
+        action: 'update_good',
+        good_id: goodId,
+        field: 'product_url',
+        value: trimmed,
+      });
+      fetch(window.location.pathname, { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(r => r.json())
+        .then(data => {
+          if (data.ok) {
+            btn.dataset.current = trimmed;
+            // Обновим иконку «открыть» в той же ячейке
+            const cell = btn.closest('td');
+            const link = cell.querySelector('a');
+            if (trimmed) {
+              if (link) {
+                link.href = trimmed;
+                link.title = trimmed;
+              } else {
+                const a = document.createElement('a');
+                a.href = trimmed;
+                a.target = '_blank';
+                a.rel = 'noopener';
+                a.title = trimmed;
+                a.innerHTML = '<i class="bi bi-box-arrow-up-right text-primary"></i>';
+                a.addEventListener('click', e => e.stopPropagation());
+                cell.insertBefore(a, btn);
+              }
+            } else if (link) {
+              link.remove();
+            }
+          } else {
+            alert('Ошибка: ' + (data.error || 'неизвестная'));
+          }
+        })
+        .catch(() => alert('Ошибка сети'));
+    });
   });
 })();
 </script>

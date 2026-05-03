@@ -1151,10 +1151,16 @@ class HAWBGood(models.Model):
     manufacturer    = models.CharField('Изготовитель', max_length=200, blank=True)
     model           = models.CharField('Модель', max_length=200, blank=True)
     article         = models.CharField('Артикул', max_length=100, blank=True)
+    # Для B2C товаров обязательна — URL карточки товара в интернет-магазине
+    product_url     = models.URLField('Ссылка на товар', max_length=500, blank=True)
 
     # ── Количество и вес ──
     quantity        = models.DecimalField('Количество', max_digits=12, decimal_places=3, default=1)
     unit            = models.CharField('Единица измерения', max_length=20, default='шт')
+    # ДЕИ — дополнительная единица измерения (для отдельных категорий ТН ВЭД).
+    # Например: основная — упак, ДЕИ — 30 пар; основная — кг, ДЕИ — 5 м³
+    quantity_additional = models.DecimalField('Кол-во в ДЕИ', max_digits=12, decimal_places=3, null=True, blank=True)
+    unit_additional     = models.CharField('Доп. единица (ДЕИ)', max_length=20, blank=True)
     weight_net      = models.DecimalField('Вес нетто (кг)', max_digits=10, decimal_places=3, null=True, blank=True)
     weight_gross    = models.DecimalField('Вес брутто (кг)', max_digits=10, decimal_places=3, null=True, blank=True)
 
@@ -1210,6 +1216,15 @@ class HAWBGood(models.Model):
     def effective_cargo_type(self) -> str:
         """Тип груза: собственный, или унаследованный от родительской накладной"""
         return self.cargo_type or (self.hawb.cargo_type if self.hawb_id else '')
+
+    def clean(self):
+        super().clean()
+        # Для B2C товаров обязательна ссылка на товар (URL страницы в интернет-магазине)
+        if self.effective_cargo_type == 'B2C' and not self.product_url:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({
+                'product_url': 'Для B2C товаров обязательна ссылка на товар (URL страницы в интернет-магазине)'
+            })
 
     def save(self, *args, **kwargs):
         if self.unit_price and self.quantity and not self.total_value:
