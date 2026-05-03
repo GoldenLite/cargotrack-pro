@@ -223,21 +223,24 @@
           <!-- Строка фильтров под заголовками (Excel-style) -->
           <tr id="colFilterRow">
             <td></td><!-- чекбокс -->
-            <td><input class="col-filter" data-col-idx="1"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="2"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="3"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="4"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="5"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="6"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="7"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="8"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="9"  placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="10" placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="11" placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="12" placeholder="🔍"></td>
-            <td><input class="col-filter" data-col-idx="13" placeholder="🔍"></td>
+            <td><input class="col-filter" placeholder="🔍"></td><!-- name -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- tnved -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- brand -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- mfr -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- model -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- article -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- product_url -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- qty -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- unit -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- qty_add -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- unit_add -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- net -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- gross -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- price -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- total -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- currency -->
             <td><!-- Тип груза -->
-              <select class="col-filter" data-col-idx="14">
+              <select class="col-filter">
                 <option value="">Все</option>
                 <option value="B2C">B2C</option>
                 <option value="B2B">B2B</option>
@@ -245,9 +248,9 @@
                 <option value="DOC">DOC</option>
               </select>
             </td>
-            <td><input class="col-filter" data-col-idx="15" placeholder="🔍"></td><!-- HAWB -->
+            <td><input class="col-filter" placeholder="🔍"></td><!-- HAWB -->
             <td><!-- Согласование -->
-              <select class="col-filter" data-col-idx="16">
+              <select class="col-filter">
                 <option value="">Все</option>
                 {% for code, label in approval_choices %}
                 <option value="{{ label }}">{{ label }}</option>
@@ -289,11 +292,29 @@
             <!-- Артикул -->
             <td class="editable-cell font-monospace" data-field="article" data-type="text">{{ good.article|default:"" }}</td>
 
+            <!-- Ссылка на товар (для B2C обязательна) -->
+            <td class="text-center" onclick="event.stopPropagation()" style="white-space:nowrap">
+              {% if good.product_url %}
+                <a href="{{ good.product_url }}" target="_blank" rel="noopener" title="{{ good.product_url }}"><i class="bi bi-box-arrow-up-right text-primary"></i></a>
+              {% endif %}
+              <i class="bi bi-pencil text-muted edit-product-url-btn"
+                 style="cursor:pointer;font-size:11px;margin-left:4px"
+                 data-good-id="{{ good.pk }}"
+                 data-current="{{ good.product_url|default:'' }}"
+                 title="Изменить ссылку"></i>
+            </td>
+
             <!-- Количество -->
             <td class="editable-cell text-end" data-field="quantity" data-type="number">{{ good.quantity|floatformat:"-3" }}</td>
 
             <!-- Единица -->
             <td class="editable-cell" data-field="unit" data-type="text">{{ good.unit|default:"шт" }}</td>
+
+            <!-- ДЕИ количество -->
+            <td class="editable-cell text-end" data-field="quantity_additional" data-type="number">{{ good.quantity_additional|floatformat:"-3"|default:"" }}</td>
+
+            <!-- ДЕИ единица -->
+            <td class="editable-cell" data-field="unit_additional" data-type="text">{{ good.unit_additional|default:"" }}</td>
 
             <!-- Нетто -->
             <td class="editable-cell text-end" data-field="weight_net" data-type="number">{{ good.weight_net|floatformat:3|default:"" }}</td>
@@ -336,7 +357,7 @@
           </tr>
           {% empty %}
           <tr>
-            <td colspan="16" class="text-center text-muted py-5">
+            <td colspan="20" class="text-center text-muted py-5">
               <i class="bi bi-inbox d-block" style="font-size:2.5rem"></i>
               <div class="mt-2">Товарные позиции не найдены</div>
             </td>
@@ -605,6 +626,45 @@ function rowClick(e, url) {
       showToast('Ошибка сети', 'danger');
     });
   }
+
+  // ── Редактирование product_url через prompt() ──
+  document.querySelectorAll('.edit-product-url-btn').forEach(btn => {
+    btn.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      const row = btn.closest('tr');
+      const hawbUrl = row.dataset.hawbUrl;
+      const goodId = btn.dataset.goodId;
+      const current = btn.dataset.current || '';
+      const next = prompt('Ссылка на товар (URL карточки в интернет-магазине):\nДля очистки — оставьте пустым.', current);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+        showToast('Ссылка должна начинаться с http:// или https://', 'danger');
+        return;
+      }
+      const cell = btn.closest('td');
+      saveCell(cell, hawbUrl, goodId, 'product_url', trimmed);
+      // Обновим UI: иконка-ссылка и data-current
+      btn.dataset.current = trimmed;
+      const link = cell.querySelector('a');
+      if (trimmed) {
+        if (link) {
+          link.href = trimmed;
+          link.title = trimmed;
+        } else {
+          const a = document.createElement('a');
+          a.href = trimmed;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.title = trimmed;
+          a.innerHTML = '<i class="bi bi-box-arrow-up-right text-primary"></i>';
+          cell.insertBefore(a, btn);
+        }
+      } else if (link) {
+        link.remove();
+      }
+    });
+  });
 
   let _activeCancel = null;
 
