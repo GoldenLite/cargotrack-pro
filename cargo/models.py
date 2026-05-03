@@ -687,6 +687,13 @@ class HouseWaybill(models.Model):
     consignee_email   = models.EmailField('Email', blank=True)
     consignee_inn     = models.CharField('ИНН получателя', max_length=20, blank=True)
 
+    # ── Отправитель ──
+    shipper_name    = models.CharField('Грузоотправитель', max_length=200, blank=True)
+    shipper_inn     = models.CharField('ИНН отправителя', max_length=20, blank=True)
+    shipper_city    = models.CharField('Город отправителя', max_length=100, blank=True)
+    shipper_address = models.TextField('Адрес отправителя', blank=True)
+    shipper_phone   = models.CharField('Телефон отправителя', max_length=50, blank=True)
+
     # ── Параметры ──
     weight          = models.DecimalField('Вес (кг)', max_digits=10, decimal_places=2, null=True, blank=True)
     pieces_declared = models.IntegerField('Мест', default=1)
@@ -1675,6 +1682,34 @@ class ProcessingNorm(models.Model):
 
     def __str__(self) -> str:
         return f'{self.shipment_type} × {self.cargo_type} → {self.minutes} мин'
+
+
+class OrganizationSettings(models.Model):
+    """Singleton: реквизиты организации-получателя для печатных форм (ДО1, манифест и т.п.)."""
+    name = models.CharField('Название организации', max_length=200, blank=True)
+    inn = models.CharField('ИНН', max_length=20, blank=True)
+    ogrn = models.CharField('ОГРН', max_length=20, blank=True)
+    bank_account = models.CharField('Расчётный счёт (Р/с)', max_length=30, blank=True)
+    bank_name = models.CharField('Банк (филиал)', max_length=200, blank=True)
+    bank_corr_account = models.CharField('Корреспондентский счёт (К/с)', max_length=30, blank=True)
+    bank_bik = models.CharField('БИК', max_length=20, blank=True)
+    manifest_shipper = models.CharField(
+        'Грузоотправитель в манифесте', max_length=200, blank=True,
+        help_text='Заполняется в столбец «Грузоотправитель» во всех строках манифеста',
+    )
+    updated_at = models.DateTimeField('Обновлено', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Настройки организации'
+        verbose_name_plural = 'Настройки организации'
+
+    def __str__(self) -> str:
+        return self.name or 'Организация (не задана)'
+
+    @classmethod
+    def get_solo(cls) -> 'OrganizationSettings':
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
 
 
 class WorkloadRebalanceLog(models.Model):

@@ -406,6 +406,11 @@ def hawb_create(request, awb_number: str):
             consignee_city=request.POST.get('consignee_city', ''),
             consignee_phone=request.POST.get('consignee_phone', ''),
             consignee_inn=request.POST.get('consignee_inn', ''),
+            shipper_name=request.POST.get('shipper_name', ''),
+            shipper_inn=request.POST.get('shipper_inn', ''),
+            shipper_city=request.POST.get('shipper_city', ''),
+            shipper_address=request.POST.get('shipper_address', ''),
+            shipper_phone=request.POST.get('shipper_phone', ''),
             weight=request.POST.get('weight') or None,
             pieces_declared=request.POST.get('pieces_declared') or 1,
             invoice_value=request.POST.get('invoice_value') or None,
@@ -467,6 +472,11 @@ def hawb_create_standalone(request):
             consignee_city=request.POST.get('consignee_city', ''),
             consignee_phone=request.POST.get('consignee_phone', ''),
             consignee_inn=request.POST.get('consignee_inn', ''),
+            shipper_name=request.POST.get('shipper_name', ''),
+            shipper_inn=request.POST.get('shipper_inn', ''),
+            shipper_city=request.POST.get('shipper_city', ''),
+            shipper_address=request.POST.get('shipper_address', ''),
+            shipper_phone=request.POST.get('shipper_phone', ''),
             weight=request.POST.get('weight') or None,
             pieces_declared=request.POST.get('pieces_declared') or 1,
             invoice_value=request.POST.get('invoice_value') or None,
@@ -518,6 +528,12 @@ def hawb_update(request, hawb_id: int):
             val = request.POST.get(field, '').strip()
             if val:
                 setattr(hawb, field, val)
+
+        # Поля отправителя — сохраняем как есть, в т.ч. пустые (чтобы можно было очистить)
+        for field in ('shipper_name', 'shipper_inn', 'shipper_city',
+                      'shipper_address', 'shipper_phone'):
+            if field in request.POST:
+                setattr(hawb, field, request.POST.get(field, '').strip())
 
         hawb.save()
         messages.success(request, f'HAWB {hawb.hawb_number} обновлён')
@@ -2615,6 +2631,93 @@ def team_page(request):
         from django.http import HttpResponseForbidden
         return HttpResponseForbidden('Только для staff-пользователей')
     return render(request, 'cargo/team.html')
+
+
+# ── Настройки организации (для печатных форм) ───────────────────────────────
+
+@login_required
+@require_http_methods(['GET', 'PUT'])
+def api_organization_settings(request):
+    """GET / PUT /api/v1/team/organization/ — реквизиты организации (singleton)."""
+    from .models import OrganizationSettings
+    if not request.user.is_staff:
+        return JsonResponse({'error': 'Только для is_staff'}, status=403)
+    org = OrganizationSettings.get_solo()
+    # Поля и их максимальные длины
+    fields = {
+        'name': 200, 'inn': 20, 'ogrn': 20,
+        'bank_account': 30, 'bank_name': 200,
+        'bank_corr_account': 30, 'bank_bik': 20,
+    }
+    if request.method == 'PUT':
+        data, err = _parse_json_body(request)
+        if err:
+            return err
+        for f, max_len in fields.items():
+            if f in data:
+                setattr(org, f, (data[f] or '')[:max_len])
+        org.save()
+    return JsonResponse({
+        **{f: getattr(org, f) for f in fields},
+        'updated_at': org.updated_at.isoformat() if org.updated_at else None,
+    })
+
+
+# ── Экспорт ДО1 (опись товаров партии) ──────────────────────────────────────
+
+@login_required
+def cargo_export_do1(request, awb_number: str):
+    """GET /cargo/<awb>/export/do1/ — выгрузка ДО1 (опись товаров) в Excel."""
+    from .models import OrganizationSettings, HAWBGood
+    from .services.do1_export import build_do1_workbook
+
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+    org = OrganizationSettings.get_solo()
+
+    # HAWBGood'ы партии в порядке: HAWB.hawb_number, потом id
+    goods_qs = (
+        HAWBGood.objects
+        .filter(hawb__mawb=cargo)
+        .select_related('hawb')
+        .order_by('hawb__hawb_number', 'id')
+    )
+
+    wb = build_do1_workbook(cargo=cargo, goods=list(goods_qs), organization=org)
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    safe_awb = (cargo.awb_number or 'do1').replace('/', '_')
+    response['Content-Disposition'] = f'attachment; filename="DO1 {safe_awb}.xlsx"'
+    wb.save(response)
+    return response
+
+
+@login_required
+def cargo_export_manifest(request, awb_number: str):
+    """GET /cargo/<awb>/export/manifest/ — Грузовой манифест (Таиланд) в Excel."""
+    from .models import OrganizationSettings, HAWBGood
+    from .services.manifest_export import build_manifest_workbook
+
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+    org = OrganizationSettings.get_solo()
+
+    goods_qs = (
+        HAWBGood.objects
+        .filter(hawb__mawb=cargo)
+        .select_related('hawb')
+        .order_by('hawb__hawb_number', 'id')
+    )
+
+    wb = build_manifest_workbook(cargo=cargo, goods=list(goods_qs), organization=org)
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    safe_awb = (cargo.awb_number or 'manifest').replace('/', '_')
+    response['Content-Disposition'] = f'attachment; filename="Manifest {safe_awb}.xlsx"'
+    wb.save(response)
+    return response
 
 
 # ── HAWB-виджеты (для entity_type='hawb') ────────────────────────────────────

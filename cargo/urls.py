@@ -85,6 +85,11 @@ urlpatterns = [
     path('api/v1/team/profiles/<int:user_id>/',   views.api_team_profile,    name='api_team_profile'),
     path('api/v1/team/exceptions/',               views.api_team_exceptions, name='api_team_exceptions'),
     path('api/v1/team/exceptions/<int:exception_id>/', views.api_team_exception, name='api_team_exception'),
+    path('api/v1/team/organization/',             views.api_organization_settings, name='api_organization_settings'),
+
+    # ── Экспорт ДО1 ──
+    path('cargo/<str:awb_number>/export/do1/',      views.cargo_export_do1,      name='cargo_export_do1'),
+    path('cargo/<str:awb_number>/export/manifest/', views.cargo_export_manifest, name='cargo_export_manifest'),
 
     # ── SLA ──
     path('sla/', views.sla_policies_page, name='sla_policies'),

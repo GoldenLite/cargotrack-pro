@@ -8,6 +8,7 @@ from .models import (
     Cargo, StatusHistory, Warehouse, Flight, Label,
     DocumentType, CargoCategoryDocRule, CargoTypeDocTemplate, HAWBChecklistItem,
     UserProfile, ProcessingNorm, WorkloadRebalanceLog, WorkScheduleException,
+    OrganizationSettings,
 )
 
 admin.site.site_header = 'CargoTrack Pro — Управление грузами'
@@ -345,6 +346,18 @@ class ProcessingNormAdmin(admin.ModelAdmin):
     list_filter   = ('shipment_type', 'cargo_type', 'is_active')
     list_editable = ('minutes', 'is_active')
     ordering      = ('shipment_type', 'cargo_type')
+
+
+@admin.register(OrganizationSettings)
+class OrganizationSettingsAdmin(admin.ModelAdmin):
+    list_display = ('name', 'inn', 'updated_at')
+
+    def has_add_permission(self, request):
+        # Singleton — только одна запись
+        return not OrganizationSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WorkScheduleException)

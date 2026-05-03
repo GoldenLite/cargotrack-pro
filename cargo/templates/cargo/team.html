@@ -21,10 +21,30 @@
   .team-edit-panel.hidden { display:none; }
   .team-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px 18px; }
   .team-field label { display:block; font-size:11px; color:#6b7280; margin-bottom:3px; font-weight:500; }
-  .schedule-grid { display:grid; grid-template-columns: 50px repeat(2, 1fr) auto; gap:6px; align-items:center; margin-bottom:4px; }
+  .schedule-grid {
+    display:grid;
+    grid-template-columns: 56px 1fr 1fr 90px 1fr 1fr 56px;
+    gap:4px 6px; align-items:center; margin-bottom:4px;
+    font-size:12px;
+  }
   .schedule-grid input[type=time] { font-size:12px; padding:3px 6px; height:28px; }
+  .schedule-grid input[type=time]:disabled { background:#f3f4f6; color:#9ca3af; }
   .schedule-grid .day-name { font-weight:600; font-size:12px; color:#374151; }
-  .schedule-grid .day-off { color:#9ca3af; font-style:italic; font-size:11px; grid-column:2 / 4; }
+  .schedule-grid .lunch-toggle {
+    display:flex; align-items:center; gap:4px; font-size:11px; color:#6b7280;
+    white-space:nowrap;
+  }
+  .schedule-grid .day-summary {
+    text-align:right; font-size:11px; color:#1976d2; font-weight:600;
+    font-variant-numeric: tabular-nums;
+  }
+  .schedule-grid .day-summary.off { color:#9ca3af; font-weight:400; font-style:italic; }
+  .schedule-header {
+    display:grid;
+    grid-template-columns: 56px 1fr 1fr 90px 1fr 1fr 56px;
+    gap:4px 6px; align-items:center; margin-bottom:4px;
+    font-size:10px; color:#9ca3af; text-transform:uppercase; letter-spacing:.4px;
+  }
 
   .exc-table { width:100%; font-size:12px; border-collapse:collapse; }
   .exc-table th, .exc-table td { padding:5px 8px; border-bottom:1px solid #f0f0f0; }
@@ -61,6 +81,57 @@
 
 {% block content %}
 <div class="toast-area" id="toastArea"></div>
+
+<!-- Реквизиты организации (для печатных форм типа ДО1) -->
+<div class="ct-card mb-3">
+  <div class="table-toolbar">
+    <div>
+      <strong><i class="bi bi-building me-1"></i>Реквизиты организации</strong>
+      <span class="text-muted ms-2" style="font-size:12px">
+        Используются как «Получатель» в шапке ДО1 и других печатных формах.
+      </span>
+    </div>
+  </div>
+  <div style="padding:14px 18px">
+    <div class="row g-2 mb-2">
+      <div class="col-md-8">
+        <label class="config-label" style="font-size:11px;color:#6b7280">Название организации</label>
+        <input type="text" class="form-control form-control-sm" id="orgName" placeholder="ООО «...»" maxlength="200">
+      </div>
+      <div class="col-md-2">
+        <label class="config-label" style="font-size:11px;color:#6b7280">ИНН</label>
+        <input type="text" class="form-control form-control-sm" id="orgInn" placeholder="7722327689" maxlength="20">
+      </div>
+      <div class="col-md-2">
+        <label class="config-label" style="font-size:11px;color:#6b7280">ОГРН</label>
+        <input type="text" class="form-control form-control-sm" id="orgOgrn" placeholder="1157746448463" maxlength="20">
+      </div>
+    </div>
+    <div class="row g-2 mb-2">
+      <div class="col-md-4">
+        <label class="config-label" style="font-size:11px;color:#6b7280">Расчётный счёт</label>
+        <input type="text" class="form-control form-control-sm" id="orgBankAccount" maxlength="30">
+      </div>
+      <div class="col-md-5">
+        <label class="config-label" style="font-size:11px;color:#6b7280">Банк (филиал)</label>
+        <input type="text" class="form-control form-control-sm" id="orgBankName" maxlength="200">
+      </div>
+      <div class="col-md-3">
+        <label class="config-label" style="font-size:11px;color:#6b7280">БИК</label>
+        <input type="text" class="form-control form-control-sm" id="orgBankBik" maxlength="20">
+      </div>
+    </div>
+    <div class="row g-2 mb-2">
+      <div class="col-md-4">
+        <label class="config-label" style="font-size:11px;color:#6b7280">Корреспондентский счёт</label>
+        <input type="text" class="form-control form-control-sm" id="orgBankCorr" maxlength="30">
+      </div>
+    </div>
+    <button class="btn-cdek-primary" id="btnSaveOrg">
+      <i class="bi bi-check-lg me-1"></i>Сохранить реквизиты
+    </button>
+  </div>
+</div>
 
 <div class="ct-card mb-3">
   <div class="table-toolbar">
@@ -282,13 +353,58 @@ function renderTable() {
   }
 }
 
+function _toMin(t) {
+  if (!t || t.length < 4 || t[2] !== ':') return null;
+  return parseInt(t.slice(0, 2), 10) * 60 + parseInt(t.slice(3, 5), 10);
+}
+
+function _dayMinutes(start, end, lunch, lunchStart, lunchEnd) {
+  const s = _toMin(start), e = _toMin(end);
+  if (s === null || e === null || e <= s) return 0;
+  let total = e - s;
+  if (lunch) {
+    const ls = _toMin(lunchStart), le = _toMin(lunchEnd);
+    if (ls !== null && le !== null && le > ls && ls >= s && le <= e) {
+      total -= (le - ls);
+    }
+  }
+  return Math.max(0, total);
+}
+
 function buildScheduleEditor(container, schedule) {
   container.innerHTML = '';
+
+  // Заголовок колонок
+  const header = document.createElement('div');
+  header.className = 'schedule-header';
+  header.innerHTML = `
+    <div></div>
+    <div>с</div>
+    <div>до</div>
+    <div></div>
+    <div>обед с</div>
+    <div>обед до</div>
+    <div style="text-align:right">в день</div>`;
+  container.appendChild(header);
+
   for (const day of DAYS) {
     const intervals = schedule[day.key] || [];
     const hasWork = intervals.length > 0;
-    const start = hasWork ? intervals[0][0] : '09:00';
-    const end   = hasWork ? intervals[0][1] : '21:00';
+
+    // Определяем start/end и наличие обеда по числу интервалов
+    let start = '09:00', end = '21:00';
+    let hasLunch = false, lunchStart = '13:00', lunchEnd = '14:00';
+    if (intervals.length === 1) {
+      start = intervals[0][0]; end = intervals[0][1];
+    } else if (intervals.length >= 2) {
+      // Берём first.start и last.end; обед — между first.end и second.start
+      start = intervals[0][0];
+      end = intervals[intervals.length - 1][1];
+      hasLunch = true;
+      lunchStart = intervals[0][1];
+      lunchEnd = intervals[1][0];
+    }
+
     const row = document.createElement('div');
     row.className = 'schedule-grid';
     row.innerHTML = `
@@ -298,20 +414,54 @@ function buildScheduleEditor(container, schedule) {
       </label>
       <input type="time" data-day="${day.key}" data-role="start" value="${start}" ${hasWork ? '' : 'disabled'}>
       <input type="time" data-day="${day.key}" data-role="end"   value="${end}"   ${hasWork ? '' : 'disabled'}>
-      <span style="font-size:10px;color:#9ca3af" data-day-summary="${day.key}">${hasWork ? '' : 'выходной'}</span>`;
+      <label class="lunch-toggle">
+        <input type="checkbox" data-day="${day.key}" data-role="lunch" ${hasLunch ? 'checked' : ''} ${hasWork ? '' : 'disabled'}>
+        обед
+      </label>
+      <input type="time" data-day="${day.key}" data-role="lunch_start" value="${lunchStart}" ${hasWork && hasLunch ? '' : 'disabled'}>
+      <input type="time" data-day="${day.key}" data-role="lunch_end"   value="${lunchEnd}"   ${hasWork && hasLunch ? '' : 'disabled'}>
+      <span class="day-summary ${hasWork ? '' : 'off'}" data-day-summary="${day.key}">${hasWork ? '' : 'вых.'}</span>`;
     container.appendChild(row);
   }
-  // toggle inputs
-  container.querySelectorAll('input[data-role=enabled]').forEach(cb => {
-    cb.onchange = () => {
-      const day = cb.dataset.day;
-      const enabled = cb.checked;
-      const inputs = container.querySelectorAll(`input[data-day="${day}"][data-role!="enabled"]`);
-      inputs.forEach(i => { i.disabled = !enabled; });
-      const sum = container.querySelector(`[data-day-summary="${day}"]`);
-      if (sum) sum.textContent = enabled ? '' : 'выходной';
-    };
+
+  function refreshDay(day) {
+    const enabled = container.querySelector(`input[data-day="${day}"][data-role=enabled]`).checked;
+    const lunchCb = container.querySelector(`input[data-day="${day}"][data-role=lunch]`);
+    const lunch = lunchCb.checked && enabled;
+    const summary = container.querySelector(`[data-day-summary="${day}"]`);
+
+    // Включаем/выключаем рабочие time-поля
+    container.querySelectorAll(`input[data-day="${day}"][data-role=start], input[data-day="${day}"][data-role=end]`)
+      .forEach(i => { i.disabled = !enabled; });
+    // Чекбокс обеда — активен только при включённом дне
+    lunchCb.disabled = !enabled;
+    // Time-поля обеда — активны только если день и обед включены
+    container.querySelectorAll(`input[data-day="${day}"][data-role=lunch_start], input[data-day="${day}"][data-role=lunch_end]`)
+      .forEach(i => { i.disabled = !(enabled && lunch); });
+
+    if (!enabled) {
+      summary.textContent = 'вых.';
+      summary.classList.add('off');
+      return;
+    }
+    summary.classList.remove('off');
+    const s  = container.querySelector(`input[data-day="${day}"][data-role=start]`).value;
+    const e  = container.querySelector(`input[data-day="${day}"][data-role=end]`).value;
+    const ls = container.querySelector(`input[data-day="${day}"][data-role=lunch_start]`).value;
+    const le = container.querySelector(`input[data-day="${day}"][data-role=lunch_end]`).value;
+    const min = _dayMinutes(s, e, lunch, ls, le);
+    summary.textContent = fmtMinH(min);
+  }
+
+  // Подписки на изменения
+  container.querySelectorAll('input[data-role=enabled], input[data-role=lunch]').forEach(cb => {
+    cb.onchange = () => refreshDay(cb.dataset.day);
   });
+  container.querySelectorAll('input[type=time]').forEach(inp => {
+    inp.oninput = () => refreshDay(inp.dataset.day);
+  });
+  // Первичный пересчёт summary
+  for (const day of DAYS) refreshDay(day.key);
 }
 
 function readScheduleEditor(container) {
@@ -321,6 +471,17 @@ function readScheduleEditor(container) {
     if (!enabled) { out[day.key] = []; continue; }
     const start = container.querySelector(`input[data-day="${day.key}"][data-role=start]`).value || '09:00';
     const end   = container.querySelector(`input[data-day="${day.key}"][data-role=end]`).value   || '21:00';
+    const lunch = container.querySelector(`input[data-day="${day.key}"][data-role=lunch]`).checked;
+    if (lunch) {
+      const ls = container.querySelector(`input[data-day="${day.key}"][data-role=lunch_start]`).value || '13:00';
+      const le = container.querySelector(`input[data-day="${day.key}"][data-role=lunch_end]`).value   || '14:00';
+      // Защита: если обед вне рабочего интервала или некорректен — игнорируем,
+      // сохраняем как один интервал.
+      if (_toMin(ls) > _toMin(start) && _toMin(le) < _toMin(end) && _toMin(le) > _toMin(ls)) {
+        out[day.key] = [[start, ls], [le, end]];
+        continue;
+      }
+    }
     out[day.key] = [[start, end]];
   }
   return out;
@@ -483,6 +644,52 @@ async function deleteException(excId, userId, panelRow) {
   loadExceptions(userId, panelRow);
 }
 
+// ── Реквизиты организации ────────────────────────────────────────────────────
+
+const ORG_FIELDS = {
+  name: 'orgName', inn: 'orgInn', ogrn: 'orgOgrn',
+  bank_account: 'orgBankAccount', bank_name: 'orgBankName',
+  bank_corr_account: 'orgBankCorr', bank_bik: 'orgBankBik',
+};
+
+async function loadOrg() {
+  const res = await API.get('/api/v1/team/organization/');
+  if (!res.ok) return;
+  const data = await res.json();
+  for (const [field, elId] of Object.entries(ORG_FIELDS)) {
+    const el = document.getElementById(elId);
+    if (el) el.value = data[field] || '';
+  }
+}
+
+async function saveOrg() {
+  const btn = document.getElementById('btnSaveOrg');
+  const payload = {};
+  for (const [field, elId] of Object.entries(ORG_FIELDS)) {
+    const el = document.getElementById(elId);
+    if (el) payload[field] = el.value.trim();
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Сохранение…';
+  try {
+    const res = await API.put('/api/v1/team/organization/', payload);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showToast(data.error || `Ошибка ${res.status}`, 'error');
+    } else {
+      showToast('Реквизиты сохранены', 'success');
+    }
+  } catch (e) {
+    showToast('Ошибка сети', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>Сохранить реквизиты';
+  }
+}
+
+document.getElementById('btnSaveOrg').onclick = saveOrg;
+
+loadOrg();
 loadTeam();
 </script>
 {% endblock %}
