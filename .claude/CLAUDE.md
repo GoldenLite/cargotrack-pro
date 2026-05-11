@@ -12,13 +12,17 @@ CargoTrack Pro — Django web app for air freight customs clearance and cargo tr
 
 ## Development Commands
 
+Dependencies managed by `uv` (pyproject.toml + uv.lock). The `.venv` is created automatically by `uv sync`.
+
 ```bash
-pip install -r requirements.txt        # Install deps
-python manage.py runserver             # Dev server at http://localhost:8000
-python manage.py migrate               # Apply migrations
-python manage.py makemigrations        # Generate new migrations
-python manage.py createsuperuser       # Create admin user
-python manage.py load_test_data --count 50 --hawb-per-mawb 5  # Populate test data
+uv sync                                       # Install/update deps from lockfile
+uv add <package>                              # Add a new dependency
+uv remove <package>                           # Remove a dependency
+uv run python manage.py runserver             # Dev server at http://localhost:8000
+uv run python manage.py migrate               # Apply migrations
+uv run python manage.py makemigrations        # Generate new migrations
+uv run python manage.py createsuperuser       # Create admin user
+uv run python manage.py load_test_data --count 50 --hawb-per-mawb 5  # Populate test data
 ```
 
 No automated test suite exists — all testing is manual.

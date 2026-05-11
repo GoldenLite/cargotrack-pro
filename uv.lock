@@ -1,0 +1,142 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "asgiref"
+version = "3.11.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/40/f03da1264ae8f7cfdbf9146542e5e7e8100a4c66ab48e791df9a03d3f6c0/asgiref-3.11.1.tar.gz", hash = "sha256:5f184dc43b7e763efe848065441eac62229c9f7b0475f41f80e207a114eda4ce", size = 38550, upload-time = "2026-02-03T13:30:14.33Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/0a/a72d10ed65068e115044937873362e6e32fab1b7dce0046aeb224682c989/asgiref-3.11.1-py3-none-any.whl", hash = "sha256:e8667a091e69529631969fd45dc268fa79b99c92c5fcdda727757e52146ec133", size = 24345, upload-time = "2026-02-03T13:30:13.039Z" },
+]
+
+[[package]]
+name = "cargotrack-pro"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "django" },
+    { name = "django-cors-headers" },
+    { name = "djangorestframework" },
+    { name = "openpyxl" },
+    { name = "python-dotenv" },
+    { name = "waitress" },
+    { name = "whitenoise" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "django", specifier = "==4.2.13" },
+    { name = "django-cors-headers", specifier = "==4.4.0" },
+    { name = "djangorestframework", specifier = "==3.15.2" },
+    { name = "openpyxl", specifier = "==3.1.2" },
+    { name = "python-dotenv", specifier = "==1.0.1" },
+    { name = "waitress", specifier = "==3.0.0" },
+    { name = "whitenoise", specifier = "==6.7.0" },
+]
+
+[[package]]
+name = "django"
+version = "4.2.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "asgiref" },
+    { name = "sqlparse" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5f/5e/1a360d3cf6634b5e701a01890d5198ead9e237082a2036dbd7035df43958/Django-4.2.13.tar.gz", hash = "sha256:837e3cf1f6c31347a1396a3f6b65688f2b4bb4a11c580dcb628b5afe527b68a5", size = 10430886, upload-time = "2024-05-07T17:23:07.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/b3/7b72ea66fa18c3e4c9b686fc2fe65b675c37a64574add5d6cfaeb1e06a28/Django-4.2.13-py3-none-any.whl", hash = "sha256:a17fcba2aad3fc7d46fdb23215095dbbd64e6174bf4589171e732b18b07e426a", size = 7991849, upload-time = "2024-05-07T17:22:58.646Z" },
+]
+
+[[package]]
+name = "django-cors-headers"
+version = "4.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "asgiref" },
+    { name = "django" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d3/34/f0c7a7241f885cbfc99b1edef0acc7915dd7a3fb749fe27de5e8a9fb2ccb/django_cors_headers-4.4.0.tar.gz", hash = "sha256:92cf4633e22af67a230a1456cb1b7a02bb213d6536d2dcb2a4a24092ea9cebc2", size = 21151, upload-time = "2024-06-19T16:16:45.833Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9d/0c/4201d5650199b3a36ef3f2ab91f44c4527a70685f3003ce9f3ed8c30780c/django_cors_headers-4.4.0-py3-none-any.whl", hash = "sha256:5c6e3b7fe870876a1efdfeb4f433782c3524078fa0dc9e0195f6706ce7a242f6", size = 12789, upload-time = "2024-06-19T16:16:42.189Z" },
+]
+
+[[package]]
+name = "djangorestframework"
+version = "3.15.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/ce/31482eb688bdb4e271027076199e1aa8d02507e530b6d272ab8b4481557c/djangorestframework-3.15.2.tar.gz", hash = "sha256:36fe88cd2d6c6bec23dca9804bab2ba5517a8bb9d8f47ebc68981b56840107ad", size = 1067420, upload-time = "2024-06-19T07:59:32.891Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/b6/fa99d8f05eff3a9310286ae84c4059b08c301ae4ab33ae32e46e8ef76491/djangorestframework-3.15.2-py3-none-any.whl", hash = "sha256:2b8871b062ba1aefc2de01f773875441a961fefbf79f5eed1e32b2f096944b20", size = 1071235, upload-time = "2024-06-19T07:59:26.106Z" },
+]
+
+[[package]]
+name = "et-xmlfile"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/38/af70d7ab1ae9d4da450eeec1fa3918940a5fafb9055e934af8d6eb0c2313/et_xmlfile-2.0.0.tar.gz", hash = "sha256:dab3f4764309081ce75662649be815c4c9081e88f0837825f90fd28317d4da54", size = 17234, upload-time = "2024-10-25T17:25:40.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/8b/5fe2cc11fee489817272089c4203e679c63b570a5aaeb18d852ae3cbba6a/et_xmlfile-2.0.0-py3-none-any.whl", hash = "sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa", size = 18059, upload-time = "2024-10-25T17:25:39.051Z" },
+]
+
+[[package]]
+name = "openpyxl"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "et-xmlfile" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/e8/af028681d493814ca9c2ff8106fc62a4a32e4e0ae14602c2a98fc7b741c8/openpyxl-3.1.2.tar.gz", hash = "sha256:a6f5977418eff3b2d5500d54d9db50c8277a368436f4e4f8ddb1be3422870184", size = 185977, upload-time = "2023-03-11T16:58:38.78Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/94/a59521de836ef0da54aaf50da6c4da8fb4072fb3053fa71f052fd9399e7a/openpyxl-3.1.2-py2.py3-none-any.whl", hash = "sha256:f91456ead12ab3c6c2e9491cf33ba6d08357d802192379bb482f1033ade496f5", size = 249985, upload-time = "2023-03-11T16:58:36.257Z" },
+]
+
+[[package]]
+name = "python-dotenv"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bc/57/e84d88dfe0aec03b7a2d4327012c1627ab5f03652216c63d49846d7a6c58/python-dotenv-1.0.1.tar.gz", hash = "sha256:e324ee90a023d808f1959c46bcbc04446a10ced277783dc6ee09987c37ec10ca", size = 39115, upload-time = "2024-01-23T06:33:00.505Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/3e/b68c118422ec867fa7ab88444e1274aa40681c606d59ac27de5a5588f082/python_dotenv-1.0.1-py3-none-any.whl", hash = "sha256:f7b63ef50f1b690dddf550d03497b66d609393b40b564ed0d674909a68ebf16a", size = 19863, upload-time = "2024-01-23T06:32:58.246Z" },
+]
+
+[[package]]
+name = "sqlparse"
+version = "0.5.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/76/437d71068094df0726366574cf3432a4ed754217b436eb7429415cf2d480/sqlparse-0.5.5.tar.gz", hash = "sha256:e20d4a9b0b8585fdf63b10d30066c7c94c5d7a7ec47c889a2d83a3caa93ff28e", size = 120815, upload-time = "2025-12-19T07:17:45.073Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/4b/359f28a903c13438ef59ebeee215fb25da53066db67b305c125f1c6d2a25/sqlparse-0.5.5-py3-none-any.whl", hash = "sha256:12a08b3bf3eec877c519589833aed092e2444e68240a3577e8e26148acc7b1ba", size = 46138, upload-time = "2025-12-19T07:17:46.573Z" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/19/1b9b0e29f30c6d35cb345486df41110984ea67ae69dddbc0e8a100999493/tzdata-2026.2.tar.gz", hash = "sha256:9173fde7d80d9018e02a662e168e5a2d04f87c41ea174b139fbef642eda62d10", size = 198254, upload-time = "2026-04-24T15:22:08.651Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/e4/dccd7f47c4b64213ac01ef921a1337ee6e30e8c6466046018326977efd95/tzdata-2026.2-py2.py3-none-any.whl", hash = "sha256:bbe9af844f658da81a5f95019480da3a89415801f6cc966806612cc7169bffe7", size = 349321, upload-time = "2026-04-24T15:22:05.876Z" },
+]
+
+[[package]]
+name = "waitress"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/34/cb77e5249c433eb177a11ab7425056b32d3b57855377fa1e38b397412859/waitress-3.0.0.tar.gz", hash = "sha256:005da479b04134cdd9dd602d1ee7c49d79de0537610d653674cc6cbde222b8a1", size = 179393, upload-time = "2024-02-04T23:33:55.126Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/a9/485c953a1ac4cb98c28e41fd2c7184072df36bbf99734a51d44d04176878/waitress-3.0.0-py3-none-any.whl", hash = "sha256:2a06f242f4ba0cc563444ca3d1998959447477363a2d7e9b8b4d75d35cfd1669", size = 56698, upload-time = "2024-02-04T23:33:53.516Z" },
+]
+
+[[package]]
+name = "whitenoise"
+version = "6.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/b8/86451d63ef5e1a9c480b52759d9db25ba85c3420ebdaf039057ed152a4c1/whitenoise-6.7.0.tar.gz", hash = "sha256:58c7a6cd811e275a6c91af22e96e87da0b1109e9a53bb7464116ef4c963bf636", size = 24973, upload-time = "2024-06-19T16:20:09.11Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/42/68400d8ad59f67a1f7e12c2f39089ce005f08f73333f3e215f3d5ed6453c/whitenoise-6.7.0-py3-none-any.whl", hash = "sha256:a1ae85e01fdc9815d12fa33f17765bc132ed2c54fa76daf9e39e879dd93566f6", size = 19905, upload-time = "2024-06-19T16:20:03.269Z" },
+]
