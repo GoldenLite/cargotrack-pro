@@ -1770,7 +1770,7 @@ class AltaQueueItem(models.Model):
     файлы и кладёт их в hot-folder локальной Альты.
     """
     DOC_TYPE_CHOICES = [
-        ('indpost',  'Почтовая накладная'),
+        ('indpost',  'Накладная'),
         ('waybill',  'Накладная (ЭД-2)'),
         ('invoice',  'Инвойс'),
         ('express',  'Реестр экспресс-грузов'),

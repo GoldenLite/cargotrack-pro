@@ -2928,7 +2928,7 @@ def hawb_send_alta_indpost(request, hawb_id: int):
     from .services.alta import queue as alta_queue
     hawb = get_object_or_404(HouseWaybill.objects.select_related('mawb'), pk=hawb_id)
     item = alta_queue.enqueue_indpost(hawb, user=request.user)
-    messages.success(request, f'Почтовая накладная поставлена в очередь Альты (#{item.pk}).')
+    messages.success(request, f'Накладная поставлена в очередь Альты (#{item.pk}).')
     return redirect('hawb_detail', hawb_id=hawb_id)
 
 

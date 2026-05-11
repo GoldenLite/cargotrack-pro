@@ -55,3 +55,6 @@ dt_test.xml
 express_decl_test.xml
 invoice_test.xml
 _indpost_dcf.txt
+
+# Локальный конфиг alta-агента с токеном (никогда не коммитить)
+alta_agent/alta_agent.ini
