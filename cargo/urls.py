@@ -91,6 +91,28 @@ urlpatterns = [
     path('cargo/<str:awb_number>/export/do1/',      views.cargo_export_do1,      name='cargo_export_do1'),
     path('cargo/<str:awb_number>/export/manifest/', views.cargo_export_manifest, name='cargo_export_manifest'),
 
+    # ── Экспорт XML для Альта-ГТД (скачивание) ──
+    path('hawb/<int:hawb_id>/export/alta/',         views.hawb_export_alta_xml,     name='hawb_export_alta_xml'),
+    path('hawb/<int:hawb_id>/export/alta/indpost/', views.hawb_export_alta_indpost, name='hawb_export_alta_indpost'),
+    path('hawb/<int:hawb_id>/export/alta/invoice/', views.hawb_export_alta_invoice, name='hawb_export_alta_invoice'),
+    path('cargo/<str:awb_number>/export/alta/',     views.cargo_export_alta_express, name='cargo_export_alta_express'),
+    path('cargo/<str:awb_number>/export/alta/dt/',  views.cargo_export_alta_dt,      name='cargo_export_alta_dt'),
+
+    # ── Отправка в hot-folder Альты через очередь ──
+    path('hawb/<int:hawb_id>/send/alta/indpost/', views.hawb_send_alta_indpost, name='hawb_send_alta_indpost'),
+    path('hawb/<int:hawb_id>/send/alta/waybill/', views.hawb_send_alta_waybill, name='hawb_send_alta_waybill'),
+    path('hawb/<int:hawb_id>/send/alta/invoice/', views.hawb_send_alta_invoice, name='hawb_send_alta_invoice'),
+    path('cargo/<str:awb_number>/send/alta/',     views.cargo_send_alta_express, name='cargo_send_alta_express'),
+    path('cargo/<str:awb_number>/send/alta/dt/',  views.cargo_send_alta_dt,      name='cargo_send_alta_dt'),
+    path('alta/queue/',                           views.alta_queue_page,         name='alta_queue_page'),
+    path('alta/queue/<int:item_id>/retry/',       views.alta_queue_retry,        name='alta_queue_retry'),
+
+    # ── API для агента Альты ──
+    path('api/v1/alta/queue/',                       views.api_alta_queue_list, name='api_alta_queue_list'),
+    path('api/v1/alta/queue/<int:item_id>/file/',    views.api_alta_queue_file, name='api_alta_queue_file'),
+    path('api/v1/alta/queue/<int:item_id>/ack/',     views.api_alta_queue_ack,  name='api_alta_queue_ack'),
+    path('api/v1/alta/queue/<int:item_id>/fail/',    views.api_alta_queue_fail, name='api_alta_queue_fail'),
+
     # ── SLA ──
     path('sla/', views.sla_policies_page, name='sla_policies'),
     path('api/v1/sla-policies/',                 views.api_sla_policies, name='api_sla_policies'),

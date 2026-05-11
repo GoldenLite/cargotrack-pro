@@ -1,0 +1,80 @@
+{% extends "cargo/base.html" %}
+{% block title %}Очередь отправки в Альту — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Очередь отправки в Альту{% endblock %}
+
+{% block content %}
+<div class="ct-card" style="margin:20px">
+  <div class="d-flex align-items-center gap-3 flex-wrap mb-3">
+    <h4 class="mb-0">
+      <i class="bi bi-cloud-arrow-up me-2"></i>Очередь отправки в Альту
+    </h4>
+    <span class="badge bg-secondary">{{ pending_count }} в очереди</span>
+    {% if failed_count %}
+      <span class="badge bg-danger">{{ failed_count }} с ошибками</span>
+    {% endif %}
+    <span class="text-muted small">
+      Агент опрашивает API раз в 3-5 секунд. Если запись долго в статусе «В очереди» — проверь, запущен ли агент.
+    </span>
+  </div>
+
+  <table class="table table-sm table-hover">
+    <thead>
+      <tr>
+        <th style="width:60px">#</th>
+        <th>Тип</th>
+        <th>Файл</th>
+        <th>Связан</th>
+        <th>Кто поставил</th>
+        <th>Создан</th>
+        <th>Отправлен</th>
+        <th>Статус</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for it in items %}
+      <tr class="{% if it.status == 'failed' %}table-danger{% elif it.status == 'sent' %}text-muted{% endif %}">
+        <td>{{ it.pk }}</td>
+        <td><span class="badge bg-light text-dark">{{ it.get_doc_type_display }}</span></td>
+        <td><code style="font-size:11px">{{ it.filename }}</code></td>
+        <td>
+          {% if it.hawb %}
+            <a href="{% url 'hawb_detail' it.hawb_id %}">HAWB {{ it.hawb.hawb_number }}</a>
+          {% elif it.cargo %}
+            <a href="{% url 'cargo_detail' it.cargo.awb_number %}">MAWB {{ it.cargo.awb_number }}</a>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>{{ it.created_by.username|default:"—" }}</td>
+        <td><span class="text-muted small">{{ it.created_at|date:"d.m H:i:s" }}</span></td>
+        <td><span class="text-muted small">{{ it.sent_at|date:"d.m H:i:s"|default:"—" }}</span></td>
+        <td>
+          {% if it.status == 'pending' %}
+            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split"></i> В очереди</span>
+          {% elif it.status == 'sent' %}
+            <span class="badge bg-success"><i class="bi bi-check2-circle"></i> Отправлено</span>
+          {% else %}
+            <span class="badge bg-danger" title="{{ it.error_message }}">
+              <i class="bi bi-x-circle"></i> Ошибка ({{ it.retry_count }})
+            </span>
+          {% endif %}
+        </td>
+        <td>
+          {% if it.status != 'pending' %}
+          <form method="post" action="{% url 'alta_queue_retry' it.pk %}" style="display:inline">
+            {% csrf_token %}
+            <button class="btn btn-sm btn-outline-secondary" type="submit" title="Вернуть в очередь">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="9" class="text-center text-muted py-4">Очередь пуста</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

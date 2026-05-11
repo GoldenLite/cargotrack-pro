@@ -48,3 +48,10 @@ ENV/
 .playwright-mcp/
 .claude/settings.local.json
 .claude/.credentials.json
+
+# Тестовые/отладочные артефакты генераторов Альты (выгрузки руками)
+alta_test_output.xml
+dt_test.xml
+express_decl_test.xml
+invoice_test.xml
+_indpost_dcf.txt

@@ -8,7 +8,7 @@ from .models import (
     Cargo, StatusHistory, Warehouse, Flight, Label,
     DocumentType, CargoCategoryDocRule, CargoTypeDocTemplate, HAWBChecklistItem,
     UserProfile, ProcessingNorm, WorkloadRebalanceLog, WorkScheduleException,
-    OrganizationSettings,
+    OrganizationSettings, AltaQueueItem,
 )
 
 admin.site.site_header = 'CargoTrack Pro — Управление грузами'
@@ -381,3 +381,21 @@ class WorkloadRebalanceLogAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(AltaQueueItem)
+class AltaQueueItemAdmin(admin.ModelAdmin):
+    list_display  = ('id', 'doc_type', 'filename', 'status', 'retry_count',
+                     'created_by', 'created_at', 'sent_at')
+    list_filter   = ('status', 'doc_type', 'created_at')
+    search_fields = ('filename', 'hawb__hawb_number', 'cargo__awb_number')
+    readonly_fields = ('content', 'content_encoding', 'created_at', 'sent_at')
+    date_hierarchy = 'created_at'
+    raw_id_fields = ('hawb', 'cargo', 'created_by')
+
+    actions = ['requeue']
+
+    @admin.action(description='Вернуть в очередь (status=pending)')
+    def requeue(self, request, queryset):
+        n = queryset.update(status='pending', error_message='', sent_at=None)
+        self.message_user(request, f'Возвращено в очередь: {n}')

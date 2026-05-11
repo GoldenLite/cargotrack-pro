@@ -10,6 +10,7 @@ from django.http import JsonResponse, HttpResponse
 from django.db.models import Q, Sum, Count, Avg
 from django.utils import timezone
 from django.contrib import messages
+from django.views.decorators.http import require_POST
 
 from .models import (
     Cargo, StatusHistory, Warehouse, CargoAssignment, Label,
@@ -1467,7 +1468,7 @@ def goods_approve(request):
 # ─────────────────────────── REST API ───────────────────────────
 
 from rest_framework import generics, filters
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from .serializers import CargoListSerializer, CargoDetailSerializer, HouseWaybillSerializer
@@ -2737,6 +2738,349 @@ def cargo_export_manifest(request, awb_number: str):
     response['Content-Disposition'] = f'attachment; filename="Manifest {safe_awb}.xlsx"'
     wb.save(response)
     return response
+
+
+# ── Экспорт XML для Альта-ГТД ───────────────────────────────────────────────
+
+@login_required
+def hawb_export_alta_xml(request, hawb_id: int):
+    """GET /hawb/<id>/export/alta/ — WayBillExpressIndividual XML для Альта-ГТД.
+
+    Берёт реквизиты участника ВЭД и таможенного представителя из переменных
+    окружения (см. .env.example, блок ALTA_*). Возвращает готовый Envelope,
+    подписан он будет уже Альта-Подписью после импорта в Альта-ГТД.
+    """
+    import os
+    from .models import HouseWaybill
+    from .services.alta import envelope
+    from .services.alta.generators import waybill_individual
+
+    hawb = get_object_or_404(
+        HouseWaybill.objects.select_related('mawb'),
+        pk=hawb_id,
+    )
+
+    body = waybill_individual.build(
+        hawb,
+        carrier_name=os.environ.get('ALTA_CARRIER_NAME', 'ТЕСТ-ПЕРЕВОЗЧИК'),
+        carrier_cert_number=os.environ.get('ALTA_CARRIER_CERT', '0000/00'),
+        carrier_inn=os.environ.get('ALTA_CARRIER_INN', ''),
+        carrier_okpo=os.environ.get('ALTA_CARRIER_OKPO', ''),
+        carrier_legal_city=os.environ.get('ALTA_CARRIER_CITY', ''),
+        carrier_legal_street=os.environ.get('ALTA_CARRIER_STREET', ''),
+        carrier_fact_city=os.environ.get('ALTA_CARRIER_CITY', ''),
+        carrier_fact_street=os.environ.get('ALTA_CARRIER_STREET', ''),
+    )
+
+    if request.GET.get('raw') == '1':
+        from lxml import etree
+        xml_bytes = etree.tostring(body, xml_declaration=True, encoding='UTF-8', pretty_print=True, standalone=False)
+    else:
+        xml_bytes = envelope.wrap(
+            body_element=body,
+            message_type='ED.1002018',
+            participant_id=os.environ.get('ALTA_PARTICIPANT_ID', '0000000000000'),
+            receiver_customs_code=os.environ.get('ALTA_CUSTOMS_CODE', '10005030'),
+        )
+
+    safe_num = (hawb.hawb_number or 'hawb').replace('/', '_').replace('\\', '_')
+    response = HttpResponse(xml_bytes, content_type='application/xml; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="WayBill_{safe_num}.xml"'
+    return response
+
+
+@login_required
+def hawb_export_alta_indpost(request, hawb_id: int):
+    """GET /hawb/<id>/export/alta/indpost/ — почтовая накладная (Alta-диалект).
+
+    Внутренний XML-формат Альты (корень <AltaIndPost>, cp1251). Загружается
+    в Альту через hot-folder и служит источником для формирования реестра
+    экспресс-грузов (ДТЭГ).
+    """
+    import os
+    from .models import HouseWaybill
+    from .services.alta.generators import indpost
+
+    hawb = get_object_or_404(
+        HouseWaybill.objects.select_related('mawb'),
+        pk=hawb_id,
+    )
+
+    xml_bytes = indpost.build(
+        hawb,
+        customs_code=os.environ.get('ALTA_CUSTOMS_CODE', ''),
+        origin_country=os.environ.get('ALTA_DEFAULT_ORIGIN_COUNTRY', 'CN'),
+    )
+
+    safe_num = (hawb.hawb_number or 'indpost').replace('/', '_').replace('\\', '_')
+    response = HttpResponse(xml_bytes, content_type='application/xml; charset=windows-1251')
+    response['Content-Disposition'] = f'attachment; filename="IndPost_{safe_num}.xml"'
+    return response
+
+
+@login_required
+def hawb_export_alta_invoice(request, hawb_id: int):
+    """GET /hawb/<id>/export/alta/invoice/ — Invoice (коммерческий инвойс) XML.
+
+    Собирает инвойс по одной HAWB: данные продавца/покупателя из shipper_*
+    и consignee_*, товары из HAWBGood, условия поставки — заглушка FCA.
+    """
+    import os
+    from .models import HouseWaybill
+    from .services.alta import envelope
+    from .services.alta.generators import invoice
+
+    hawb = get_object_or_404(HouseWaybill, pk=hawb_id)
+
+    body = invoice.build(hawb)
+
+    if request.GET.get('raw') == '1':
+        from lxml import etree
+        xml_bytes = etree.tostring(body, xml_declaration=True, encoding='UTF-8', pretty_print=True, standalone=False)
+    else:
+        xml_bytes = envelope.wrap(
+            body_element=body,
+            message_type='ED.1002007',
+            participant_id=os.environ.get('ALTA_PARTICIPANT_ID', '0000000000000'),
+            receiver_customs_code=os.environ.get('ALTA_CUSTOMS_CODE', '10005030'),
+        )
+
+    safe_num = (hawb.hawb_number or 'invoice').replace('/', '_').replace('\\', '_')
+    response = HttpResponse(xml_bytes, content_type='application/xml; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="Invoice_{safe_num}.xml"'
+    return response
+
+
+@login_required
+def cargo_export_alta_dt(request, awb_number: str):
+    """GET /cargo/<awb>/export/alta/dt/ — ESADout_CU XML (классическая ДТ).
+
+    Минимально валидная декларация на товары по схеме 5.27.0.
+    Для боевой подачи требует дозаполнения реальной ДТ-формой в Альте.
+    """
+    import os
+    from .services.alta import envelope
+    from .services.alta.generators import goods_declaration
+
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+
+    body = goods_declaration.build(
+        cargo,
+        declarant_name=os.environ.get('ALTA_CARRIER_NAME', ''),
+        declarant_inn=os.environ.get('ALTA_CARRIER_INN', ''),
+    )
+
+    if request.GET.get('raw') == '1':
+        from lxml import etree
+        xml_bytes = etree.tostring(body, xml_declaration=True, encoding='UTF-8', pretty_print=True, standalone=False)
+    else:
+        xml_bytes = envelope.wrap(
+            body_element=body,
+            message_type='ED.1006107',
+            participant_id=os.environ.get('ALTA_PARTICIPANT_ID', '0000000000000'),
+            receiver_customs_code=os.environ.get('ALTA_CUSTOMS_CODE', '10005030'),
+        )
+
+    safe_awb = (cargo.awb_number or 'dt').replace('/', '_').replace('\\', '_')
+    response = HttpResponse(xml_bytes, content_type='application/xml; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="DT_{safe_awb}.xml"'
+    return response
+
+
+@login_required
+def cargo_export_alta_express(request, awb_number: str):
+    """GET /cargo/<awb>/export/alta/ — ExpressCargoDeclaration XML для Альта-ГТД.
+
+    Собирает декларацию на экспресс-грузы (ДТЭГ) из Cargo + всех его HAWB.
+    Реквизиты участника ВЭД и таможни — из переменных окружения (.env).
+    """
+    import os
+    from .services.alta import envelope
+    from .services.alta.generators import express_declaration
+
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+
+    body = express_declaration.build(cargo)
+
+    if request.GET.get('raw') == '1':
+        from lxml import etree
+        xml_bytes = etree.tostring(body, xml_declaration=True, encoding='UTF-8', pretty_print=True, standalone=False)
+    else:
+        xml_bytes = envelope.wrap(
+            body_element=body,
+            message_type='ED.1006275',
+            participant_id=os.environ.get('ALTA_PARTICIPANT_ID', '0000000000000'),
+            receiver_customs_code=os.environ.get('ALTA_CUSTOMS_CODE', '10005030'),
+        )
+
+    safe_awb = (cargo.awb_number or 'declaration').replace('/', '_').replace('\\', '_')
+    response = HttpResponse(xml_bytes, content_type='application/xml; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="ExpressDecl_{safe_awb}.xml"'
+    return response
+
+
+# ── Отправка в hot-folder Альты через очередь ──────────────────────────────
+
+@login_required
+@require_POST
+def hawb_send_alta_indpost(request, hawb_id: int):
+    from .models import HouseWaybill
+    from .services.alta import queue as alta_queue
+    hawb = get_object_or_404(HouseWaybill.objects.select_related('mawb'), pk=hawb_id)
+    item = alta_queue.enqueue_indpost(hawb, user=request.user)
+    messages.success(request, f'Почтовая накладная поставлена в очередь Альты (#{item.pk}).')
+    return redirect('hawb_detail', hawb_id=hawb_id)
+
+
+@login_required
+@require_POST
+def hawb_send_alta_waybill(request, hawb_id: int):
+    from .models import HouseWaybill
+    from .services.alta import queue as alta_queue
+    hawb = get_object_or_404(HouseWaybill.objects.select_related('mawb'), pk=hawb_id)
+    item = alta_queue.enqueue_waybill(hawb, user=request.user)
+    messages.success(request, f'Накладная ЭД-2 поставлена в очередь Альты (#{item.pk}).')
+    return redirect('hawb_detail', hawb_id=hawb_id)
+
+
+@login_required
+@require_POST
+def hawb_send_alta_invoice(request, hawb_id: int):
+    from .models import HouseWaybill
+    from .services.alta import queue as alta_queue
+    hawb = get_object_or_404(HouseWaybill, pk=hawb_id)
+    item = alta_queue.enqueue_invoice(hawb, user=request.user)
+    messages.success(request, f'Инвойс поставлен в очередь Альты (#{item.pk}).')
+    return redirect('hawb_detail', hawb_id=hawb_id)
+
+
+@login_required
+@require_POST
+def cargo_send_alta_express(request, awb_number: str):
+    from .services.alta import queue as alta_queue
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+    item = alta_queue.enqueue_express(cargo, user=request.user)
+    messages.success(request, f'Реестр экспресс-грузов поставлен в очередь Альты (#{item.pk}).')
+    return redirect('cargo_detail', awb_number=awb_number)
+
+
+@login_required
+@require_POST
+def cargo_send_alta_dt(request, awb_number: str):
+    from .services.alta import queue as alta_queue
+    cargo = get_object_or_404(Cargo, awb_number=awb_number)
+    item = alta_queue.enqueue_dt(cargo, user=request.user)
+    messages.success(request, f'ДТ поставлена в очередь Альты (#{item.pk}).')
+    return redirect('cargo_detail', awb_number=awb_number)
+
+
+@login_required
+def alta_queue_page(request):
+    """Страница очереди — что отправили, что ушло, что упало."""
+    from .models import AltaQueueItem
+    qs = AltaQueueItem.objects.select_related('hawb', 'cargo', 'created_by') \
+                              .order_by('-created_at')[:300]
+    return render(request, 'cargo/alta_queue.html', {
+        'items': qs,
+        'pending_count': AltaQueueItem.objects.filter(status='pending').count(),
+        'failed_count':  AltaQueueItem.objects.filter(status='failed').count(),
+    })
+
+
+@login_required
+@require_POST
+def alta_queue_retry(request, item_id: int):
+    """Пометить failed/sent запись как pending — агент заберёт повторно."""
+    from .models import AltaQueueItem
+    item = get_object_or_404(AltaQueueItem, pk=item_id)
+    item.status = 'pending'
+    item.error_message = ''
+    item.sent_at = None
+    item.save(update_fields=['status', 'error_message', 'sent_at'])
+    messages.success(request, f'Документ #{item.pk} возвращён в очередь.')
+    return redirect('alta_queue_page')
+
+
+# ── API для агента Альты ──────────────────────────────────────────────────
+
+def _check_alta_agent_token(request) -> bool:
+    """Проверяет заголовок Authorization: Bearer <ALTA_AGENT_TOKEN>."""
+    import os
+    expected = (os.environ.get('ALTA_AGENT_TOKEN') or '').strip()
+    if not expected:
+        return False
+    header = request.headers.get('Authorization', '')
+    if not header.startswith('Bearer '):
+        return False
+    provided = header[len('Bearer '):].strip()
+    # constant-time compare
+    import hmac
+    return hmac.compare_digest(provided.encode(), expected.encode())
+
+
+@api_view(['GET'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_queue_list(request):
+    """GET /api/v1/alta/queue/ — список pending-документов для агента."""
+    if not _check_alta_agent_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+    from .models import AltaQueueItem
+    qs = AltaQueueItem.objects.filter(status='pending').order_by('created_at')[:50]
+    return Response([{
+        'id': it.pk,
+        'doc_type': it.doc_type,
+        'filename': it.filename,
+        'encoding': it.content_encoding,
+        'created_at': it.created_at.isoformat(),
+        'size_bytes': len(it.content) if it.content else 0,
+    } for it in qs])
+
+
+@api_view(['GET'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_queue_file(request, item_id: int):
+    """GET /api/v1/alta/queue/<id>/file/ — XML-байты в исходной кодировке."""
+    if not _check_alta_agent_token(request):
+        return HttpResponse('Unauthorized', status=401)
+    from .models import AltaQueueItem
+    item = get_object_or_404(AltaQueueItem, pk=item_id)
+    response = HttpResponse(
+        bytes(item.content) if item.content else b'',
+        content_type=f'application/xml; charset={item.content_encoding}',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{item.filename}"'
+    response['X-Alta-Filename'] = item.filename
+    response['X-Alta-Encoding'] = item.content_encoding
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_queue_ack(request, item_id: int):
+    """POST /api/v1/alta/queue/<id>/ack/ — агент успешно положил файл в hot-folder."""
+    if not _check_alta_agent_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+    from .models import AltaQueueItem
+    item = get_object_or_404(AltaQueueItem, pk=item_id)
+    item.mark_sent()
+    return Response({'id': item.pk, 'status': item.status})
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_queue_fail(request, item_id: int):
+    """POST /api/v1/alta/queue/<id>/fail/ — агент не смог обработать (FS error и т.д.)."""
+    if not _check_alta_agent_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+    from .models import AltaQueueItem
+    item = get_object_or_404(AltaQueueItem, pk=item_id)
+    message = (request.data.get('message') or '')[:5000] if hasattr(request, 'data') else ''
+    item.mark_failed(message)
+    return Response({'id': item.pk, 'status': item.status, 'retry_count': item.retry_count})
 
 
 # ── HAWB-виджеты (для entity_type='hawb') ────────────────────────────────────

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:CategoryCust="urn:customs.ru:Categories:3.0.0" xmlns:cltTrans_ru="urn:customs.ru:Information:TransportDocuments:TransportCommonLeafTypesCust:5.14.3" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:customs.ru:Information:TransportDocuments:TransportCommonLeafTypesCust:5.14.3" elementFormDefault="qualified" version="5.14.3.0">
+	<xs:import namespace="urn:customs.ru:Categories:3.0.0" schemaLocation="CategoriesCust.xsd"/>
+	<xs:annotation>
+		<xs:documentation>Общие простые типы транспортных документов</xs:documentation>
+	</xs:annotation>
+	<xs:simpleType name="AirlineIATACodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Код ИАТА авиакомпании. До 3 символов. Числовой</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:pattern value="\d{1,3}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="AirplaneMarkType">
+		<xs:annotation>
+			<xs:documentation>Марка воздушного транспортного средства. Текст. 15 символов.</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:TextCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="15"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="AirplaneRegNumber">
+		<xs:annotation>
+			<xs:documentation>Регистрационный номер воздушного транспортного средства.  от 1 до 10 символов. Текстовое.</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="10"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="AirportIATACodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Код ИАТА аэропорта (города). 3 символа. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:pattern value="\w{3}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="AirportNameType">
+		<xs:annotation>
+			<xs:documentation>Название аэропорта. Текст. 50 символов.</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:TextCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="50"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="DrivingLicenceSeriesCodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Серия водительского удостоверения. 4 символа. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:pattern value="([0-9]{2}[A-Z0-9]{2})"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="ExchangeModeCodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Код режим обмена поддонов.  3 символа. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:pattern value="\w{3}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="FlightNumberType">
+		<xs:annotation>
+			<xs:documentation>Номер рейса.  До 7 символов. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="7"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="HazardousCargoCodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Класс опасности груза. В соответствии с правилами МК МОПОГ. До 3 символов. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="3"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="IATAAgentCode">
+		<xs:annotation>
+			<xs:documentation>Код ИАТА агента. от 7 до 11 символов. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:minLength value="7"/>
+			<xs:maxLength value="11"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="IMOSeaType">
+		<xs:annotation>
+			<xs:documentation>Номер регистрации судоходства (ИМО)</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:IntegerCategoriesCust">
+			<xs:pattern value="[0-9]{7}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="NumCode8Type">
+		<xs:annotation>
+			<xs:documentation>Номер представляемого документа. 8 символов. Числовой</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:IdentifierCategoriesCust">
+			<xs:pattern value="\d{8}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="PaymentModeType">
+		<xs:annotation>
+			<xs:documentation>Вид платежа.</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:TextCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="30"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="PolicySeriesCodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Серия страхового полиса гражданского автострахованияполиса . 3 символа. Текстовый</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:pattern value="\D{3}"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="PortNameType">
+		<xs:annotation>
+			<xs:documentation>Наименование порта</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:TextCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="50"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="RailwayCodeType">
+		<xs:annotation>
+			<xs:documentation>Код. Cокращенное наименование железной дороги согласно справочнику в Соглашении о международном грузовом сообщении. От 2 до 4 символов. Текстовый.</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:CodeCategoriesCust">
+			<xs:maxLength value="4"/>
+			<xs:minLength value="2"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="SCIType">
+		<xs:annotation>
+			<xs:documentation>Таможенный статус груза  (Код SCI)</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:TextCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="20"/>
+		</xs:restriction>
+	</xs:simpleType>
+	<xs:simpleType name="SealIDType">
+		<xs:annotation>
+			<xs:documentation>Идентификатор. Номер средства идентификации (пломбы). Числовой</xs:documentation>
+		</xs:annotation>
+		<xs:restriction base="CategoryCust:IdentifierCategoriesCust">
+			<xs:minLength value="1"/>
+			<xs:maxLength value="50"/>
+		</xs:restriction>
+	</xs:simpleType>
+</xs:schema>

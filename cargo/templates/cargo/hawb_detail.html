@@ -80,6 +80,45 @@
     </h5>
   </div>
   <div class="d-flex gap-2 align-items-center flex-wrap">
+    <!-- Отправка в Альту через очередь + резервное скачивание -->
+    <div class="btn-group btn-group-sm" role="group">
+      <form method="post" action="{% url 'hawb_send_alta_indpost' hawb.pk %}" style="display:inline">
+        {% csrf_token %}
+        <button class="btn btn-sm btn-success" type="submit"
+                title="Положить почтовую накладную в очередь Альты — агент заберёт и положит в hot-folder">
+          <i class="bi bi-send me-1"></i>Почтовая в Альту
+        </button>
+      </form>
+      <a href="{% url 'hawb_export_alta_indpost' hawb.pk %}"
+         class="btn btn-sm btn-outline-success"
+         title="Просто скачать XML (если нужно открыть руками)">
+        <i class="bi bi-download"></i>
+      </a>
+    </div>
+    <div class="btn-group btn-group-sm" role="group">
+      <form method="post" action="{% url 'hawb_send_alta_waybill' hawb.pk %}" style="display:inline">
+        {% csrf_token %}
+        <button class="btn btn-sm btn-primary" type="submit"
+                title="Поставить накладную ЭД-2 в очередь Альты">
+          <i class="bi bi-send me-1"></i>Накладная в Альту
+        </button>
+      </form>
+      <a href="{% url 'hawb_export_alta_xml' hawb.pk %}" class="btn btn-sm btn-outline-primary" title="Скачать">
+        <i class="bi bi-download"></i>
+      </a>
+    </div>
+    <div class="btn-group btn-group-sm" role="group">
+      <form method="post" action="{% url 'hawb_send_alta_invoice' hawb.pk %}" style="display:inline">
+        {% csrf_token %}
+        <button class="btn btn-sm btn-primary" type="submit"
+                title="Поставить инвойс в очередь Альты">
+          <i class="bi bi-send me-1"></i>Инвойс в Альту
+        </button>
+      </form>
+      <a href="{% url 'hawb_export_alta_invoice' hawb.pk %}" class="btn btn-sm btn-outline-primary" title="Скачать">
+        <i class="bi bi-download"></i>
+      </a>
+    </div>
     <!-- Логистический статус -->
     <span class="badge bg-{{ hawb.status_color }} px-3 py-2" style="font-size:13px">
       {{ hawb.logistics_status_display }}

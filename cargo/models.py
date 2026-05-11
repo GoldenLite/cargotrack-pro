@@ -1759,3 +1759,73 @@ class WorkloadRebalanceLog(models.Model):
         t = self.to_user.username if self.to_user else '?'
         return f'{self.hawb_id}: {f} → {t} ({self.created_at:%d.%m %H:%M})'
 
+
+# ─────────────────────────── ОЧЕРЕДЬ ОТПРАВКИ В АЛЬТУ ───────────────────────────
+
+class AltaQueueItem(models.Model):
+    """Документ, ожидающий выгрузки в hot-folder Альты через мини-агент.
+
+    Django сам не имеет доступа к ПК с Альтой, поэтому Django кладёт XML сюда,
+    а сторонний скрипт-агент опрашивает API /api/v1/alta/queue/, скачивает
+    файлы и кладёт их в hot-folder локальной Альты.
+    """
+    DOC_TYPE_CHOICES = [
+        ('indpost',  'Почтовая накладная'),
+        ('waybill',  'Накладная (ЭД-2)'),
+        ('invoice',  'Инвойс'),
+        ('express',  'Реестр экспресс-грузов'),
+        ('dt',       'Декларация на товары'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', 'В очереди'),
+        ('sent',    'Отправлено'),
+        ('failed',  'Ошибка'),
+    ]
+
+    doc_type = models.CharField('Тип документа', max_length=16, choices=DOC_TYPE_CHOICES, db_index=True)
+
+    # FK на исходную сущность (одно из двух). Не строго required — Альта может
+    # переварить документ, даже если запись в БД удалят.
+    hawb  = models.ForeignKey(HouseWaybill, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='alta_queue_items',
+                              verbose_name='HAWB')
+    cargo = models.ForeignKey(Cargo, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='alta_queue_items',
+                              verbose_name='Партия (MAWB)')
+
+    filename = models.CharField('Имя файла', max_length=255)
+    content  = models.BinaryField('XML (байты в исходной кодировке)')
+    content_encoding = models.CharField('Кодировка', max_length=32, default='utf-8')
+
+    status = models.CharField('Статус', max_length=10, choices=STATUS_CHOICES,
+                              default='pending', db_index=True)
+    error_message = models.TextField('Сообщение об ошибке', blank=True)
+    retry_count   = models.IntegerField('Попыток отправки', default=0)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='alta_queue_items', verbose_name='Кто поставил')
+    created_at = models.DateTimeField('Создан', auto_now_add=True, db_index=True)
+    sent_at    = models.DateTimeField('Отправлен', null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Документ в очереди на Альту'
+        verbose_name_plural = 'Очередь отправки в Альту'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+        ]
+
+    def __str__(self) -> str:
+        return f'[{self.get_status_display()}] {self.get_doc_type_display()} — {self.filename}'
+
+    def mark_sent(self) -> None:
+        self.status = 'sent'
+        self.sent_at = timezone.now()
+        self.error_message = ''
+        self.save(update_fields=['status', 'sent_at', 'error_message'])
+
+    def mark_failed(self, message: str) -> None:
+        self.status = 'failed'
+        self.error_message = (message or '')[:5000]
+        self.retry_count = (self.retry_count or 0) + 1
+        self.save(update_fields=['status', 'error_message', 'retry_count'])

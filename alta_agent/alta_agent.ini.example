@@ -1,0 +1,17 @@
+[agent]
+# URL твоего сервиса CargoTrack Pro (без хвостового слеша или с ним — неважно)
+base_url = https://cargotrack.example.com
+
+# Тот же токен, что задан в .env Django как ALTA_AGENT_TOKEN.
+# Сгенерируй любой длинный случайный (например, `python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+token = ЗАМЕНИ_МЕНЯ
+
+# Папка, которую Альта мониторит как «Автозагрузка»
+# (Альта-ГТД → Настройка → Внешние программы → Загрузка → Путь к папке)
+hotfolder = C:\ALTA\inbox
+
+# Как часто опрашивать API (сек)
+poll_interval_seconds = 4
+
+# Сколько ждать после сетевой ошибки перед повтором (сек)
+error_retry_seconds = 30

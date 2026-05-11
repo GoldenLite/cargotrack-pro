@@ -474,6 +474,9 @@
       <a href="{% url 'labels_page' %}" class="sidebar-link {% if request.resolver_match.url_name == 'labels_page' %}active{% endif %}">
         <i class="bi bi-tags"></i> Метки
       </a>
+      <a href="{% url 'alta_queue_page' %}" class="sidebar-link {% if request.resolver_match.url_name == 'alta_queue_page' %}active{% endif %}">
+        <i class="bi bi-cloud-arrow-up"></i> Очередь в Альту
+      </a>
       {% if user.is_staff %}
       <a href="/admin/" class="sidebar-link">
         <i class="bi bi-gear"></i> Администрирование
