@@ -8,6 +8,7 @@ import traceback
 from typing import Optional
 
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.utils import timezone
 
 from cargo.models import ImportedSheetRow, SheetImportRun, SheetSource
@@ -88,12 +89,20 @@ class SheetImporter:
         ws = open_worksheet(self.source)
         rows = _read_rows(ws, self.source.header_row)
         self.run.rows_total = len(rows)
+        logger.info('Importing %s: %d data rows', self.source.name, len(rows))
 
-        for raw in rows:
-            row_index = raw.pop('_row_index')
-            data = {k: v for k, v in raw.items() if k}
-            ch = _content_hash(data)
-            self._process_row(row_index, data, ch)
+        with transaction.atomic():
+            for i, raw in enumerate(rows, start=1):
+                row_index = raw.pop('_row_index')
+                data = {k: v for k, v in raw.items() if k}
+                ch = _content_hash(data)
+                self._process_row(row_index, data, ch)
+                if i % 500 == 0:
+                    logger.info(
+                        'Progress %s: %d/%d (new=%d unchanged=%d)',
+                        self.source.name, i, len(rows),
+                        self.run.rows_new, self.run.rows_unchanged,
+                    )
 
         self.run.save()
 
@@ -111,33 +120,52 @@ class SheetImporter:
                 logger.info('DRY #%s: %s', row_index, obj.match_status)
             return
 
-        obj, created = ImportedSheetRow.objects.update_or_create(
-            source=self.source,
-            source_row_index=row_index,
-            defaults={
-                'data': data,
-                'content_hash': ch,
-                'last_imported_at': timezone.now(),
-            },
+        existing = (
+            ImportedSheetRow.objects
+            .filter(source=self.source, source_row_index=row_index)
+            .only('id', 'content_hash', 'match_status')
+            .first()
         )
-        changed = created or (obj.content_hash != ch and not created)
-        # update_or_create уже выставил content_hash в defaults, поэтому detection
-        # делаем по флагу created + наличие previous-hash. Здесь упростим:
-        # если запись свежая или была only что обновлена — считаем changed.
+        now = timezone.now()
 
-        # Re-fetch чтобы получить «было до» — но это лишний запрос. Делаем проще:
-        # хеш всегда перезаписывается; запускаем match только если created OR
-        # это первый прогон (match_status == 'unmatched').
-        do_match = created or obj.match_status == 'unmatched' or obj.diff_summary == {}
-        if do_match:
+        if existing is None:
+            obj = ImportedSheetRow.objects.create(
+                source=self.source,
+                source_row_index=row_index,
+                data=data,
+                content_hash=ch,
+                last_imported_at=now,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
             match_row(obj)
             obj.save()
             if self.source.kind == 'crm' and obj.matched_hawb_id:
                 emit_workflow_events(obj)
+            self._tick_counters(obj, created=True, changed=True)
+            if self.verbose:
+                logger.info('#%s: NEW %s', row_index, obj.match_status)
+            return
 
-        self._tick_counters(obj, created=created, changed=changed)
+        if existing.content_hash == ch:
+            ImportedSheetRow.objects.filter(pk=existing.pk).update(
+                last_imported_at=now, last_seen_at=now,
+            )
+            existing.match_status = existing.match_status or 'unmatched'
+            self._tick_counters(existing, created=False, changed=False)
+            return
+
+        existing.data = data
+        existing.content_hash = ch
+        existing.last_imported_at = now
+        existing.last_seen_at = now
+        match_row(existing)
+        existing.save()
+        if self.source.kind == 'crm' and existing.matched_hawb_id:
+            emit_workflow_events(existing)
+        self._tick_counters(existing, created=False, changed=True)
         if self.verbose:
-            logger.info('#%s: %s %s', row_index, 'NEW' if created else 'UPD', obj.match_status)
+            logger.info('#%s: UPD %s', row_index, existing.match_status)
 
     def _tick_counters(self, obj: ImportedSheetRow, *, created: bool, changed: bool) -> None:
         if created:
