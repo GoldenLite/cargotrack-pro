@@ -6,6 +6,8 @@ from typing import Optional
 from cargo.models import HouseWaybill, ImportedSheetRow
 
 from .mapping import (
+    CRM_DECLARATION,
+    CRM_HAWB_NUMBER,
     GEN_CLIENT_INN,
     GEN_COMMENT,
     GEN_DECLARATION,
@@ -30,13 +32,26 @@ def _value(row_data: dict, key: str) -> str:
 
 
 def extract_keys(row: ImportedSheetRow) -> None:
-    """Вынимает в denormalized-поля все ключевые идентификаторы."""
+    """Вынимает в denormalized-поля все ключевые идентификаторы.
+
+    Имена колонок зависят от типа источника:
+    - general: «Накладная СДЭК» / «ТО Клиент» / «Регистрационный номер ДТ»
+    - crm:     «Номер накладной» / —          / «№ Декларации на выпуск»
+    """
     data = row.data or {}
-    raw_hawb = _value(data, GEN_HAWB_NUMBER)
+    if row.source.kind == 'crm':
+        hawb_key = CRM_HAWB_NUMBER
+        decl_key = CRM_DECLARATION
+        inn_key  = None
+    else:
+        hawb_key = GEN_HAWB_NUMBER
+        decl_key = GEN_DECLARATION
+        inn_key  = GEN_CLIENT_INN
+    raw_hawb = _value(data, hawb_key)
     row.hawb_number_raw  = raw_hawb[:64]
     row.hawb_number_norm = normalize_hawb_number(raw_hawb)[:64]
-    row.inn_raw          = normalize_inn(_value(data, GEN_CLIENT_INN))[:32]
-    row.declaration_number = _value(data, GEN_DECLARATION)[:64]
+    row.inn_raw          = normalize_inn(_value(data, inn_key))[:32] if inn_key else ''
+    row.declaration_number = _value(data, decl_key)[:64]
 
 
 def match_row(row: ImportedSheetRow) -> None:

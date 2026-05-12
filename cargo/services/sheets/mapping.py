@@ -27,13 +27,16 @@ GEN_DECLARATION    = 'Регистрационный номер ДТ'
 
 
 # CRM-таблица — колонки этапов workflow. Маппится 1-к-1 в HawbWorkflowEvent.event_type.
-CRM_HAWB_NUMBER         = 'Транспортная накладная'
-CRM_WAYBILL_NUMBER      = 'Номер накладной'
+# В CRM «Номер накладной» = HAWB (то же что «Накладная СДЭК» в Общее, формат 10208061544).
+# «Транспортная накладная» = MAWB-подобный номер (формат 141-53433181).
+CRM_HAWB_NUMBER         = 'Номер накладной'
+CRM_MAWB_NUMBER         = 'Транспортная накладная'
 CRM_WAYBILL_TYPE        = 'Тип накладной'
 CRM_ARRIVE_DATE         = 'Дата прибытия в РФ'
 CRM_WAREHOUSE           = 'СВХ'
 CRM_DECLARANT           = 'ФИО специалиста'
 CRM_VED                 = 'ФИО Специалист по ВЭД'
+CRM_DECLARATION         = '№ Декларации на выпуск'
 
 CRM_EVENT_MAP = {
     'ТЗ Согласовано':                'TZ_AGREED',
