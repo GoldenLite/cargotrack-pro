@@ -1,0 +1,115 @@
+{% extends "cargo/base.html" %}
+{% block title %}Импорт из Google Sheets — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}Импорт из Google Sheets{% endblock %}
+
+{% block content %}
+<div class="ct-card" style="margin:20px">
+  <div class="d-flex align-items-center gap-3 flex-wrap mb-3">
+    <h4 class="mb-0"><i class="bi bi-table me-2"></i>Импорт из Google Sheets</h4>
+    <a href="{% url 'sheets_sources' %}" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-gear"></i> Источники
+    </a>
+    <a href="{% url 'sheets_runs' %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-clock-history"></i> История прогонов
+    </a>
+    {% if last_run %}
+      <span class="text-muted small">
+        Последний прогон: {{ last_run.source.name }} —
+        {{ last_run.started_at|date:"d.m H:i" }} — {{ last_run.get_status_display }}
+      </span>
+    {% endif %}
+  </div>
+
+  <div class="d-flex gap-2 mb-2 flex-wrap">
+    {% for code, label, count in status_summary %}
+      <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+    {% endfor %}
+    <span class="badge bg-secondary">Всего: {{ total_count }}</span>
+  </div>
+
+  <form method="get" class="d-flex gap-2 mb-3 flex-wrap">
+    <select name="source" class="form-select form-select-sm" style="width:auto">
+      <option value="">— все источники —</option>
+      {% for s in sources %}
+        <option value="{{ s.pk }}" {% if f_source == s.pk|stringformat:"s" %}selected{% endif %}>
+          {{ s.name }} ({{ s.get_kind_display }})
+        </option>
+      {% endfor %}
+    </select>
+    <select name="status" class="form-select form-select-sm" style="width:auto">
+      <option value="">— все статусы —</option>
+      {% for code, label in status_choices %}
+        <option value="{{ code }}" {% if f_status == code %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <input type="text" name="q" value="{{ q }}" placeholder="HAWB, ИНН, № ДТ…"
+           class="form-control form-control-sm" style="max-width:300px">
+    <button class="btn btn-sm btn-primary" type="submit">Фильтр</button>
+    {% if f_source or f_status or q %}
+      <a href="{% url 'sheets_imports' %}" class="btn btn-sm btn-outline-secondary">Сброс</a>
+    {% endif %}
+  </form>
+
+  <table class="table table-sm table-hover">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Источник</th>
+        <th>Строка</th>
+        <th>HAWB</th>
+        <th>ИНН</th>
+        <th>№ ДТ</th>
+        <th>Статус</th>
+        <th>Обновлена</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      <tr class="{% if r.match_status == 'orphan' %}table-warning{% elif r.match_status == 'conflict' %}table-danger{% endif %}">
+        <td>{{ r.pk }}</td>
+        <td><small>{{ r.source.name }}</small></td>
+        <td>{{ r.source_row_index }}</td>
+        <td>
+          {% if r.matched_hawb %}
+            <a href="{% url 'hawb_detail' r.matched_hawb.pk %}">{{ r.hawb_number_norm }}</a>
+          {% elif r.promoted_hawb %}
+            <a href="{% url 'hawb_detail' r.promoted_hawb.pk %}">{{ r.hawb_number_norm }}</a>
+          {% else %}
+            <code>{{ r.hawb_number_norm|default:"—" }}</code>
+          {% endif %}
+        </td>
+        <td><small>{{ r.inn_raw|default:"—" }}</small></td>
+        <td><small>{{ r.declaration_number|default:"—" }}</small></td>
+        <td>
+          {% if r.match_status == 'matched' %}
+            <span class="badge bg-success">{{ r.get_match_status_display }}</span>
+          {% elif r.match_status == 'promoted' %}
+            <span class="badge bg-info text-dark">{{ r.get_match_status_display }}</span>
+          {% elif r.match_status == 'orphan' %}
+            <span class="badge bg-warning text-dark">{{ r.get_match_status_display }}</span>
+          {% elif r.match_status == 'conflict' %}
+            <span class="badge bg-danger">{{ r.get_match_status_display }}</span>
+          {% elif r.match_status == 'ignored' %}
+            <span class="badge bg-secondary">{{ r.get_match_status_display }}</span>
+          {% else %}
+            <span class="badge bg-light text-dark">{{ r.get_match_status_display }}</span>
+          {% endif %}
+        </td>
+        <td><small class="text-muted">{{ r.last_imported_at|date:"d.m H:i" }}</small></td>
+        <td>
+          <a href="{% url 'sheets_row_detail' r.pk %}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-eye"></i>
+          </a>
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="9" class="text-center text-muted py-4">Строк нет. Запусти импорт на странице «Источники».</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if rows.count == 500 %}
+    <p class="text-muted small">Показаны первые 500 строк. Уточни фильтр для остального.</p>
+  {% endif %}
+</div>
+{% endblock %}

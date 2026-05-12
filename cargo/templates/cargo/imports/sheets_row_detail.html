@@ -1,0 +1,142 @@
+{% extends "cargo/base.html" %}
+{% block title %}Строка #{{ row.source_row_index }} — Импорт Sheets{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'sheets_imports' %}">Импорт из Sheets</a> / Строка #{{ row.source_row_index }}
+{% endblock %}
+
+{% block content %}
+<div class="ct-card" style="margin:20px">
+  <div class="d-flex align-items-center gap-3 flex-wrap mb-3">
+    <h4 class="mb-0">
+      Строка из «{{ row.source.name }}», строка #{{ row.source_row_index }}
+    </h4>
+    {% if row.match_status == 'matched' %}
+      <span class="badge bg-success">{{ row.get_match_status_display }}</span>
+    {% elif row.match_status == 'promoted' %}
+      <span class="badge bg-info text-dark">{{ row.get_match_status_display }}</span>
+    {% elif row.match_status == 'orphan' %}
+      <span class="badge bg-warning text-dark">{{ row.get_match_status_display }}</span>
+    {% elif row.match_status == 'conflict' %}
+      <span class="badge bg-danger">{{ row.get_match_status_display }}</span>
+    {% elif row.match_status == 'ignored' %}
+      <span class="badge bg-secondary">{{ row.get_match_status_display }}</span>
+    {% else %}
+      <span class="badge bg-light text-dark">{{ row.get_match_status_display }}</span>
+    {% endif %}
+  </div>
+
+  <p class="text-muted small">
+    HAWB: <code>{{ row.hawb_number_norm|default:"—" }}</code>
+    {% if row.hawb_number_raw and row.hawb_number_raw != row.hawb_number_norm %}
+      (raw: <code>{{ row.hawb_number_raw }}</code>)
+    {% endif %}
+    | ИНН: {{ row.inn_raw|default:"—" }}
+    | № ДТ: {{ row.declaration_number|default:"—" }}
+    | Обновлено: {{ row.last_imported_at|date:"d.m.Y H:i" }}
+  </p>
+
+  {% if row.matched_hawb %}
+    <p>
+      Сматчена с HAWB
+      <a href="{% url 'hawb_detail' row.matched_hawb.pk %}">
+        {{ row.matched_hawb.hawb_number }}
+      </a>
+    </p>
+  {% elif row.promoted_hawb %}
+    <p>
+      Создана HAWB
+      <a href="{% url 'hawb_detail' row.promoted_hawb.pk %}">
+        {{ row.promoted_hawb.hawb_number }}
+      </a>
+    </p>
+  {% endif %}
+
+  {% if row.diff_summary %}
+    <h5 class="mt-4">Расхождения Sheets ↔ БД</h5>
+    {% if row.diff_summary._candidates %}
+      <p>Найдено несколько HAWB с этим номером:</p>
+      <ul>
+        {% for c in row.diff_summary._candidates %}
+          <li>
+            <a href="{% url 'hawb_detail' c.id %}">HAWB id={{ c.id }}</a>
+            {% if c.mawb %}(партия {{ c.mawb }}){% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <table class="table table-sm">
+        <thead>
+          <tr><th>Поле</th><th>В Sheets</th><th>В БД</th></tr>
+        </thead>
+        <tbody>
+        {% for field, vals in row.diff_summary.items %}
+          {% if field != '_candidates' and field != '_reason' %}
+          <tr>
+            <td><code>{{ field }}</code></td>
+            <td>{{ vals.sheet|default:"—" }}</td>
+            <td>{{ vals.db|default:"—" }}</td>
+          </tr>
+          {% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  {% endif %}
+
+  {% if events %}
+    <h5 class="mt-4">События workflow (для CRM-строк)</h5>
+    <table class="table table-sm">
+      <thead>
+        <tr><th>Событие</th><th>Когда</th><th>Комментарий</th><th>Raw</th></tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+          <tr>
+            <td>{{ e.get_event_type_display }}</td>
+            <td><small>{{ e.occurred_at|date:"d.m.Y H:i" }}</small></td>
+            <td>{{ e.comment|default:"" }}</td>
+            <td><small class="text-muted">{{ e.raw_value|default:"" }}</small></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <h5 class="mt-4">Сырые данные из Sheets</h5>
+  <table class="table table-sm">
+    <tbody>
+      {% for k, v in row.data.items %}
+        <tr><th style="width:30%">{{ k }}</th><td>{{ v }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="d-flex gap-2 mt-4 flex-wrap">
+    {% if row.match_status == 'orphan' %}
+      <form method="post" action="{% url 'sheets_row_promote' row.pk %}" style="display:inline">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-sm btn-success">
+          <i class="bi bi-plus-circle me-1"></i>Создать HAWB
+        </button>
+      </form>
+    {% endif %}
+    <form method="post" action="{% url 'sheets_row_rematch' row.pk %}" style="display:inline">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-sm btn-outline-primary">
+        <i class="bi bi-arrow-repeat me-1"></i>Перематчить
+      </button>
+    </form>
+    {% if row.match_status != 'ignored' %}
+    <form method="post" action="{% url 'sheets_row_ignore' row.pk %}" style="display:inline">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-eye-slash me-1"></i>Игнорировать
+      </button>
+    </form>
+    {% endif %}
+    <a href="{% url 'sheets_imports' %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>К списку
+    </a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "cargo/base.html" %}
+{% block title %}История прогонов импорта — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'sheets_imports' %}">Импорт из Sheets</a> / История прогонов
+{% endblock %}
+
+{% block content %}
+<div class="ct-card" style="margin:20px">
+  <div class="d-flex align-items-center gap-3 flex-wrap mb-3">
+    <h4 class="mb-0"><i class="bi bi-clock-history me-2"></i>История прогонов</h4>
+    <a href="{% url 'sheets_imports' %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left"></i> К строкам
+    </a>
+    <a href="{% url 'sheets_sources' %}" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-gear"></i> Источники
+    </a>
+  </div>
+
+  <table class="table table-sm">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Источник</th>
+        <th>Начало</th>
+        <th>Длительность</th>
+        <th>Статус</th>
+        <th>Всего</th>
+        <th>Новых</th>
+        <th>Изм.</th>
+        <th>Matched</th>
+        <th>Orphan</th>
+        <th>Conflict</th>
+        <th>Кто запустил</th>
+        <th>Dry</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+        <tr class="{% if r.status == 'error' %}table-danger{% endif %}">
+          <td>{{ r.pk }}</td>
+          <td><small>{{ r.source.name }}</small></td>
+          <td><small>{{ r.started_at|date:"d.m H:i:s" }}</small></td>
+          <td><small>
+            {% if r.finished_at %}{{ r.finished_at|timeuntil:r.started_at }}{% endif %}
+          </small></td>
+          <td>
+            {% if r.status == 'ok' %}
+              <span class="badge bg-success">OK</span>
+            {% elif r.status == 'error' %}
+              <span class="badge bg-danger" title="{{ r.error_message|truncatechars:300 }}">Ошибка</span>
+            {% else %}
+              <span class="badge bg-warning text-dark">{{ r.get_status_display }}</span>
+            {% endif %}
+          </td>
+          <td>{{ r.rows_total }}</td>
+          <td>{{ r.rows_new }}</td>
+          <td>{{ r.rows_changed }}</td>
+          <td>{{ r.rows_matched }}</td>
+          <td>{{ r.rows_orphan }}</td>
+          <td>{{ r.rows_conflict }}</td>
+          <td><small>{{ r.triggered_by.username|default:"system" }}</small></td>
+          <td>{% if r.dry_run %}✓{% endif %}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="13" class="text-center text-muted py-4">История пуста</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

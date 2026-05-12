@@ -4866,3 +4866,172 @@ def api_sla_policy(request, policy_id):
     from .sla import invalidate_policy_cache
     invalidate_policy_cache()
     return JsonResponse(_sla_policy_to_dict(policy))
+
+
+# ─────────────────────────── ИМПОРТ GOOGLE SHEETS ───────────────────────────
+
+@login_required
+def sheets_imports_page(request):
+    """Список ImportedSheetRow с фильтрами и сводкой по статусам."""
+    from .models import ImportedSheetRow, SheetSource, SheetImportRun
+    qs = ImportedSheetRow.objects.select_related(
+        'source', 'matched_hawb', 'matched_cargo'
+    ).order_by('source__kind', 'source__name', 'source_row_index')
+
+    f_source = request.GET.get('source') or ''
+    f_status = request.GET.get('status') or ''
+    q        = (request.GET.get('q') or '').strip()
+    if f_source:
+        qs = qs.filter(source_id=f_source)
+    if f_status:
+        qs = qs.filter(match_status=f_status)
+    if q:
+        qs = qs.filter(
+            Q(hawb_number_norm__icontains=q) |
+            Q(hawb_number_raw__icontains=q) |
+            Q(inn_raw__icontains=q) |
+            Q(declaration_number__icontains=q)
+        )
+
+    summary_map = {
+        row['match_status']: row['n']
+        for row in ImportedSheetRow.objects.values('match_status').annotate(n=Count('id'))
+    }
+    status_summary = [
+        (code, label, summary_map.get(code, 0))
+        for code, label in ImportedSheetRow.MATCH_STATUS_CHOICES
+    ]
+
+    sources = SheetSource.objects.order_by('kind', 'name')
+    last_run = SheetImportRun.objects.order_by('-started_at').first()
+
+    return render(request, 'cargo/imports/sheets_index.html', {
+        'rows': qs[:500],
+        'sources': sources,
+        'f_source': f_source,
+        'f_status': f_status,
+        'q': q,
+        'status_summary': status_summary,
+        'total_count': ImportedSheetRow.objects.count(),
+        'last_run': last_run,
+        'status_choices': ImportedSheetRow.MATCH_STATUS_CHOICES,
+    })
+
+
+@login_required
+def sheets_row_detail(request, row_id: int):
+    """Подробный вид одной строки с diff Sheets / БД."""
+    from .models import ImportedSheetRow
+    row = get_object_or_404(
+        ImportedSheetRow.objects.select_related(
+            'source', 'matched_hawb', 'matched_cargo', 'promoted_hawb'
+        ),
+        pk=row_id,
+    )
+    events = row.emitted_events.all().order_by('-occurred_at') if row.matched_hawb_id else []
+    return render(request, 'cargo/imports/sheets_row_detail.html', {
+        'row': row,
+        'events': events,
+    })
+
+
+@login_required
+@require_POST
+def sheets_row_promote(request, row_id: int):
+    """Создать HAWB из orphan-строки и связать с promoted_hawb."""
+    from .models import ImportedSheetRow, HouseWaybill
+    from .services.sheets.mapping import map_release_type, normalize_inn
+    from .services.sheets.events import emit_workflow_events
+    row = get_object_or_404(ImportedSheetRow, pk=row_id)
+    if row.match_status != 'orphan':
+        messages.error(request, f'Промоут возможен только для orphan-строк (сейчас: {row.get_match_status_display()}).')
+        return redirect('sheets_row_detail', row_id=row.pk)
+
+    data = row.data or {}
+    cargo_type = map_release_type(data.get('Выпуск') or '') or 'B2C'
+    hawb = HouseWaybill.objects.create(
+        hawb_number=row.hawb_number_norm,
+        cargo_type=cargo_type,
+        consignee_inn=normalize_inn(data.get('ТО Клиент') or ''),
+        description=(data.get('Тип груза') or '')[:5000],
+        problem_note=(data.get('Проблема') or '')[:5000],
+        tsd_number=(data.get('ТСД') or '')[:64],
+        customs_declaration_number=(data.get('Регистрационный номер ДТ') or '')[:50],
+        notes=(data.get('Комментарий') or '')[:5000],
+        logistics_status='CREATED',
+    )
+    row.match_status = 'promoted'
+    row.matched_hawb = hawb
+    row.promoted_hawb = hawb
+    row.save(update_fields=['match_status', 'matched_hawb', 'promoted_hawb'])
+    if row.source.kind == 'crm':
+        emit_workflow_events(row)
+    messages.success(request, f'Создана HAWB {hawb.hawb_number} из строки #{row.source_row_index}.')
+    return redirect('hawb_detail', hawb_id=hawb.pk)
+
+
+@login_required
+@require_POST
+def sheets_row_ignore(request, row_id: int):
+    """Пометить строку как ignored, чтобы не светилась в списках."""
+    from .models import ImportedSheetRow
+    row = get_object_or_404(ImportedSheetRow, pk=row_id)
+    row.match_status = 'ignored'
+    row.save(update_fields=['match_status'])
+    messages.success(request, f'Строка #{row.source_row_index} помечена как игнорируемая.')
+    return redirect('sheets_imports')
+
+
+@login_required
+@require_POST
+def sheets_row_rematch(request, row_id: int):
+    """Перематчить одну строку (после правки HAWB вручную или создания alias)."""
+    from .models import ImportedSheetRow
+    from .services.sheets.matcher import match_row
+    from .services.sheets.events import emit_workflow_events
+    row = get_object_or_404(ImportedSheetRow, pk=row_id)
+    match_row(row)
+    row.save()
+    if row.source.kind == 'crm' and row.matched_hawb_id:
+        emit_workflow_events(row)
+    messages.success(request, f'Перематчено. Новый статус: {row.get_match_status_display()}.')
+    return redirect('sheets_row_detail', row_id=row.pk)
+
+
+@login_required
+@require_POST
+def sheets_run_now(request, source_id: int):
+    """Синхронно запустить импорт одного источника."""
+    from .models import SheetSource
+    from .services.sheets.importer import SheetImporter
+    source = get_object_or_404(SheetSource, pk=source_id)
+    importer = SheetImporter(source, user=request.user)
+    run = importer.run_once()
+    if run.status == 'ok':
+        messages.success(
+            request,
+            f'Импорт {source.name} OK: total={run.rows_total} '
+            f'matched={run.rows_matched} orphan={run.rows_orphan} '
+            f'conflict={run.rows_conflict}.'
+        )
+    else:
+        messages.error(request, f'Импорт {source.name} упал: {run.error_message[:300]}')
+    return redirect('sheets_runs')
+
+
+@login_required
+def sheets_runs_page(request):
+    """История прогонов."""
+    from .models import SheetImportRun
+    runs = (SheetImportRun.objects
+            .select_related('source', 'triggered_by')
+            .order_by('-started_at')[:200])
+    return render(request, 'cargo/imports/sheets_runs.html', {'runs': runs})
+
+
+@login_required
+def sheets_sources_page(request):
+    """Список источников с кнопкой запуска. CRUD — через /admin/."""
+    from .models import SheetSource
+    sources = SheetSource.objects.order_by('kind', 'name')
+    return render(request, 'cargo/imports/sheets_sources.html', {'sources': sources})

@@ -1,0 +1,85 @@
+{% extends "cargo/base.html" %}
+{% block title %}Источники Google Sheets — CargoTrack Pro{% endblock %}
+{% block breadcrumb %}
+  <a href="{% url 'sheets_imports' %}">Импорт из Sheets</a> / Источники
+{% endblock %}
+
+{% block content %}
+<div class="ct-card" style="margin:20px">
+  <div class="d-flex align-items-center gap-3 flex-wrap mb-3">
+    <h4 class="mb-0"><i class="bi bi-gear me-2"></i>Источники импорта</h4>
+    <a href="/admin/cargo/sheetsource/add/" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-plus-circle"></i> Добавить источник
+    </a>
+    <a href="{% url 'sheets_imports' %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left"></i> К списку строк
+    </a>
+  </div>
+
+  <p class="text-muted small">
+    Создание и редактирование источников — через
+    <a href="/admin/cargo/sheetsource/">Django-админку</a>. Здесь — только запуск.
+  </p>
+
+  <table class="table table-sm table-hover">
+    <thead>
+      <tr>
+        <th>Название</th>
+        <th>Тип</th>
+        <th>Spreadsheet / Вкладка</th>
+        <th>Активен</th>
+        <th>Последний прогон</th>
+        <th>Статус</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sources %}
+        <tr>
+          <td><strong>{{ s.name }}</strong></td>
+          <td><span class="badge bg-light text-dark">{{ s.get_kind_display }}</span></td>
+          <td>
+            <small class="text-muted">{{ s.spreadsheet_id|truncatechars:20 }}</small>
+            / <code>{{ s.tab_name }}</code>
+          </td>
+          <td>
+            {% if s.is_active %}
+              <span class="badge bg-success">Да</span>
+            {% else %}
+              <span class="badge bg-secondary">Нет</span>
+            {% endif %}
+          </td>
+          <td><small>{{ s.last_imported_at|date:"d.m H:i"|default:"никогда" }}</small></td>
+          <td>
+            {% if s.last_status == 'ok' %}
+              <span class="badge bg-success">OK</span>
+            {% elif s.last_status == 'error' %}
+              <span class="badge bg-danger" title="{{ s.last_error|truncatechars:200 }}">Ошибка</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if s.is_active %}
+              <form method="post" action="{% url 'sheets_run_now' s.pk %}" style="display:inline">
+                {% csrf_token %}
+                <button class="btn btn-sm btn-primary" type="submit">
+                  <i class="bi bi-play-fill"></i> Запустить
+                </button>
+              </form>
+            {% endif %}
+            <a href="/admin/cargo/sheetsource/{{ s.pk }}/change/" class="btn btn-sm btn-outline-secondary">
+              <i class="bi bi-pencil"></i>
+            </a>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7" class="text-center text-muted py-4">
+          Нет источников. Добавь через
+          <a href="/admin/cargo/sheetsource/add/">админку</a>.
+        </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

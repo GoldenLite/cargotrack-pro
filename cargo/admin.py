@@ -9,6 +9,7 @@ from .models import (
     DocumentType, CargoCategoryDocRule, CargoTypeDocTemplate, HAWBChecklistItem,
     UserProfile, ProcessingNorm, WorkloadRebalanceLog, WorkScheduleException,
     OrganizationSettings, AltaQueueItem,
+    SheetSource, ImportedSheetRow, SheetImportRun, SheetUserAlias, HawbWorkflowEvent,
 )
 
 admin.site.site_header = 'CargoTrack Pro — Управление грузами'
@@ -399,3 +400,78 @@ class AltaQueueItemAdmin(admin.ModelAdmin):
     def requeue(self, request, queryset):
         n = queryset.update(status='pending', error_message='', sent_at=None)
         self.message_user(request, f'Возвращено в очередь: {n}')
+
+
+# ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────
+
+@admin.register(SheetSource)
+class SheetSourceAdmin(admin.ModelAdmin):
+    list_display  = ('name', 'kind', 'tab_name', 'is_active',
+                     'last_imported_at', 'last_status')
+    list_filter   = ('kind', 'is_active', 'last_status')
+    list_editable = ('is_active',)
+    search_fields = ('name', 'spreadsheet_id', 'tab_name')
+    readonly_fields = ('last_imported_at', 'last_status', 'last_error')
+
+
+@admin.register(ImportedSheetRow)
+class ImportedSheetRowAdmin(admin.ModelAdmin):
+    list_display  = ('id', 'source', 'source_row_index',
+                     'hawb_number_norm', 'match_status', 'last_imported_at')
+    list_filter   = ('source', 'match_status')
+    search_fields = ('hawb_number_norm', 'hawb_number_raw',
+                     'inn_raw', 'declaration_number')
+    raw_id_fields = ('matched_hawb', 'matched_cargo', 'promoted_hawb')
+    readonly_fields = ('content_hash', 'first_seen_at', 'last_seen_at',
+                       'last_imported_at')
+    date_hierarchy = 'last_imported_at'
+    list_per_page = 50
+
+    actions = ['mark_ignored', 'reset_match']
+
+    @admin.action(description='Пометить как ignored')
+    def mark_ignored(self, request, queryset):
+        n = queryset.update(match_status='ignored')
+        self.message_user(request, f'Помечено ignored: {n}')
+
+    @admin.action(description='Сбросить статус матчинга')
+    def reset_match(self, request, queryset):
+        n = queryset.update(match_status='unmatched', diff_summary={})
+        self.message_user(request, f'Сброшено: {n}')
+
+
+@admin.register(SheetImportRun)
+class SheetImportRunAdmin(admin.ModelAdmin):
+    list_display  = ('id', 'source', 'started_at', 'finished_at', 'status',
+                     'rows_total', 'rows_new', 'rows_changed',
+                     'rows_matched', 'rows_orphan', 'rows_conflict',
+                     'dry_run', 'triggered_by')
+    list_filter   = ('source', 'status', 'dry_run')
+    readonly_fields = ('source', 'started_at', 'finished_at', 'status',
+                       'rows_total', 'rows_new', 'rows_changed',
+                       'rows_unchanged', 'rows_matched', 'rows_orphan',
+                       'rows_conflict', 'error_message', 'triggered_by',
+                       'dry_run')
+    date_hierarchy = 'started_at'
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(SheetUserAlias)
+class SheetUserAliasAdmin(admin.ModelAdmin):
+    list_display  = ('alias', 'user', 'role_hint')
+    list_filter   = ('role_hint',)
+    search_fields = ('alias', 'user__username',
+                     'user__first_name', 'user__last_name')
+    raw_id_fields = ('user',)
+
+
+@admin.register(HawbWorkflowEvent)
+class HawbWorkflowEventAdmin(admin.ModelAdmin):
+    list_display  = ('id', 'hawb', 'event_type', 'occurred_at',
+                     'source', 'set_by')
+    list_filter   = ('event_type', 'source')
+    search_fields = ('hawb__hawb_number', 'raw_value', 'comment')
+    raw_id_fields = ('hawb', 'source_row', 'set_by')
+    date_hierarchy = 'occurred_at'

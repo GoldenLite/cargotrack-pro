@@ -113,6 +113,16 @@ urlpatterns = [
     path('api/v1/alta/queue/<int:item_id>/ack/',     views.api_alta_queue_ack,  name='api_alta_queue_ack'),
     path('api/v1/alta/queue/<int:item_id>/fail/',    views.api_alta_queue_fail, name='api_alta_queue_fail'),
 
+    # ── Импорт из Google Sheets ──
+    path('imports/sheets/',                            views.sheets_imports_page,  name='sheets_imports'),
+    path('imports/sheets/sources/',                    views.sheets_sources_page,  name='sheets_sources'),
+    path('imports/sheets/runs/',                       views.sheets_runs_page,     name='sheets_runs'),
+    path('imports/sheets/run/<int:source_id>/',        views.sheets_run_now,       name='sheets_run_now'),
+    path('imports/sheets/rows/<int:row_id>/',          views.sheets_row_detail,    name='sheets_row_detail'),
+    path('imports/sheets/rows/<int:row_id>/promote/',  views.sheets_row_promote,   name='sheets_row_promote'),
+    path('imports/sheets/rows/<int:row_id>/ignore/',   views.sheets_row_ignore,    name='sheets_row_ignore'),
+    path('imports/sheets/rows/<int:row_id>/rematch/',  views.sheets_row_rematch,   name='sheets_row_rematch'),
+
     # ── SLA ──
     path('sla/', views.sla_policies_page, name='sla_policies'),
     path('api/v1/sla-policies/',                 views.api_sla_policies, name='api_sla_policies'),

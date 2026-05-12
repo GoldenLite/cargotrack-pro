@@ -769,6 +769,14 @@ class HouseWaybill(models.Model):
     # ── Ответственный сотрудник ──
     assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                     verbose_name='Ответственный', related_name='hawb_assignments')
+    ved_manager = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                    verbose_name='Менеджер ВЭД', related_name='ved_managed_hawbs')
+
+    # ── Поля, импортируемые из Google Sheets (таблица "Общее") ──
+    problem_note = models.TextField('Проблема', blank=True,
+                                    help_text='Описание текущей проблемы по накладной (колонка "Проблема" из Sheets)')
+    tsd_number   = models.CharField('ТСД', max_length=64, blank=True,
+                                    help_text='Номер транспортного сопроводительного документа')
 
     # ── Склад СВХ ──
     scan_into_bond = models.DateTimeField('Дата размещения на СВХ (ДО1)', null=True, blank=True)
@@ -1829,3 +1837,208 @@ class AltaQueueItem(models.Model):
         self.error_message = (message or '')[:5000]
         self.retry_count = (self.retry_count or 0) + 1
         self.save(update_fields=['status', 'error_message', 'retry_count'])
+
+
+# ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────
+
+class SheetSource(models.Model):
+    """Конфигурация источника импорта из Google Sheets — одна вкладка одного spreadsheet'а."""
+    KIND_CHOICES = [
+        ('general', 'Таблица "Общее"'),
+        ('crm',     'Таблица CRM'),
+    ]
+    STATUS_CHOICES = [
+        ('',      '—'),
+        ('ok',    'OK'),
+        ('error', 'Ошибка'),
+    ]
+
+    name           = models.CharField('Название', max_length=100,
+                                      help_text='Произвольное имя для отображения в UI')
+    kind           = models.CharField('Тип источника', max_length=20, choices=KIND_CHOICES, db_index=True)
+    spreadsheet_id = models.CharField('Spreadsheet ID', max_length=128,
+                                      help_text='ID из URL Google-таблицы')
+    tab_name       = models.CharField('Имя вкладки', max_length=128)
+    header_row     = models.PositiveIntegerField('Номер строки шапки', default=1,
+                                                 help_text='1-based номер строки с заголовками колонок')
+    is_active      = models.BooleanField('Активен', default=True)
+
+    last_imported_at = models.DateTimeField('Последний импорт', null=True, blank=True)
+    last_status      = models.CharField('Последний статус', max_length=10, choices=STATUS_CHOICES, blank=True)
+    last_error       = models.TextField('Последняя ошибка', blank=True)
+    notes            = models.TextField('Заметки', blank=True)
+
+    class Meta:
+        verbose_name = 'Источник Google Sheets'
+        verbose_name_plural = 'Источники Google Sheets'
+        unique_together = [('spreadsheet_id', 'tab_name')]
+        ordering = ['kind', 'name']
+
+    def __str__(self) -> str:
+        return f'{self.get_kind_display()} → {self.name}'
+
+
+class ImportedSheetRow(models.Model):
+    """Сырая строка из Sheets + результат матчинга с HouseWaybill."""
+    MATCH_STATUS_CHOICES = [
+        ('unmatched', 'Не обработано'),
+        ('matched',   'Совпадает с HAWB'),
+        ('orphan',    'Нет соответствия в БД'),
+        ('conflict',  'Несколько кандидатов'),
+        ('ambiguous', 'Нет ключа для матчинга'),
+        ('promoted',  'Промоутнуто в HAWB'),
+        ('ignored',   'Исключено вручную'),
+    ]
+
+    source           = models.ForeignKey(SheetSource, on_delete=models.CASCADE, related_name='rows')
+    source_row_index = models.PositiveIntegerField('№ строки в Sheets', db_index=True)
+    data             = models.JSONField('Сырые данные', default=dict)
+    content_hash     = models.CharField('Hash контента', max_length=64, db_index=True)
+
+    # Извлечённые ключи — для индексации и поиска
+    hawb_number_raw    = models.CharField('HAWB (как в Sheets)', max_length=64, blank=True, db_index=True)
+    hawb_number_norm   = models.CharField('HAWB (нормализованный)', max_length=64, blank=True, db_index=True)
+    inn_raw            = models.CharField('ИНН (как в Sheets)', max_length=32, blank=True, db_index=True)
+    declaration_number = models.CharField('№ ДТ', max_length=64, blank=True, db_index=True)
+
+    match_status  = models.CharField('Статус матчинга', max_length=20, choices=MATCH_STATUS_CHOICES,
+                                     default='unmatched', db_index=True)
+    matched_hawb  = models.ForeignKey(HouseWaybill, null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='imported_rows', verbose_name='Сматченная HAWB')
+    matched_cargo = models.ForeignKey(Cargo, null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='imported_rows', verbose_name='Сматченная партия')
+    promoted_hawb = models.ForeignKey(HouseWaybill, null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='promoted_from_rows', verbose_name='Создана HAWB')
+
+    diff_summary = models.JSONField('Расхождения с БД', default=dict, blank=True)
+
+    first_seen_at    = models.DateTimeField('Впервые увидели', auto_now_add=True)
+    last_seen_at     = models.DateTimeField('Последнее обновление записи', auto_now=True)
+    last_imported_at = models.DateTimeField('Последний прогон импорта', default=timezone.now)
+
+    class Meta:
+        verbose_name = 'Строка из Sheets'
+        verbose_name_plural = 'Строки из Sheets'
+        unique_together = [('source', 'source_row_index')]
+        indexes = [
+            models.Index(fields=['match_status', 'source']),
+            models.Index(fields=['hawb_number_norm']),
+        ]
+        ordering = ['source', 'source_row_index']
+
+    def __str__(self) -> str:
+        return f'{self.source.name}#{self.source_row_index} [{self.get_match_status_display()}]'
+
+
+class SheetImportRun(models.Model):
+    """Журнал одного прогона импорта."""
+    STATUS_CHOICES = [
+        ('running', 'В процессе'),
+        ('ok',      'Успешно'),
+        ('error',   'Ошибка'),
+    ]
+
+    source     = models.ForeignKey(SheetSource, on_delete=models.CASCADE, related_name='runs')
+    started_at = models.DateTimeField('Начало', auto_now_add=True, db_index=True)
+    finished_at= models.DateTimeField('Завершение', null=True, blank=True)
+    status     = models.CharField('Статус', max_length=10, choices=STATUS_CHOICES, default='running')
+
+    rows_total     = models.PositiveIntegerField('Всего строк', default=0)
+    rows_new       = models.PositiveIntegerField('Новых', default=0)
+    rows_changed   = models.PositiveIntegerField('Изменившихся', default=0)
+    rows_unchanged = models.PositiveIntegerField('Без изменений', default=0)
+    rows_matched   = models.PositiveIntegerField('Сматчены', default=0)
+    rows_orphan    = models.PositiveIntegerField('Orphan', default=0)
+    rows_conflict  = models.PositiveIntegerField('Конфликты', default=0)
+
+    error_message = models.TextField('Сообщение об ошибке', blank=True)
+    triggered_by  = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL,
+                                      related_name='sheet_import_runs')
+    dry_run       = models.BooleanField('Dry-run', default=False)
+
+    class Meta:
+        verbose_name = 'Прогон импорта'
+        verbose_name_plural = 'Прогоны импорта'
+        ordering = ['-started_at']
+
+    def __str__(self) -> str:
+        return f'{self.source.name} {self.started_at:%d.%m %H:%M} [{self.get_status_display()}]'
+
+
+class SheetUserAlias(models.Model):
+    """Маппинг ФИО как в Sheets → User в нашей БД."""
+    ROLE_HINTS = [
+        ('',             '—'),
+        ('ved_manager',  'Менеджер ВЭД'),
+        ('declarant',    'Декларант / ответственный по ТО'),
+        ('broker',       'Брокер'),
+        ('manager',      'Менеджер'),
+    ]
+
+    alias     = models.CharField('ФИО как в Sheets', max_length=200, unique=True)
+    user      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sheet_aliases')
+    role_hint = models.CharField('Роль (подсказка)', max_length=20, choices=ROLE_HINTS, blank=True)
+    notes     = models.TextField('Заметки', blank=True)
+
+    class Meta:
+        verbose_name = 'Алиас пользователя из Sheets'
+        verbose_name_plural = 'Алиасы пользователей из Sheets'
+        ordering = ['alias']
+
+    def __str__(self) -> str:
+        return f'{self.alias} → {self.user.username}'
+
+
+class HawbWorkflowEvent(models.Model):
+    """Событие в таймлайне HAWB (этап workflow).
+
+    Каждая колонка CRM-таблицы Sheets, означающая «когда случилось такое-то событие»,
+    материализуется как одна запись этого типа. Из набора событий можно восстановить
+    любую дату любого этапа без дублирования полей в HouseWaybill.
+    """
+    EVENT_TYPES = [
+        ('TZ_AGREED',          'ТЗ согласовано'),
+        ('GOV_CONTROL',        'Госконтроль'),
+        ('VED_DOCS_COLLECTED', 'ВЭД собрал документы'),
+        ('DOCS_PROVIDED',      'Документы предоставлены'),
+        ('DOCS_REQUESTED',     'Запрос документов'),
+        ('DOCS_RESPONSE',      'Ответ на запрос документов'),
+        ('CALC_SENT',          'Отправлен расчёт ТП'),
+        ('PAYMENT_DONE',       'Оплата счёта'),
+        ('READY_TO_FILE',      'Готово к подаче'),
+        ('FILED_FOR_CUSTOMS',  'Подано на ТО'),
+        ('CUSTOMS_REQUEST',    'Запрос таможни'),
+        ('VED_RESPONSE',       'Ответ ВЭДа по запросу таможни'),
+        ('DECLARATION_ISSUED', '№ декларации на выпуск'),
+        ('OTHER',              'Прочее'),
+    ]
+    SOURCE_CHOICES = [
+        ('sheet', 'Из Google Sheets'),
+        ('user',  'Вручную'),
+        ('api',   'Внешний API'),
+    ]
+
+    hawb        = models.ForeignKey(HouseWaybill, on_delete=models.CASCADE,
+                                    related_name='workflow_events')
+    event_type  = models.CharField('Тип события', max_length=32, choices=EVENT_TYPES, db_index=True)
+    occurred_at = models.DateTimeField('Когда произошло', db_index=True)
+    comment     = models.TextField('Комментарий', blank=True)
+    raw_value   = models.CharField('Исходное значение', max_length=255, blank=True)
+
+    set_by      = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL,
+                                    related_name='set_workflow_events')
+    source      = models.CharField('Источник', max_length=10, choices=SOURCE_CHOICES, default='sheet')
+    source_row  = models.ForeignKey(ImportedSheetRow, null=True, blank=True,
+                                    on_delete=models.SET_NULL, related_name='emitted_events')
+
+    created_at  = models.DateTimeField('Создано', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Событие workflow HAWB'
+        verbose_name_plural = 'События workflow HAWB'
+        unique_together = [('hawb', 'event_type', 'source_row')]
+        indexes = [models.Index(fields=['hawb', 'event_type', 'occurred_at'])]
+        ordering = ['-occurred_at']
+
+    def __str__(self) -> str:
+        return f'{self.hawb.hawb_number} · {self.get_event_type_display()} · {self.occurred_at:%d.%m.%Y}'
