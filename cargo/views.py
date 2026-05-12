@@ -4929,9 +4929,16 @@ def sheets_row_detail(request, row_id: int):
         pk=row_id,
     )
     events = row.emitted_events.all().order_by('-occurred_at') if row.matched_hawb_id else []
+    diff = row.diff_summary or {}
+    candidates = diff.get('_candidates') or []
+    reason = diff.get('_reason') or ''
+    diff_fields = {k: v for k, v in diff.items() if not k.startswith('_')}
     return render(request, 'cargo/imports/sheets_row_detail.html', {
         'row': row,
         'events': events,
+        'candidates': candidates,
+        'reason': reason,
+        'diff_fields': diff_fields,
     })
 
 

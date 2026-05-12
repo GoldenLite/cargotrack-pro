@@ -51,32 +51,33 @@
     </p>
   {% endif %}
 
-  {% if row.diff_summary %}
+  {% if candidates or diff_fields or reason %}
     <h5 class="mt-4">Расхождения Sheets ↔ БД</h5>
-    {% if row.diff_summary._candidates %}
+    {% if reason %}
+      <p class="text-muted small">{{ reason }}</p>
+    {% endif %}
+    {% if candidates %}
       <p>Найдено несколько HAWB с этим номером:</p>
       <ul>
-        {% for c in row.diff_summary._candidates %}
+        {% for c in candidates %}
           <li>
             <a href="{% url 'hawb_detail' c.id %}">HAWB id={{ c.id }}</a>
             {% if c.mawb %}(партия {{ c.mawb }}){% endif %}
           </li>
         {% endfor %}
       </ul>
-    {% else %}
+    {% elif diff_fields %}
       <table class="table table-sm">
         <thead>
           <tr><th>Поле</th><th>В Sheets</th><th>В БД</th></tr>
         </thead>
         <tbody>
-        {% for field, vals in row.diff_summary.items %}
-          {% if field != '_candidates' and field != '_reason' %}
+        {% for field, vals in diff_fields.items %}
           <tr>
             <td><code>{{ field }}</code></td>
             <td>{{ vals.sheet|default:"—" }}</td>
             <td>{{ vals.db|default:"—" }}</td>
           </tr>
-          {% endif %}
         {% endfor %}
         </tbody>
       </table>
