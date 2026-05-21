@@ -15,7 +15,6 @@ from cargo.models import (
     HouseWaybill,
     ImportedSheetRow,
     SheetUserAlias,
-    Warehouse,
 )
 
 from .events import emit_workflow_events
@@ -49,25 +48,6 @@ def _resolve_user(alias_text: str, role_hint: str) -> Optional[User]:
     return a.user if a else None
 
 
-def _resolve_warehouse(license_text: str) -> Optional[Warehouse]:
-    """«Лицензия СВХ (фактическое местонахождение)» → Warehouse.
-
-    Поле в Sheets выглядит как «10005/181213/10047/9(МК старый)» —
-    лицензия + опциональный комментарий в скобках. Берём префикс
-    до первой скобки/пробела.
-    """
-    if not license_text:
-        return None
-    lic = license_text.split('(', 1)[0].strip()
-    if not lic:
-        return None
-    return (
-        Warehouse.objects
-        .filter(license_number=lic)
-        .first()
-    )
-
-
 def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseWaybill:
     """Создаёт HAWB из orphan-строки «Общее» и связывает её обратно.
 
@@ -86,9 +66,16 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
     cargo_type = map_release_type(data.get(GEN_RELEASE_TYPE) or '') or 'B2C'
 
     bond_dt = parse_date_safe(data.get(GEN_BOND_DATE) or '')
-    warehouse = _resolve_warehouse(data.get(GEN_WAREHOUSE_LIC) or '')
     assigned = _resolve_user(data.get(GEN_RESPONSIBLE) or '', 'declarant')
     ved      = _resolve_user(data.get(GEN_VED_MANAGER) or '', 'ved_manager')
+    warehouse_hint = (data.get(GEN_WAREHOUSE_LIC) or '').strip()
+
+    # СВХ хранится на Cargo, а не на HAWB. Кладём подсказку в notes,
+    # пользователь привяжет к партии вручную.
+    notes = (data.get(GEN_COMMENT) or '').strip()
+    if warehouse_hint:
+        prefix = f'СВХ из Sheets: {warehouse_hint}'
+        notes = f'{prefix}\n\n{notes}' if notes else prefix
 
     hawb = HouseWaybill.objects.create(
         hawb_number=row.hawb_number_norm,
@@ -97,8 +84,7 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
         problem_note=(data.get(GEN_PROBLEM) or '')[:5000],
         tsd_number=(data.get(GEN_TSD) or '')[:64],
         customs_declaration_number=(data.get(GEN_DECLARATION) or '')[:50],
-        notes=(data.get(GEN_COMMENT) or '')[:5000],
-        warehouse=warehouse,
+        notes=notes[:5000],
         assigned_to=assigned,
         ved_manager=ved,
         scan_into_bond=bond_dt,
