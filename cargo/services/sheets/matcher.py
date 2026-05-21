@@ -6,8 +6,10 @@ from typing import Optional
 from cargo.models import HouseWaybill, ImportedSheetRow
 
 from .mapping import (
+    CRM_ARRIVE_DATE,
     CRM_DECLARATION,
     CRM_HAWB_NUMBER,
+    GEN_ARRIVE_DATE,
     GEN_CLIENT_INN,
     GEN_COMMENT,
     GEN_DECLARATION,
@@ -20,6 +22,7 @@ from .mapping import (
     map_release_type,
     normalize_hawb_number,
     normalize_inn,
+    parse_date_safe,
 )
 
 
@@ -40,18 +43,22 @@ def extract_keys(row: ImportedSheetRow) -> None:
     """
     data = row.data or {}
     if row.source.kind == 'crm':
-        hawb_key = CRM_HAWB_NUMBER
-        decl_key = CRM_DECLARATION
-        inn_key  = None
+        hawb_key    = CRM_HAWB_NUMBER
+        decl_key    = CRM_DECLARATION
+        inn_key     = None
+        arrive_key  = CRM_ARRIVE_DATE
     else:
-        hawb_key = GEN_HAWB_NUMBER
-        decl_key = GEN_DECLARATION
-        inn_key  = GEN_CLIENT_INN
+        hawb_key    = GEN_HAWB_NUMBER
+        decl_key    = GEN_DECLARATION
+        inn_key     = GEN_CLIENT_INN
+        arrive_key  = GEN_ARRIVE_DATE
     raw_hawb = _value(data, hawb_key)
     row.hawb_number_raw  = raw_hawb[:64]
     row.hawb_number_norm = normalize_hawb_number(raw_hawb)[:64]
     row.inn_raw          = normalize_inn(_value(data, inn_key))[:32] if inn_key else ''
     row.declaration_number = _value(data, decl_key)[:64]
+    arrival_dt = parse_date_safe(_value(data, arrive_key))
+    row.arrival_date = arrival_dt.date() if arrival_dt else None
 
 
 def match_row(row: ImportedSheetRow) -> None:

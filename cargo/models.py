@@ -1900,6 +1900,7 @@ class ImportedSheetRow(models.Model):
     hawb_number_norm   = models.CharField('HAWB (нормализованный)', max_length=64, blank=True, db_index=True)
     inn_raw            = models.CharField('ИНН (как в Sheets)', max_length=32, blank=True, db_index=True)
     declaration_number = models.CharField('№ ДТ', max_length=64, blank=True, db_index=True)
+    arrival_date       = models.DateField('Дата прибытия (из Sheets)', null=True, blank=True, db_index=True)
 
     match_status  = models.CharField('Статус матчинга', max_length=20, choices=MATCH_STATUS_CHOICES,
                                      default='unmatched', db_index=True)

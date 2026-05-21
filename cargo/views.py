@@ -4880,11 +4880,25 @@ def sheets_imports_page(request):
 
     f_source = request.GET.get('source') or ''
     f_status = request.GET.get('status') or ''
+    f_from   = (request.GET.get('from') or '').strip()
+    f_to     = (request.GET.get('to') or '').strip()
     q        = (request.GET.get('q') or '').strip()
     if f_source:
         qs = qs.filter(source_id=f_source)
     if f_status:
         qs = qs.filter(match_status=f_status)
+    if f_from:
+        from datetime import datetime
+        try:
+            qs = qs.filter(arrival_date__gte=datetime.strptime(f_from, '%Y-%m-%d').date())
+        except ValueError:
+            pass
+    if f_to:
+        from datetime import datetime
+        try:
+            qs = qs.filter(arrival_date__lte=datetime.strptime(f_to, '%Y-%m-%d').date())
+        except ValueError:
+            pass
     if q:
         qs = qs.filter(
             Q(hawb_number_norm__icontains=q) |
@@ -4904,15 +4918,19 @@ def sheets_imports_page(request):
 
     sources = SheetSource.objects.order_by('kind', 'name')
     last_run = SheetImportRun.objects.order_by('-started_at').first()
+    visible_qs = qs[:500]
 
     return render(request, 'cargo/imports/sheets_index.html', {
-        'rows': qs[:500],
+        'rows': visible_qs,
         'sources': sources,
         'f_source': f_source,
         'f_status': f_status,
+        'f_from': f_from,
+        'f_to': f_to,
         'q': q,
         'status_summary': status_summary,
         'total_count': ImportedSheetRow.objects.count(),
+        'filtered_count': qs.count(),
         'last_run': last_run,
         'status_choices': ImportedSheetRow.MATCH_STATUS_CHOICES,
     })
@@ -4946,35 +4964,50 @@ def sheets_row_detail(request, row_id: int):
 @require_POST
 def sheets_row_promote(request, row_id: int):
     """Создать HAWB из orphan-строки и связать с promoted_hawb."""
-    from .models import ImportedSheetRow, HouseWaybill
-    from .services.sheets.mapping import map_release_type, normalize_inn
-    from .services.sheets.events import emit_workflow_events
+    from .models import ImportedSheetRow
+    from .services.sheets.promote import promote_row
     row = get_object_or_404(ImportedSheetRow, pk=row_id)
-    if row.match_status != 'orphan':
-        messages.error(request, f'Промоут возможен только для orphan-строк (сейчас: {row.get_match_status_display()}).')
+    try:
+        hawb = promote_row(row, user=request.user)
+    except ValueError as e:
+        messages.error(request, str(e))
         return redirect('sheets_row_detail', row_id=row.pk)
-
-    data = row.data or {}
-    cargo_type = map_release_type(data.get('Выпуск') or '') or 'B2C'
-    hawb = HouseWaybill.objects.create(
-        hawb_number=row.hawb_number_norm,
-        cargo_type=cargo_type,
-        consignee_inn=normalize_inn(data.get('ТО Клиент') or ''),
-        description=(data.get('Тип груза') or '')[:5000],
-        problem_note=(data.get('Проблема') or '')[:5000],
-        tsd_number=(data.get('ТСД') or '')[:64],
-        customs_declaration_number=(data.get('Регистрационный номер ДТ') or '')[:50],
-        notes=(data.get('Комментарий') or '')[:5000],
-        logistics_status='CREATED',
-    )
-    row.match_status = 'promoted'
-    row.matched_hawb = hawb
-    row.promoted_hawb = hawb
-    row.save(update_fields=['match_status', 'matched_hawb', 'promoted_hawb'])
-    if row.source.kind == 'crm':
-        emit_workflow_events(row)
     messages.success(request, f'Создана HAWB {hawb.hawb_number} из строки #{row.source_row_index}.')
     return redirect('hawb_detail', hawb_id=hawb.pk)
+
+
+@login_required
+@require_POST
+def sheets_bulk_promote(request):
+    """Пакетный promote: создать HAWB по списку id из чекбоксов."""
+    from django.db import transaction
+    from .models import ImportedSheetRow
+    from .services.sheets.promote import promote_row
+    ids = request.POST.getlist('row_ids')
+    if not ids:
+        messages.warning(request, 'Не выбрана ни одна строка.')
+        return redirect('sheets_imports')
+
+    created = 0
+    skipped = 0
+    errors: list[str] = []
+    qs = ImportedSheetRow.objects.filter(pk__in=ids, match_status='orphan', source__kind='general')
+    with transaction.atomic():
+        for row in qs.select_related('source'):
+            try:
+                promote_row(row, user=request.user)
+                created += 1
+            except ValueError as e:
+                skipped += 1
+                errors.append(f'#{row.source_row_index}: {e}')
+    if created:
+        messages.success(request, f'Создано HAWB: {created}.')
+    if skipped:
+        messages.warning(
+            request,
+            f'Пропущено: {skipped}. ' + ('Первые: ' + '; '.join(errors[:3]) if errors else '')
+        )
+    return redirect('sheets_imports')
 
 
 @login_required

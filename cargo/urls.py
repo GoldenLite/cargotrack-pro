@@ -122,6 +122,7 @@ urlpatterns = [
     path('imports/sheets/rows/<int:row_id>/promote/',  views.sheets_row_promote,   name='sheets_row_promote'),
     path('imports/sheets/rows/<int:row_id>/ignore/',   views.sheets_row_ignore,    name='sheets_row_ignore'),
     path('imports/sheets/rows/<int:row_id>/rematch/',  views.sheets_row_rematch,   name='sheets_row_rematch'),
+    path('imports/sheets/promote-bulk/',               views.sheets_bulk_promote,  name='sheets_bulk_promote'),
 
     # ── SLA ──
     path('sla/', views.sla_policies_page, name='sla_policies'),

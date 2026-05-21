@@ -27,7 +27,7 @@
     <span class="badge bg-secondary">Всего: {{ total_count }}</span>
   </div>
 
-  <form method="get" class="d-flex gap-2 mb-3 flex-wrap">
+  <form method="get" class="d-flex gap-2 mb-3 flex-wrap align-items-center">
     <select name="source" class="form-select form-select-sm" style="width:auto">
       <option value="">— все источники —</option>
       {% for s in sources %}
@@ -42,74 +42,128 @@
         <option value="{{ code }}" {% if f_status == code %}selected{% endif %}>{{ label }}</option>
       {% endfor %}
     </select>
+    <span class="small text-muted">Прибытие с</span>
+    <input type="date" name="from" value="{{ f_from }}" class="form-control form-control-sm" style="width:auto">
+    <span class="small text-muted">по</span>
+    <input type="date" name="to" value="{{ f_to }}" class="form-control form-control-sm" style="width:auto">
     <input type="text" name="q" value="{{ q }}" placeholder="HAWB, ИНН, № ДТ…"
-           class="form-control form-control-sm" style="max-width:300px">
+           class="form-control form-control-sm" style="max-width:260px">
     <button class="btn btn-sm btn-primary" type="submit">Фильтр</button>
-    {% if f_source or f_status or q %}
+    {% if f_source or f_status or f_from or f_to or q %}
       <a href="{% url 'sheets_imports' %}" class="btn btn-sm btn-outline-secondary">Сброс</a>
     {% endif %}
   </form>
 
-  <table class="table table-sm table-hover">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Источник</th>
-        <th>Строка</th>
-        <th>HAWB</th>
-        <th>ИНН</th>
-        <th>№ ДТ</th>
-        <th>Статус</th>
-        <th>Обновлена</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for r in rows %}
-      <tr class="{% if r.match_status == 'orphan' %}table-warning{% elif r.match_status == 'conflict' %}table-danger{% endif %}">
-        <td>{{ r.pk }}</td>
-        <td><small>{{ r.source.name }}</small></td>
-        <td>{{ r.source_row_index }}</td>
-        <td>
-          {% if r.matched_hawb %}
-            <a href="{% url 'hawb_detail' r.matched_hawb.pk %}">{{ r.hawb_number_norm }}</a>
-          {% elif r.promoted_hawb %}
-            <a href="{% url 'hawb_detail' r.promoted_hawb.pk %}">{{ r.hawb_number_norm }}</a>
-          {% else %}
-            <code>{{ r.hawb_number_norm|default:"—" }}</code>
-          {% endif %}
-        </td>
-        <td><small>{{ r.inn_raw|default:"—" }}</small></td>
-        <td><small>{{ r.declaration_number|default:"—" }}</small></td>
-        <td>
-          {% if r.match_status == 'matched' %}
-            <span class="badge bg-success">{{ r.get_match_status_display }}</span>
-          {% elif r.match_status == 'promoted' %}
-            <span class="badge bg-info text-dark">{{ r.get_match_status_display }}</span>
-          {% elif r.match_status == 'orphan' %}
-            <span class="badge bg-warning text-dark">{{ r.get_match_status_display }}</span>
-          {% elif r.match_status == 'conflict' %}
-            <span class="badge bg-danger">{{ r.get_match_status_display }}</span>
-          {% elif r.match_status == 'ignored' %}
-            <span class="badge bg-secondary">{{ r.get_match_status_display }}</span>
-          {% else %}
-            <span class="badge bg-light text-dark">{{ r.get_match_status_display }}</span>
-          {% endif %}
-        </td>
-        <td><small class="text-muted">{{ r.last_imported_at|date:"d.m H:i" }}</small></td>
-        <td>
-          <a href="{% url 'sheets_row_detail' r.pk %}" class="btn btn-sm btn-outline-secondary">
-            <i class="bi bi-eye"></i>
-          </a>
-        </td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="9" class="text-center text-muted py-4">Строк нет. Запусти импорт на странице «Источники».</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% if rows.count == 500 %}
+  <p class="small text-muted mb-2">Отфильтровано: {{ filtered_count }} (показано {{ rows|length }}).</p>
+
+  <form method="post" action="{% url 'sheets_bulk_promote' %}" id="bulkPromoteForm">
+    {% csrf_token %}
+    <div class="d-flex gap-2 mb-2 align-items-center">
+      <button type="submit" class="btn btn-sm btn-success" id="bulkPromoteBtn" disabled>
+        <i class="bi bi-plus-circle"></i> Создать HAWB из выбранного (<span id="selCount">0</span>)
+      </button>
+      <small class="text-muted">Промоут доступен только для orphan-строк источника «Общее».</small>
+    </div>
+
+    <table class="table table-sm table-hover">
+      <thead>
+        <tr>
+          <th style="width:24px">
+            <input type="checkbox" id="selAll" title="Выбрать все orphan-строки на странице">
+          </th>
+          <th>#</th>
+          <th>Источник</th>
+          <th>Строка</th>
+          <th>HAWB</th>
+          <th>Прибытие</th>
+          <th>ИНН</th>
+          <th>№ ДТ</th>
+          <th>Статус</th>
+          <th>Обновлена</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr class="{% if r.match_status == 'orphan' %}table-warning{% elif r.match_status == 'conflict' %}table-danger{% endif %}">
+          <td>
+            {% if r.match_status == 'orphan' and r.source.kind == 'general' and r.hawb_number_norm %}
+              <input type="checkbox" name="row_ids" value="{{ r.pk }}" class="row-cb">
+            {% endif %}
+          </td>
+          <td>{{ r.pk }}</td>
+          <td><small>{{ r.source.name }}</small></td>
+          <td>{{ r.source_row_index }}</td>
+          <td>
+            {% if r.matched_hawb %}
+              <a href="{% url 'hawb_detail' r.matched_hawb.pk %}">{{ r.hawb_number_norm }}</a>
+            {% elif r.promoted_hawb %}
+              <a href="{% url 'hawb_detail' r.promoted_hawb.pk %}">{{ r.hawb_number_norm }}</a>
+            {% else %}
+              <code>{{ r.hawb_number_norm|default:"—" }}</code>
+            {% endif %}
+          </td>
+          <td><small>{{ r.arrival_date|date:"d.m.Y"|default:"—" }}</small></td>
+          <td><small>{{ r.inn_raw|default:"—" }}</small></td>
+          <td><small>{{ r.declaration_number|default:"—" }}</small></td>
+          <td>
+            {% if r.match_status == 'matched' %}
+              <span class="badge bg-success">{{ r.get_match_status_display }}</span>
+            {% elif r.match_status == 'promoted' %}
+              <span class="badge bg-info text-dark">{{ r.get_match_status_display }}</span>
+            {% elif r.match_status == 'orphan' %}
+              <span class="badge bg-warning text-dark">{{ r.get_match_status_display }}</span>
+            {% elif r.match_status == 'conflict' %}
+              <span class="badge bg-danger">{{ r.get_match_status_display }}</span>
+            {% elif r.match_status == 'ignored' %}
+              <span class="badge bg-secondary">{{ r.get_match_status_display }}</span>
+            {% else %}
+              <span class="badge bg-light text-dark">{{ r.get_match_status_display }}</span>
+            {% endif %}
+          </td>
+          <td><small class="text-muted">{{ r.last_imported_at|date:"d.m H:i" }}</small></td>
+          <td>
+            <a href="{% url 'sheets_row_detail' r.pk %}" class="btn btn-sm btn-outline-secondary">
+              <i class="bi bi-eye"></i>
+            </a>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="11" class="text-center text-muted py-4">Строк нет. Запусти импорт на странице «Источники».</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </form>
+
+  {% if rows|length == 500 %}
     <p class="text-muted small">Показаны первые 500 строк. Уточни фильтр для остального.</p>
   {% endif %}
 </div>
+
+<script>
+  (function() {
+    const selAll = document.getElementById('selAll');
+    const cbs = document.querySelectorAll('.row-cb');
+    const btn = document.getElementById('bulkPromoteBtn');
+    const counter = document.getElementById('selCount');
+    function refresh() {
+      const n = document.querySelectorAll('.row-cb:checked').length;
+      counter.textContent = n;
+      btn.disabled = (n === 0);
+    }
+    if (selAll) {
+      selAll.addEventListener('change', function() {
+        cbs.forEach(cb => cb.checked = selAll.checked);
+        refresh();
+      });
+    }
+    cbs.forEach(cb => cb.addEventListener('change', refresh));
+    document.getElementById('bulkPromoteForm').addEventListener('submit', function(e) {
+      const n = document.querySelectorAll('.row-cb:checked').length;
+      if (!n) { e.preventDefault(); return; }
+      if (!confirm('Создать ' + n + ' HAWB из выбранных orphan-строк?')) e.preventDefault();
+    });
+    refresh();
+  })();
+</script>
 {% endblock %}
