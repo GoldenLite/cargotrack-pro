@@ -68,7 +68,8 @@ class Command(BaseCommand):
                     match_row(r)
                     r.save(update_fields=[
                         'hawb_number_raw', 'hawb_number_norm', 'inn_raw',
-                        'declaration_number', 'match_status', 'matched_hawb',
+                        'declaration_number', 'arrival_date',
+                        'match_status', 'matched_hawb',
                         'matched_cargo', 'diff_summary',
                     ])
                     if src.kind == 'crm' and r.matched_hawb_id:
