@@ -1,11 +1,18 @@
 """Alta-agent: pull queued documents from CargoTrack Pro and drop them
-into Alta-GTD's hot-folder.
+into Alta-GTD's hot-folder. ALSO: read incoming customs messages from
+Alta-GTD's inbox folder and push to CargoTrack Pro.
 
-CargoTrack Pro (Django, VPS) -- HTTPS --> this script -- FS --> C:\\ALTA\\inbox
+CargoTrack Pro (Django, VPS) <-- HTTPS --> this script <-- FS --> C:\\ALTA\\IN
 
-Runs on the machine where Alta-GTD is installed. From the network's point
-of view this is just outbound HTTPS, indistinguishable from browser
-traffic. No open ports, no VPN.
+Two threads in one pythonw process:
+
+  [outbound] poll /api/v1/alta/queue/ → download XML → write to hot-folder
+             (this is what was here from day one)
+
+  [inbound]  poll C:\\GTDSERV\\ED\\IN\\*.gz → parse SOAP envelope →
+             POST to /api/v1/alta/inbox/  (NEW)
+             NB: we do NOT delete the .gz files — that's s3_upload_files_ek5.py's
+             job. We only read.
 
 Config: alta_agent.ini next to this file.
 Run:    python alta_agent.py
@@ -13,11 +20,18 @@ Run:    python alta_agent.py
 from __future__ import annotations
 
 import configparser
+import glob
+import gzip
 import json
 import logging
+import os
+import re
+import sqlite3
 import sys
+import threading
 import time
 import traceback
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -45,6 +59,24 @@ def load_config() -> dict:
         sys.exit('alta_agent.ini: token is empty.')
     if not cfg['hotfolder'].exists():
         sys.exit(f'alta_agent.ini: hotfolder does not exist: {cfg["hotfolder"]}')
+
+    # Опциональная inbox-секция (для второй ветки — чтения C:\GTDSERV\ED\IN)
+    inbox = None
+    if 'inbox' in cp:
+        ib = cp['inbox']
+        watch_dir = Path(ib.get('watch_dir', ''))
+        token = ib.get('token', '').strip()
+        if watch_dir and token:
+            inbox = {
+                'watch_dir':     watch_dir,
+                'token':         token,
+                'poll_interval': int(ib.get('poll_interval', '5')),
+                'state_db':      Path(__file__).resolve().parent / ib.get('state_db', 'inbox_state.sqlite'),
+                'endpoint':      ib.get('endpoint', '/api/v1/alta/inbox/').lstrip('/'),
+                # читаем только incoming-файлы; outgoing-копии типа `538134^*.gz` пропускаем
+                'name_pattern':  re.compile(ib.get('name_pattern', r'^serveralta\^')),
+            }
+    cfg['inbox'] = inbox
     return cfg
 
 
@@ -165,10 +197,203 @@ def loop_once(cfg: dict) -> None:
     time.sleep(cfg['interval'])
 
 
+# ── INBOX (входящие ЭД-сообщения от таможни) ──────────────────────────────
+
+# Парсер использует regex по тегам с локальными именами, чтобы не вязнуть в
+# namespace-перфекционизме (там у Альты ~6 разных префиксов).
+_TAG_RE = lambda tag: re.compile(r'<(?:[a-zA-Z][\w-]*:)?' + tag + r'\b[^>]*>([^<]*)</(?:[a-zA-Z][\w-]*:)?' + tag + r'>')
+
+
+def _xml_field(xml_text: str, tag: str) -> str:
+    m = _TAG_RE(tag).search(xml_text)
+    return (m.group(1).strip() if m else '')
+
+
+def _pr_document_number_for(xml_text: str, doc_name_substr: str) -> str:
+    """Ищет PrDocumentNumber внутри блока с PrDocumentName, содержащим подстроку.
+
+    Например для CMN.11350 нужен WayBillNumber, который лежит как
+    <PrDocumentNumber>10245136417</PrDocumentNumber> рядом с
+    <PrDocumentName>Индивидуальная накладная</PrDocumentName>.
+    """
+    pat = re.compile(
+        r'<(?:[a-zA-Z][\w-]*:)?PrDocumentName[^>]*>([^<]*)</(?:[a-zA-Z][\w-]*:)?PrDocumentName>\s*'
+        r'<(?:[a-zA-Z][\w-]*:)?PrDocumentNumber[^>]*>([^<]*)</(?:[a-zA-Z][\w-]*:)?PrDocumentNumber>',
+        re.S
+    )
+    for name, number in pat.findall(xml_text):
+        if doc_name_substr.lower() in name.lower():
+            return number.strip()
+    return ''
+
+
+def _parse_inbox_xml(xml_text: str) -> dict:
+    """Выкусывает ключевые поля без полноценного XML-парсинга.
+
+    Возвращает dict пригодный для POST /api/v1/alta/inbox/.
+    Если ничего не нашли — пустой dict (envelope_id обязателен — caller проверит).
+    """
+    # WayBillNumber может лежать в разных местах:
+    # - прямой тег <WayBillNumber>
+    # - в CMN.11350: внутри IndividualWayBill с PrDocumentName="Индивидуальная накладная"
+    waybill = (
+        _xml_field(xml_text, 'WayBillNumber')
+        or _pr_document_number_for(xml_text, 'Индивидуальная накладная')
+    )
+    return {
+        'envelope_id':        _xml_field(xml_text, 'EnvelopeID'),
+        'initial_envelope':   _xml_field(xml_text, 'InitialEnvelopeID'),
+        'msg_type':           _xml_field(xml_text, 'MessageType'),
+        'prepared_at':        _xml_field(xml_text, 'PreparationDateTime'),
+        'waybill_number':     waybill,
+        'declaration_number': _xml_field(xml_text, 'DeclarationNumber'),
+        'customs_code':       _xml_field(xml_text, 'CustomsCode'),
+        'registration_date':  _xml_field(xml_text, 'RegistrationDate'),
+        'gtd_number':         _xml_field(xml_text, 'GTDNumber'),
+        'decision_code':      _xml_field(xml_text, 'DecisionCode'),
+        'reason_code':        _xml_field(xml_text, 'ReasonCode'),
+        'reason_text':        _xml_field(xml_text, 'Reason'),
+        'resolution_text':    _xml_field(xml_text, 'ResolutionDescription'),
+        'ref_document_id':    _xml_field(xml_text, 'RefDocumentID'),
+        'result_code':        _xml_field(xml_text, 'ResultCode'),
+        'result_description': _xml_field(xml_text, 'ResultDescription'),
+    }
+
+
+def _state_db_open(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.execute('CREATE TABLE IF NOT EXISTS processed (envelope_id TEXT PRIMARY KEY, processed_at INTEGER)')
+    conn.commit()
+    return conn
+
+
+def _state_seen(conn: sqlite3.Connection, envelope_id: str) -> bool:
+    cur = conn.execute('SELECT 1 FROM processed WHERE envelope_id=?', (envelope_id,))
+    return cur.fetchone() is not None
+
+
+def _state_mark(conn: sqlite3.Connection, envelope_id: str) -> None:
+    conn.execute('INSERT OR IGNORE INTO processed VALUES (?, ?)', (envelope_id, int(time.time())))
+    conn.commit()
+
+
+def _post_inbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
+    url = urljoin(cfg['base_url'], cfg['inbox']['endpoint'])
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(url, method='POST', data=data)
+    req.add_header('Authorization', f'Bearer {cfg["inbox"]["token"]}')
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('User-Agent', 'CargoTrack-AltaAgent-Inbox/1.0')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        body = b''
+        try:
+            body = e.read() if e.fp else b''
+        except Exception:
+            pass
+        return e.code, body
+
+
+def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None:
+    """Обрабатывает один .gz. Не удаляет файл."""
+    try:
+        with open(path, 'rb') as f:
+            xml_bytes = gzip.decompress(f.read())
+    except FileNotFoundError:
+        # s3-скрипт уже удалил — норма
+        return
+    except OSError as e:
+        logging.warning(f'inbox: read {path.name}: {e}')
+        return
+
+    # Кодировка обычно UTF-8 в SOAP, но в Альтовских xml встречается cp1251 — fallback
+    for enc in ('utf-8', 'cp1251'):
+        try:
+            xml_text = xml_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        logging.warning(f'inbox: {path.name}: undecodable')
+        return
+
+    parsed = _parse_inbox_xml(xml_text)
+    envelope_id = parsed.get('envelope_id')
+    if not envelope_id:
+        logging.warning(f'inbox: {path.name}: no EnvelopeID; skipping')
+        return
+
+    if _state_seen(conn, envelope_id):
+        return  # уже отправляли
+
+    payload = {
+        'envelope_id':        envelope_id,
+        'msg_type':           parsed.get('msg_type', ''),
+        'prepared_at':        parsed.get('prepared_at') or None,
+        'waybill_number':     parsed.get('waybill_number', ''),
+        'declaration_number': parsed.get('declaration_number', ''),
+        'raw_xml':            xml_text,
+        'parsed_meta': {
+            'source_file':        path.name,
+            'initial_envelope':   parsed.get('initial_envelope', ''),
+            'ref_document_id':    parsed.get('ref_document_id', ''),
+            'customs_code':       parsed.get('customs_code', ''),
+            'registration_date':  parsed.get('registration_date', ''),
+            'gtd_number':         parsed.get('gtd_number', ''),
+            'decision_code':      parsed.get('decision_code', ''),
+            'reason_code':        parsed.get('reason_code', ''),
+            'reason_text':        parsed.get('reason_text', ''),
+            'resolution_text':    parsed.get('resolution_text', ''),
+            'result_code':        parsed.get('result_code', ''),
+            'result_description': parsed.get('result_description', ''),
+        },
+    }
+    status, body = _post_inbox(cfg, payload)
+    if status in (200, 409):
+        _state_mark(conn, envelope_id)
+        logging.info(f'inbox: {path.name} envelope={envelope_id} kind={parsed.get("msg_type")} → HTTP {status}')
+    else:
+        logging.error(f'inbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
+
+
+def inbox_loop(cfg: dict) -> None:
+    """Бесконечный поток: периодически сканит watch_dir, POST новые файлы."""
+    ic = cfg['inbox']
+    logging.info(
+        f'inbox: started, watching {ic["watch_dir"]} '
+        f'pattern={ic["name_pattern"].pattern!r} poll={ic["poll_interval"]}s'
+    )
+    try:
+        conn = _state_db_open(ic['state_db'])
+    except Exception as e:
+        logging.error(f'inbox: cannot open state db {ic["state_db"]}: {e}')
+        return
+
+    while True:
+        try:
+            files = glob.glob(os.path.join(str(ic['watch_dir']), '*.gz'))
+            picked = [Path(p) for p in files if ic['name_pattern'].search(os.path.basename(p))]
+            for p in picked:
+                try:
+                    _inbox_process_file(cfg, conn, p)
+                except Exception:
+                    logging.error(f'inbox: process {p.name}: {traceback.format_exc()}')
+        except Exception:
+            logging.error(f'inbox: scan crash: {traceback.format_exc()}')
+        time.sleep(ic['poll_interval'])
+
+
 def main() -> None:
     setup_logging()
     cfg = load_config()
     logging.info(f'Start. base_url={cfg["base_url"]} hotfolder={cfg["hotfolder"]} interval={cfg["interval"]}s')
+
+    if cfg.get('inbox'):
+        threading.Thread(target=inbox_loop, args=(cfg,), daemon=True, name='inbox-loop').start()
+    else:
+        logging.info('inbox: secton not configured in alta_agent.ini → inbox loop disabled')
 
     # Outer guard: a crash inside the loop must not kill the agent silently.
     while True:

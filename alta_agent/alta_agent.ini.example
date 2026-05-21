@@ -15,3 +15,35 @@ poll_interval_seconds = 4
 
 # Сколько ждать после сетевой ошибки перед повтором (сек)
 error_retry_seconds = 30
+
+
+# ── Inbox: чтение входящих ЭД от таможни ──────────────────────────────
+# Параллельный поток в том же pythonw-процессе. Читает .gz из watch_dir,
+# отправляет в /api/v1/alta/inbox/. Файлы НЕ удаляет (это работа
+# существующего s3_upload_files_ek5.py — он удаляет после своего POST).
+# Если секцию закомментировать целиком — inbox-поток отключён.
+
+[inbox]
+# Где Альта складывает входящие ЭД-сообщения от таможни
+watch_dir = C:\GTDSERV\ED\IN
+
+# Отдельный токен от ALTA_AGENT_TOKEN. На VPS должен быть задан как
+# ALTA_INBOX_TOKEN в .env. Сгенерь длинный random:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+token = ЗАМЕНИ_МЕНЯ_ДРУГОЙ_ТОКЕН
+
+# Как часто сканить папку (сек). watchdog не использован сознательно —
+# polling проще и меньше зависимостей.
+poll_interval = 5
+
+# Локальная sqlite-база с EnvelopeID уже обработанных файлов.
+# Защищает от повторной отправки если файл ещё не удалён s3-скриптом.
+state_db = inbox_state.sqlite
+
+# Endpoint на VPS. Менять обычно не нужно.
+endpoint = /api/v1/alta/inbox/
+
+# Regex по имени файла — какие .gz обрабатывать.
+# Альта складывает и outgoing-копии (`538134^*.gz`), и incoming
+# (`serveralta^*.gz`). По умолчанию берём только incoming.
+name_pattern = ^serveralta\^

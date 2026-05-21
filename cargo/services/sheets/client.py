@@ -9,7 +9,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+# Полный scope (read+write) нужен для writeback в Sheets.
+# Если service account имеет только Viewer на Sheet — запись вернёт 403,
+# writeback это ловит и логирует, импорт продолжает работать.
 
 
 class SheetsConfigError(RuntimeError):

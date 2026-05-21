@@ -25,17 +25,39 @@ from cargo.models import AltaInboxMessage, HawbWorkflowEvent, HouseWaybill
 logger = logging.getLogger('cargo.alta.inbox')
 
 
-# ─── маппинг ED-кодов на наш semantic kind ──
-# Заполняется после получения реальных .gz примеров. Сейчас — заглушка;
-# всё что не в карте → kind='info' без изменения статуса.
-# Источник: wiki.alta.ru/index.php/Структура_SQL-таблиц_ГТД
+# ─── маппинг MessageType на наш semantic kind ──
+# Из реальных .gz из C:\GTDSERV\ED\IN.
 MSG_KIND_MAP: dict[str, str] = {
-    # 'ED.1002001': 'registered',   # регистрация ДТ — TODO: уточнить
-    # 'ED.1002005': 'released',     # выпуск ДТ — TODO: уточнить
-    # 'ED.1002007': 'rejected',     # отказ — TODO: уточнить
-    # 'ED.1002009': 'examination',  # досмотр — TODO: уточнить
-    # 'ED.1002012': 'hold',         # запрос таможни — TODO: уточнить
+    'CMN.00003': 'info',         # ArchResult — ACK от gateway: «обработано»
+    'CMN.11010': 'released',     # ED_Container «Выпуск товаров разрешен» (DecisionCode 10)
+    'CMN.11350': 'released',     # ExpressCargoDeclarationCustomMark — отметка таможни.
+                                 # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify_with_body().
+    'CMN.11314': 'info',         # Закрытие процедуры (DO1Close)
+    'CMN.13021': 'info',         # DO1KeepLimits — лимит хранения / размещение на СВХ
 }
+
+# DecisionCode → конкретный kind для типов где он есть в теле.
+# 10 — выпуск, 90 — отказ; остальные считаем info до выяснения.
+DECISION_CODE_KIND: dict[str, str] = {
+    '10': 'released',
+    '11': 'released',
+    '90': 'rejected',
+    '91': 'rejected',
+}
+
+
+def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
+    """MessageType (+ опц parsed_meta из тела) → kind.
+
+    Если у MessageType есть DecisionCode в теле — уточняем kind по нему.
+    Неизвестные коды → 'info' (статус не меняем).
+    """
+    base = MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
+    if parsed_meta:
+        dc = (parsed_meta.get('decision_code') or '').strip()
+        if dc and msg_type in ('CMN.11350', 'CMN.11010'):
+            return DECISION_CODE_KIND.get(dc, base)
+    return base
 
 STATUS_FROM_KIND: dict[str, str] = {
     'registered':  'FILED',
@@ -58,11 +80,6 @@ EVENT_TYPE_FROM_KIND: dict[str, str] = {
 }
 
 
-def classify(msg_type: str) -> str:
-    """ED.xxx → kind. Неизвестное → 'info'."""
-    return MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
-
-
 def match_hawb(msg: AltaInboxMessage) -> Optional[HouseWaybill]:
     """Найти HAWB по WayBillNumber из XML."""
     wn = (msg.waybill_number_raw or '').strip()
@@ -75,19 +92,51 @@ def match_hawb(msg: AltaInboxMessage) -> Optional[HouseWaybill]:
     )
 
 
-def apply_status(msg: AltaInboxMessage, hawb: HouseWaybill) -> Optional[str]:
-    """Применяет customs_status по маппингу. Возвращает текст ошибки или None.
+def _build_declaration_number(parsed_meta: dict) -> str:
+    """Собирает «10005020/200526/0018179» из CustomsCode + RegistrationDate + GTDNumber."""
+    cc = (parsed_meta.get('customs_code') or '').strip()
+    rd = (parsed_meta.get('registration_date') or '').strip()
+    gn = (parsed_meta.get('gtd_number') or '').strip()
+    if not (cc and rd and gn):
+        return ''
+    # RegistrationDate приходит как '2026-05-20' → форматируем в 200526
+    try:
+        y, m, d = rd.split('-')
+        rd_short = f'{d}{m}{y[2:]}'
+    except ValueError:
+        rd_short = rd
+    return f'{cc}/{rd_short}/{gn}'
 
-    Использует HouseWaybill.change_customs_status() — у него своя валидация
-    (вес HAWB ≤ MAWB и т.п.). Если поднимет ValueError — возвращаем
-    сообщение, но НЕ ломаем dispatch.
+
+def apply_status(msg: AltaInboxMessage, hawb: HouseWaybill) -> Optional[str]:
+    """Применяет customs_status и (для регистрации/выпуска) customs_declaration_number.
+
+    customs_declaration_number записывается прямым UPDATE минуя HouseWaybill.save(),
+    потому что save() автостирает поле при отсутствии MAWB / неполном чек-листе
+    документов. Зеркало в Sheets вызываем вручную после refresh_from_db.
     """
+    parsed = msg.parsed_meta or {}
+    decl_number = _build_declaration_number(parsed)
+
+    # Если в сообщении есть № ДТ — пишем его в HAWB через прямой UPDATE
+    if decl_number:
+        from django.db import transaction
+        with transaction.atomic():
+            HouseWaybill.objects.filter(pk=hawb.pk).update(customs_declaration_number=decl_number)
+        # Вручную дёрнем writeback в Sheets (т.к. UPDATE не триггерит post_save)
+        try:
+            from cargo.services.sheets.writeback import write_declaration
+            hawb.refresh_from_db(fields=['customs_declaration_number'])
+            write_declaration(hawb)
+        except Exception:
+            logger.exception('sheets writeback after declaration write failed')
+
     new_status = STATUS_FROM_KIND.get(msg.msg_kind)
     if not new_status:
-        return None  # info / неизвестный kind — статус не трогаем
+        return None  # info — статус не трогаем
 
-    # change_customs_status сам валидирует логистический статус (требует
-    # IMPORT_CUSTOMS / EXPORT_CUSTOMS); если HAWB не в таможне — пропускаем.
+    # change_customs_status сам валидирует logistics_status. Если HAWB ещё не
+    # в таможне — статус просто не применяем (но declaration уже записан выше).
     if hawb.logistics_status not in ('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'):
         return f'HAWB не в таможне (logistics_status={hawb.logistics_status})'
 
@@ -134,7 +183,7 @@ def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
 
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → статус → событие → sheets writeback."""
-    msg.msg_kind = classify(msg.msg_type)
+    msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
 
     hawb = match_hawb(msg)
     if hawb:
