@@ -884,7 +884,20 @@ def hawb_detail(request, hawb_id: int):
         all(i.is_received for i in checklist if i.is_required)
     ) if checklist else False
 
-    from .models import HouseWaybill as HWB
+    from .models import HouseWaybill as HWB, HawbWorkflowEvent, ImportedSheetRow
+    workflow_events = (
+        HawbWorkflowEvent.objects
+        .filter(hawb=hawb)
+        .select_related('set_by', 'source_row__source')
+        .order_by('-occurred_at', '-id')
+    )
+    sheet_rows = list(
+        ImportedSheetRow.objects
+        .filter(Q(promoted_hawb=hawb) | Q(matched_hawb=hawb))
+        .select_related('source')
+        .order_by('source__kind', 'source_row_index')
+        .distinct()
+    )
     context = {
         'hawb': hawb,
         'goods': goods,
@@ -894,6 +907,8 @@ def hawb_detail(request, hawb_id: int):
         'checklist_received': checklist_received,
         'checklist_required': checklist_required,
         'checklist_ready': checklist_ready,
+        'workflow_events': workflow_events,
+        'sheet_rows': sheet_rows,
         'logistics_status_choices': HWB.LOGISTICS_STATUS_CHOICES,
         'customs_status_choices': HWB.CUSTOMS_STATUS_CHOICES,
         'all_users': User.objects.filter(is_active=True).order_by('last_name', 'first_name'),

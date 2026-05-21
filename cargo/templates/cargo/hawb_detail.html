@@ -173,6 +173,11 @@
           <div class="col-6"><div class="text-muted">Рег. номер ДТ</div>
             <div class="font-monospace" style="font-size:11px">{{ hawb.customs_declaration_number|default:"—" }}</div>
           </div>
+          {% if hawb.tsd_number %}
+          <div class="col-12"><div class="text-muted">ТСД</div>
+            <div class="font-monospace">{{ hawb.tsd_number }}</div>
+          </div>
+          {% endif %}
           {% if hawb.scan_into_bond %}
           <div class="col-6"><div class="text-muted">Размещение на СВХ</div><div>{{ hawb.scan_into_bond|date:"d.m.Y H:i" }}</div></div>
           <div class="col-6"><div class="text-muted">На СВХ</div>
@@ -191,9 +196,10 @@
         <i class="bi bi-person-badge me-2"></i>Ответственный
       </div>
       <div class="card-body small">
+        <div class="text-muted">Ответственный по ТО</div>
         {% if hawb.assigned_to %}
-          <div class="d-flex align-items-center gap-2">
-            <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0" style="width:36px;height:36px;font-size:14px;font-weight:700">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center flex-shrink-0" style="width:32px;height:32px;font-size:13px;font-weight:700">
               {{ hawb.assigned_to.first_name|first|default:hawb.assigned_to.username|first|upper }}
             </div>
             <div>
@@ -201,9 +207,61 @@
               <div class="text-muted">{{ hawb.assigned_to.email|default:"" }}</div>
             </div>
           </div>
-        {% else %}<span class="text-muted">Не назначен</span>{% endif %}
+        {% else %}<div class="text-muted mb-2">Не назначен</div>{% endif %}
+
+        <div class="text-muted">Менеджер ВЭД</div>
+        {% if hawb.ved_manager %}
+          <div class="d-flex align-items-center gap-2">
+            <div class="rounded-circle bg-warning text-dark d-flex align-items-center justify-content-center flex-shrink-0" style="width:32px;height:32px;font-size:13px;font-weight:700">
+              {{ hawb.ved_manager.first_name|first|default:hawb.ved_manager.username|first|upper }}
+            </div>
+            <div>
+              <div class="fw-semibold">{{ hawb.ved_manager.get_full_name|default:hawb.ved_manager.username }}</div>
+              <div class="text-muted">{{ hawb.ved_manager.email|default:"" }}</div>
+            </div>
+          </div>
+        {% else %}<div class="text-muted">Не назначен</div>{% endif %}
       </div>
     </div>
+
+    {% if hawb.problem_note or hawb.notes %}
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-chat-square-text me-2"></i>Заметки
+      </div>
+      <div class="card-body small">
+        {% if hawb.problem_note %}
+          <div class="alert alert-warning py-2 mb-2" style="white-space:pre-wrap">
+            <strong>Проблема:</strong> {{ hawb.problem_note }}
+          </div>
+        {% endif %}
+        {% if hawb.notes %}
+          <div style="white-space:pre-wrap">{{ hawb.notes }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if sheet_rows %}
+    <div class="card mb-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-table me-2"></i>Импорт из Sheets
+      </div>
+      <div class="card-body small">
+        {% for r in sheet_rows %}
+          <div class="d-flex justify-content-between align-items-center {% if not forloop.last %}border-bottom pb-1 mb-1{% endif %}">
+            <div>
+              <span class="badge bg-light text-dark border me-1">{{ r.source.get_kind_display }}</span>
+              <span class="text-muted">«{{ r.source.name }}», строка {{ r.source_row_index }}</span>
+            </div>
+            <a href="{% url 'sheets_row_detail' r.pk %}" class="btn btn-sm btn-outline-secondary">
+              <i class="bi bi-eye"></i>
+            </a>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
 
   </div>
 
@@ -619,6 +677,52 @@
         {% else %}<p class="text-muted small mb-0"><i class="bi bi-inbox me-1"></i>Товарные позиции не добавлены</p>{% endif %}
       </div>
     </div>
+
+    {% if workflow_events %}
+    <div class="card mt-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-clock-history me-2"></i>События из CRM
+        <span class="badge bg-light text-dark ms-2">{{ workflow_events|length }}</span>
+      </div>
+      <div class="card-body p-2">
+        <table class="table table-sm mb-0 small">
+          <thead>
+            <tr>
+              <th>Когда</th>
+              <th>Событие</th>
+              <th>Значение / Комментарий</th>
+              <th>Источник</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in workflow_events %}
+              <tr>
+                <td><small>{{ e.occurred_at|date:"d.m.Y H:i" }}</small></td>
+                <td><small>{{ e.get_event_type_display }}</small></td>
+                <td>
+                  <small>
+                    {% if e.raw_value %}<code>{{ e.raw_value|truncatechars:50 }}</code>{% endif %}
+                    {% if e.comment %} <span class="text-muted">{{ e.comment|truncatechars:80 }}</span>{% endif %}
+                  </small>
+                </td>
+                <td>
+                  <small class="text-muted">
+                    {% if e.source_row %}
+                      <a href="{% url 'sheets_row_detail' e.source_row.pk %}">
+                        {{ e.get_source_display }}#{{ e.source_row.source_row_index }}
+                      </a>
+                    {% else %}
+                      {{ e.get_source_display }}
+                    {% endif %}
+                  </small>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
 
     {# ── Бизнес-процессы ─────────────────────────────────────────────── #}
     <div id="wf-instances-block" class="mt-3" style="display:none">
