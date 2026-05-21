@@ -678,6 +678,66 @@
       </div>
     </div>
 
+    {% if inbox_messages %}
+    <div class="card mt-3">
+      <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">
+        <i class="bi bi-envelope-arrow-down me-2"></i>Сообщения от таможни
+        <span class="badge bg-light text-dark ms-2">{{ inbox_messages|length }}</span>
+      </div>
+      <div class="card-body p-2">
+        <table class="table table-sm mb-0 small">
+          <thead>
+            <tr>
+              <th>Когда</th>
+              <th>Тип</th>
+              <th>ED-код</th>
+              <th>№ ДТ / WayBill</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in inbox_messages %}
+              <tr class="{% if m.msg_kind == 'released' %}table-success{% elif m.msg_kind == 'rejected' %}table-danger{% elif m.msg_kind == 'hold' or m.msg_kind == 'examination' %}table-warning{% endif %}">
+                <td><small>{{ m.prepared_at|default:m.received_at|date:"d.m.Y H:i" }}</small></td>
+                <td>
+                  {% if m.msg_kind == 'released' %}
+                    <span class="badge bg-success">{{ m.get_msg_kind_display }}</span>
+                  {% elif m.msg_kind == 'rejected' %}
+                    <span class="badge bg-danger">{{ m.get_msg_kind_display }}</span>
+                  {% elif m.msg_kind == 'registered' %}
+                    <span class="badge bg-info text-dark">{{ m.get_msg_kind_display }}</span>
+                  {% elif m.msg_kind == 'hold' or m.msg_kind == 'examination' %}
+                    <span class="badge bg-warning text-dark">{{ m.get_msg_kind_display }}</span>
+                  {% else %}
+                    <span class="badge bg-light text-dark border">{{ m.get_msg_kind_display }}</span>
+                  {% endif %}
+                </td>
+                <td><small class="font-monospace text-muted">{{ m.msg_type }}</small></td>
+                <td>
+                  <small>
+                    {% if m.declaration_number %}<code>{{ m.declaration_number }}</code><br>{% endif %}
+                    {% if m.waybill_number_raw %}<span class="text-muted">{{ m.waybill_number_raw }}</span>{% endif %}
+                  </small>
+                </td>
+                <td>
+                  <button class="btn btn-sm btn-outline-secondary" type="button"
+                          data-bs-toggle="collapse" data-bs-target="#xml-{{ m.pk }}">
+                    <i class="bi bi-code"></i>
+                  </button>
+                </td>
+              </tr>
+              <tr id="xml-{{ m.pk }}" class="collapse">
+                <td colspan="5">
+                  <pre style="white-space:pre-wrap; font-size:10px; max-height:200px; overflow:auto; background:#f8f9fa; padding:6px; border-radius:4px;">{{ m.raw_xml|default:"(нет raw_xml)" }}</pre>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
     {% if workflow_events %}
     <div class="card mt-3">
       <div class="card-header py-2 fw-bold small text-uppercase text-muted bg-white">

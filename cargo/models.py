@@ -1839,6 +1839,58 @@ class AltaQueueItem(models.Model):
         self.save(update_fields=['status', 'error_message', 'retry_count'])
 
 
+class AltaInboxMessage(models.Model):
+    """Входящее ЭД-сообщение от таможни, прилетевшее через alta_agent inbox-thread.
+
+    Парный к AltaQueueItem: туда мы кладём исходящее, оттуда читаем входящее.
+    Источник — gzip из C:\\GTDSERV\\ED\\IN на рабочей виртуалке; собирает
+    inbox_loop в alta_agent.py, шлёт POST /api/v1/alta/inbox/ на VPS.
+    """
+    KIND_CHOICES = [
+        ('registered',  'Регистрация ДТ'),
+        ('released',    'Выпуск ДТ'),
+        ('rejected',    'Отказ в выпуске'),
+        ('examination', 'Досмотр / запрос'),
+        ('hold',        'Требование / арест'),
+        ('info',        'Информационное'),
+    ]
+
+    envelope_id = models.CharField('Envelope ID (Альта)', max_length=64,
+                                   unique=True, db_index=True)
+    msg_type    = models.CharField('MessageType (ED.xxx)', max_length=32, db_index=True)
+    msg_kind    = models.CharField('Semantic kind', max_length=16,
+                                   choices=KIND_CHOICES, default='info', db_index=True)
+
+    waybill_number_raw = models.CharField('WayBillNumber из XML',
+                                          max_length=64, blank=True, db_index=True)
+    declaration_number = models.CharField('№ ДТ из XML',
+                                          max_length=64, blank=True, db_index=True)
+
+    prepared_at = models.DateTimeField('Время отправки (PreparationDateTime)',
+                                       null=True, blank=True)
+    received_at = models.DateTimeField('Записано в БД', auto_now_add=True, db_index=True)
+
+    raw_xml     = models.TextField('Полный XML (для аудита)', blank=True)
+    parsed_meta = models.JSONField('Распаршенные поля', default=dict, blank=True)
+
+    hawb = models.ForeignKey(HouseWaybill, on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name='inbox_messages',
+                             verbose_name='HAWB (сматчена)')
+    status_applied = models.BooleanField('Статус применён', default=False, db_index=True)
+
+    class Meta:
+        verbose_name = 'Сообщение от таможни'
+        verbose_name_plural = 'Сообщения от таможни (входящие)'
+        ordering = ['-received_at']
+        indexes = [
+            models.Index(fields=['msg_kind', '-received_at']),
+            models.Index(fields=['hawb', '-received_at']),
+        ]
+
+    def __str__(self) -> str:
+        return f'[{self.get_msg_kind_display()}] {self.msg_type} — {self.envelope_id}'
+
+
 # ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────
 
 class SheetSource(models.Model):

@@ -884,7 +884,7 @@ def hawb_detail(request, hawb_id: int):
         all(i.is_received for i in checklist if i.is_required)
     ) if checklist else False
 
-    from .models import HouseWaybill as HWB, HawbWorkflowEvent, ImportedSheetRow
+    from .models import HouseWaybill as HWB, HawbWorkflowEvent, ImportedSheetRow, AltaInboxMessage
     workflow_events = (
         HawbWorkflowEvent.objects
         .filter(hawb=hawb)
@@ -898,6 +898,11 @@ def hawb_detail(request, hawb_id: int):
         .order_by('source__kind', 'source_row_index')
         .distinct()
     )
+    inbox_messages = list(
+        AltaInboxMessage.objects
+        .filter(hawb=hawb)
+        .order_by('-received_at')[:50]
+    )
     context = {
         'hawb': hawb,
         'goods': goods,
@@ -909,6 +914,7 @@ def hawb_detail(request, hawb_id: int):
         'checklist_ready': checklist_ready,
         'workflow_events': workflow_events,
         'sheet_rows': sheet_rows,
+        'inbox_messages': inbox_messages,
         'logistics_status_choices': HWB.LOGISTICS_STATUS_CHOICES,
         'customs_status_choices': HWB.CUSTOMS_STATUS_CHOICES,
         'all_users': User.objects.filter(is_active=True).order_by('last_name', 'first_name'),
@@ -3096,6 +3102,78 @@ def api_alta_queue_fail(request, item_id: int):
     message = (request.data.get('message') or '')[:5000] if hasattr(request, 'data') else ''
     item.mark_failed(message)
     return Response({'id': item.pk, 'status': item.status, 'retry_count': item.retry_count})
+
+
+def _check_alta_inbox_token(request) -> bool:
+    """Проверяет Authorization: Bearer <ALTA_INBOX_TOKEN>. Отдельный токен от queue."""
+    import os, hmac
+    expected = (os.environ.get('ALTA_INBOX_TOKEN') or '').strip()
+    if not expected:
+        return False
+    header = request.headers.get('Authorization', '')
+    if not header.startswith('Bearer '):
+        return False
+    provided = header[len('Bearer '):].strip()
+    return hmac.compare_digest(provided.encode(), expected.encode())
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_inbox_post(request):
+    """POST /api/v1/alta/inbox/ — приём входящего ЭД-сообщения от агента.
+
+    Body (JSON):
+      envelope_id   str  (обязательно, unique-ключ для идемпотентности)
+      msg_type      str  (ED.xxx)
+      prepared_at   str  (ISO datetime, опц)
+      waybill_number str (опц — из тела XML, по нему матчим HAWB)
+      declaration_number str (опц — если регистрация)
+      raw_xml       str  (опц)
+      parsed_meta   dict (опц — что ещё парсер выкусил)
+
+    Возвращает 200 на любой повтор по envelope_id (idempotent).
+    """
+    if not _check_alta_inbox_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+
+    data = request.data if hasattr(request, 'data') else {}
+    envelope_id = (data.get('envelope_id') or '').strip()
+    if not envelope_id:
+        return Response({'detail': 'envelope_id required'}, status=400)
+
+    from .models import AltaInboxMessage
+    from .services.alta.inbox import dispatch
+
+    prepared_at = data.get('prepared_at')
+    if prepared_at:
+        try:
+            from django.utils.dateparse import parse_datetime
+            prepared_at = parse_datetime(prepared_at)
+        except (ValueError, TypeError):
+            prepared_at = None
+
+    msg, created = AltaInboxMessage.objects.update_or_create(
+        envelope_id=envelope_id,
+        defaults={
+            'msg_type': (data.get('msg_type') or '').strip()[:32],
+            'waybill_number_raw': (data.get('waybill_number') or '').strip()[:64],
+            'declaration_number': (data.get('declaration_number') or '').strip()[:64],
+            'prepared_at': prepared_at,
+            'raw_xml': data.get('raw_xml') or '',
+            'parsed_meta': data.get('parsed_meta') or {},
+        },
+    )
+    if created:
+        dispatch(msg)
+    return Response({
+        'id': msg.pk,
+        'envelope_id': msg.envelope_id,
+        'created': created,
+        'msg_kind': msg.msg_kind,
+        'hawb_id': msg.hawb_id,
+        'status_applied': msg.status_applied,
+    })
 
 
 # ── HAWB-виджеты (для entity_type='hawb') ────────────────────────────────────

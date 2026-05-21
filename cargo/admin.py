@@ -8,7 +8,7 @@ from .models import (
     Cargo, StatusHistory, Warehouse, Flight, Label,
     DocumentType, CargoCategoryDocRule, CargoTypeDocTemplate, HAWBChecklistItem,
     UserProfile, ProcessingNorm, WorkloadRebalanceLog, WorkScheduleException,
-    OrganizationSettings, AltaQueueItem,
+    OrganizationSettings, AltaQueueItem, AltaInboxMessage,
     SheetSource, ImportedSheetRow, SheetImportRun, SheetUserAlias, HawbWorkflowEvent,
 )
 
@@ -400,6 +400,20 @@ class AltaQueueItemAdmin(admin.ModelAdmin):
     def requeue(self, request, queryset):
         n = queryset.update(status='pending', error_message='', sent_at=None)
         self.message_user(request, f'Возвращено в очередь: {n}')
+
+
+@admin.register(AltaInboxMessage)
+class AltaInboxMessageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'msg_kind', 'msg_type', 'waybill_number_raw',
+                    'declaration_number', 'hawb', 'status_applied', 'received_at')
+    list_filter  = ('msg_kind', 'status_applied', 'msg_type')
+    search_fields = ('envelope_id', 'waybill_number_raw', 'declaration_number')
+    raw_id_fields = ('hawb',)
+    readonly_fields = ('envelope_id', 'msg_type', 'received_at', 'raw_xml',
+                       'parsed_meta', 'prepared_at', 'waybill_number_raw',
+                       'declaration_number')
+    date_hierarchy = 'received_at'
+    list_per_page = 50
 
 
 # ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────
