@@ -85,6 +85,12 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
     parts: list[str] = []
     if warehouse_hint:
         parts.append(f'СВХ из Sheets: {warehouse_hint}')
+    decl_raw = (data.get(GEN_DECLARATION) or '').strip()
+    if decl_raw:
+        # HAWB.save() auto-clears customs_declaration_number when docs
+        # checklist is incomplete or mawb is null — для свежего promote
+        # это всегда true, поэтому дублируем сюда как подсказку.
+        parts.append(f'Рег. номер ДТ из Sheets: {decl_raw}')
     if resp_raw and not assigned:
         parts.append(f'Ответственный по ТО (из Sheets, нужен alias): {resp_raw}')
     if ved_raw and not ved:
