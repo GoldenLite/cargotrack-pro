@@ -48,26 +48,46 @@ class Command(BaseCommand):
                               'mawb_id'))
         self.stdout.write(f'HAWB в выборке: {len(hawbs)}')
 
-        # 1. Сматчить с ImportedSheetRow и сгруппировать по source
+        # 1. Prefetch всех ImportedSheetRow одним запросом — namedlookup в памяти.
+        # Иначе 12k отдельных filter() убивают SQLite на минуты.
+        self.stdout.write('  prefetching ImportedSheetRow (general)...')
+        rows_lookup: dict[str, tuple[SheetSource, int, object]] = {}
+        # hawb_number_lower → (source, row_index, last_imported_at)
+        for r in (ImportedSheetRow.objects
+                  .filter(source__kind='general')
+                  .select_related('source')
+                  .only('hawb_number_norm', 'source_row_index', 'last_imported_at',
+                        'source__id', 'source__kind', 'source__name',
+                        'source__spreadsheet_id', 'source__worksheet_name',
+                        'source__header_row')
+                  .iterator()):
+            key = (r.hawb_number_norm or '').strip().lower()
+            if not key:
+                continue
+            prev = rows_lookup.get(key)
+            if prev is None or (r.last_imported_at and prev[2] and r.last_imported_at > prev[2]):
+                rows_lookup[key] = (r.source, r.source_row_index, r.last_imported_at)
+        self.stdout.write(f'  prefetched {len(rows_lookup)} sheet rows')
+
+        # 2. Сматчить и сгруппировать по source
         rows_by_source: dict[int, dict] = defaultdict(dict)
         # source_id → {row_index: (hawb_number, db_decl)}
         sources: dict[int, SheetSource] = {}
         no_row_db_filled: list[tuple[str, str]] = []  # hawb_number, db_decl
 
         for h in hawbs:
-            row = (ImportedSheetRow.objects
-                   .filter(source__kind='general',
-                           hawb_number_norm__iexact=h.hawb_number)
-                   .select_related('source')
-                   .order_by('-last_imported_at')
-                   .first())
             db_decl = (h.customs_declaration_number or '').strip()
-            if not row:
+            key = (h.hawb_number or '').strip().lower()
+            found = rows_lookup.get(key)
+            if not found:
                 if db_decl:
                     no_row_db_filled.append((h.hawb_number, db_decl))
                 continue
-            sources[row.source_id] = row.source
-            rows_by_source[row.source_id][row.source_row_index] = (h.hawb_number, db_decl)
+            source, row_idx, _ = found
+            sources[source.id] = source
+            rows_by_source[source.id][row_idx] = (h.hawb_number, db_decl)
+        self.stdout.write(f'  matched HAWB → Sheets rows: {sum(len(v) for v in rows_by_source.values())}')
+        self.stdout.write(f'  HAWB without sheets row (db filled): {len(no_row_db_filled)}')
 
         # 2. Для каждого worksheet — один col_values на колонку CargoTrack: ДТ
         in_sync = 0
