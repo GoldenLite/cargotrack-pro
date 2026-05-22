@@ -30,12 +30,12 @@ class CargoConfig(AppConfig):
                 cur.execute('PRAGMA synchronous=NORMAL;')
                 cur.execute('PRAGMA busy_timeout=5000;')
 
-        @receiver(post_save, sender=Cargo, weak=False)
+        @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_created_workflow')
         def cargo_created(sender, instance, created, **kwargs):
             if created:
                 workflow_runner.start_for_entity(instance, 'cargo')
 
-        @receiver(post_save, sender=HouseWaybill, weak=False)
+        @receiver(post_save, sender=HouseWaybill, weak=False, dispatch_uid='hawb_created_workflow')
         def hawb_created(sender, instance, created, **kwargs):
             if created:
                 workflow_runner.start_for_entity(instance, 'hawb')
