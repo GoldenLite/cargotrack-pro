@@ -125,21 +125,40 @@ class Command(BaseCommand):
                               '(каждая HAWB имеет свою декларацию). Прогоняй diag по конкретной HAWB.')
 
     def _search_by_decl(self, fragment: str):
-        """Найти сообщения где собранный decl_number содержит фрагмент."""
-        qs = AltaInboxMessage.objects.filter(parsed_meta__gtd_number__icontains=fragment)
+        """Найти сообщения где фрагмент встречается в parsed_meta ИЛИ raw_xml.
+
+        Двойной поиск: сначала по структурным полям (быстро, как раньше), затем
+        по raw_xml на случай если фрагмент лежит в поле, которое мы не парсим.
+        """
+        by_meta = set(AltaInboxMessage.objects.filter(
+            parsed_meta__gtd_number__icontains=fragment).values_list('pk', flat=True))
+        by_raw = set(AltaInboxMessage.objects.filter(
+            raw_xml__icontains=fragment).values_list('pk', flat=True))
+        all_ids = by_meta | by_raw
+
         self.stdout.write(self.style.SUCCESS(
-            f'Поиск по gtd_number содержит {fragment!r}: найдено {qs.count()}'))
-        for m in qs.order_by('prepared_at')[:50]:
+            f'Поиск {fragment!r}: gtd_number={len(by_meta)}, raw_xml={len(by_raw)}, '
+            f'итого {len(all_ids)} уникальных сообщений'))
+
+        only_in_raw = by_raw - by_meta
+        if only_in_raw:
+            self.stdout.write(self.style.WARNING(
+                f'  {len(only_in_raw)} сообщений с фрагментом ТОЛЬКО в raw_xml — '
+                f'значит он лежит в неразобранном поле XML'))
+
+        qs = AltaInboxMessage.objects.filter(pk__in=all_ids).order_by('prepared_at')
+        for m in qs[:50]:
             meta = m.parsed_meta or {}
             built = _build_declaration_number(meta)
             ts = m.prepared_at.strftime('%Y-%m-%d %H:%M:%S') if m.prepared_at else '—'
+            in_raw_only = '*' if m.pk in only_in_raw else ' '
             self.stdout.write(
-                f'  #{m.pk}  {ts}  {m.msg_type:<14}  kind={m.msg_kind:<11}  '
+                f' {in_raw_only}#{m.pk}  {ts}  {m.msg_type:<14}  kind={m.msg_kind:<11}  '
                 f'design={meta.get("design_code","")}  decision={meta.get("decision_code","")}  '
                 f'hawb={m.hawb_id}  cargo={m.cargo_id}  decl={built}  '
                 f'waybill={m.waybill_number_raw!r}'
             )
-        if not qs.exists():
+        if not all_ids:
             self.stdout.write(self.style.WARNING(
-                f'  Сообщений с этим фрагментом в БД НЕТ — значит ни одно сообщение '
-                f'с таким номером ДТ не пришло на VPS.'))
+                f'  Сообщений с этим фрагментом в БД НЕТ — значит ни одно .gz '
+                f'с таким номером не прочитано/не залито на VPS.'))
