@@ -14,6 +14,7 @@ inbox от таможни или ручной ввод), записать его
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import gspread
@@ -97,33 +98,44 @@ def write_declaration(hawb: HouseWaybill) -> bool:
         return False
     source, row_index = found
 
-    try:
-        ws = open_worksheet(source)
-        col = _ensure_cargotrack_column(ws, source.header_row)
+    # 429 — Google rate limit (60 writes/min на пользователя). Ретраим с
+    # exponential backoff: 2s → 4s → 8s, потом сдаёмся. В batch-сценариях
+    # без ретрая теряем целые пачки записей.
+    backoff_steps = [2, 4, 8]
+    for attempt in range(len(backoff_steps) + 1):
+        try:
+            ws = open_worksheet(source)
+            col = _ensure_cargotrack_column(ws, source.header_row)
 
-        current = ws.cell(row_index, col).value or ''
-        if current.strip() == decl:
-            return False  # уже там — идемпотент
+            current = ws.cell(row_index, col).value or ''
+            if current.strip() == decl:
+                return False  # уже там — идемпотент
 
-        ws.update_cell(row_index, col, decl)
-        logger.info('Wrote ДТ=%s into %s row=%d col=%d (HAWB %s)',
-                    decl, source.name, row_index, col, hawb.hawb_number)
-        return True
-    except SheetsConfigError as e:
-        logger.warning('writeback skipped (no credentials): %s', e)
-        return False
-    except gspread.exceptions.APIError as e:
-        status = getattr(e.response, 'status_code', None)
-        if status == 403:
-            logger.error(
-                'writeback failed 403: service account нуждается в роли Editor '
-                'на Sheet «%s». См. share-диалог в Google Sheets.', source.name
-            )
-        elif status == 429:
-            logger.warning('writeback hit rate limit, will retry on next change')
-        else:
-            logger.exception('writeback APIError for HAWB %s', hawb.hawb_number)
-        return False
-    except Exception:
-        logger.exception('writeback unexpected error for HAWB %s', hawb.hawb_number)
-        return False
+            ws.update_cell(row_index, col, decl)
+            logger.info('Wrote ДТ=%s into %s row=%d col=%d (HAWB %s)',
+                        decl, source.name, row_index, col, hawb.hawb_number)
+            return True
+        except SheetsConfigError as e:
+            logger.warning('writeback skipped (no credentials): %s', e)
+            return False
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, 'status_code', None)
+            if status == 403:
+                logger.error(
+                    'writeback failed 403: service account нуждается в роли Editor '
+                    'на Sheet «%s». См. share-диалог в Google Sheets.', source.name
+                )
+                return False
+            elif status == 429 and attempt < len(backoff_steps):
+                wait = backoff_steps[attempt]
+                logger.warning('writeback rate-limit 429, retry in %ds (attempt %d)',
+                               wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            else:
+                logger.exception('writeback APIError for HAWB %s', hawb.hawb_number)
+                return False
+        except Exception:
+            logger.exception('writeback unexpected error for HAWB %s', hawb.hawb_number)
+            return False
+    return False
