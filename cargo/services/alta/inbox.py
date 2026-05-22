@@ -30,8 +30,12 @@ logger = logging.getLogger('cargo.alta.inbox')
 MSG_KIND_MAP: dict[str, str] = {
     'CMN.00003': 'info',         # ArchResult — ACK от gateway: «обработано»
     'CMN.11010': 'released',     # ED_Container «Выпуск товаров разрешен» (DecisionCode 10)
+    'CMN.11309': 'released',     # ExpressNotification — уведомление о выпуске
+                                 # (ResolutionDescription="Выпуск товаров разрешен",
+                                 # DecisionCode=10). Если DecisionCode=90 — рефайн в rejected.
+    'CMN.11310': 'info',         # ACK / customs mark без явного решения
     'CMN.11350': 'released',     # ExpressCargoDeclarationCustomMark — отметка таможни.
-                                 # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify_with_body().
+                                 # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify().
     'CMN.11314': 'info',         # Закрытие процедуры (DO1Close)
     'CMN.13021': 'info',         # DO1KeepLimits — лимит хранения / размещение на СВХ
 }
@@ -60,22 +64,37 @@ DESIGN_CODE_KIND: dict[str, str] = {
 def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
     """MessageType (+ опц parsed_meta из тела) → kind.
 
-    Приоритет: Design > DecisionCode > MessageType.
+    Приоритет: Design > DecisionCode > ResolutionDescription > MessageType.
+    Разные типы сообщений несут результат таможни в разных полях, поэтому
+    проверяем все три семантически-полных индикатора.
+
     Неизвестные коды → 'info' (статус не меняем).
     """
     base = MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
     if not parsed_meta:
         return base
 
-    # 1. Design — самый точный код по конкретной ДТ
+    # 1. Design — самый точный код по конкретной ДТ (когда есть)
     dsn = (parsed_meta.get('design_code') or '').strip()
     if dsn:
         return DESIGN_CODE_KIND.get(dsn, base)
 
-    # 2. DecisionCode — fallback для тех типов где он встречается
+    # 2. DecisionCode — для любых типов где он присутствует
     dc = (parsed_meta.get('decision_code') or '').strip()
-    if dc and msg_type in ('CMN.11350', 'CMN.11010'):
-        return DECISION_CODE_KIND.get(dc, base)
+    if dc in DECISION_CODE_KIND:
+        return DECISION_CODE_KIND[dc]
+
+    # 3. ResolutionDescription — текстовый маркер (русский) для типов без
+    #    числового кода. Заведомо positive/negative фразы.
+    rt = (parsed_meta.get('resolution_text') or '').lower()
+    if rt:
+        if 'выпуск товаров разрешен' in rt or 'разрешен выпуск' in rt:
+            return 'released'
+        if 'отзыв декларации' in rt or 'декларация отозвана' in rt:
+            return 'withdrawn'
+        if 'отказано в выпуске' in rt or 'отказ в выпуске' in rt:
+            return 'rejected'
+
     return base
 
 STATUS_FROM_KIND: dict[str, str] = {
