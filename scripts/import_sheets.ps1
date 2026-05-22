@@ -44,7 +44,9 @@ function Run-Import($source) {
     $exit = $proc.ExitCode
     foreach ($f in @($stdoutFile, $stderrFile)) {
         if (Test-Path $f) {
-            Get-Content $f | ForEach-Object { Write-Log $_ }
+            # Python пишет UTF-8 в stderr (Django logging) и stdout. Без -Encoding
+            # UTF8 PS 5.1 читает как cp1251 → кириллица превращается в «РћР±С‰РµРµ».
+            Get-Content $f -Encoding UTF8 | ForEach-Object { Write-Log $_ }
             Remove-Item $f -ErrorAction SilentlyContinue
         }
     }
