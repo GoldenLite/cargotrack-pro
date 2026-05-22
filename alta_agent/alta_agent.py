@@ -77,6 +77,24 @@ def load_config() -> dict:
                 'name_pattern':  re.compile(ib.get('name_pattern', r'^serveralta\^')),
             }
     cfg['inbox'] = inbox
+
+    # Опциональная outbox-секция (наблюдение за исходящими копиями `538134^*.gz`)
+    # Используется чтобы построить мост: EnvelopeID Альты ↔ наш Cargo/HAWB.
+    outbox = None
+    if 'outbox' in cp:
+        ob = cp['outbox']
+        watch_dir = Path(ob.get('watch_dir', '')) if ob.get('watch_dir') else (inbox['watch_dir'] if inbox else None)
+        token = ob.get('token', '').strip() or (inbox['token'] if inbox else '')
+        if watch_dir and token:
+            outbox = {
+                'watch_dir':     watch_dir,
+                'token':         token,
+                'poll_interval': int(ob.get('poll_interval', '5')),
+                'state_db':      Path(__file__).resolve().parent / ob.get('state_db', 'outbox_state.sqlite'),
+                'endpoint':      ob.get('endpoint', '/api/v1/alta/outbox/').lstrip('/'),
+                'name_pattern':  re.compile(ob.get('name_pattern', r'^538134\^')),
+            }
+    cfg['outbox'] = outbox
     return cfg
 
 
@@ -385,6 +403,132 @@ def inbox_loop(cfg: dict) -> None:
         time.sleep(ic['poll_interval'])
 
 
+# ── OUTBOX (наблюдение за исходящими копиями Альты) ───────────────────────
+
+def _parse_outbox_xml(xml_text: str) -> dict:
+    """Парсит ключевые поля из исходящей копии (538134^*.gz).
+
+    Нам нужны: envelope_id (UUID для последующего матчинга входящих
+    ответов через InitialEnvelopeID) и человеко-читаемые номера накладных
+    (CommonWayBillNumber = MAWB, WayBillNumber = HAWB) — чтобы линковать
+    к нашим Cargo/HAWB.
+    """
+    return {
+        'envelope_id':           _xml_field(xml_text, 'EnvelopeID'),
+        'msg_type':              _xml_field(xml_text, 'MessageType'),
+        'prepared_at':           _xml_field(xml_text, 'PreparationDateTime'),
+        'common_waybill_number': _xml_field(xml_text, 'CommonWayBillNumber'),
+        'waybill_number': (
+            _xml_field(xml_text, 'WayBillNumber')
+            or _pr_document_number_for(xml_text, 'Индивидуальная накладная')
+        ),
+        'document_number':       _xml_field(xml_text, 'DocumentNumber'),
+        'mcd_id':                _xml_field(xml_text, 'MCDId'),
+        'arch_id':                _xml_field(xml_text, 'ArchID'),
+        'arch_decl_id':           _xml_field(xml_text, 'ArchDeclID'),
+    }
+
+
+def _post_outbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
+    url = urljoin(cfg['base_url'], cfg['outbox']['endpoint'])
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(url, method='POST', data=data)
+    req.add_header('Authorization', f'Bearer {cfg["outbox"]["token"]}')
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('User-Agent', 'CargoTrack-AltaAgent-Outbox/1.0')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        body = b''
+        try:
+            body = e.read() if e.fp else b''
+        except Exception:
+            pass
+        return e.code, body
+
+
+def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None:
+    """Обрабатывает одну исходящую копию. Не удаляет файл."""
+    try:
+        with open(path, 'rb') as f:
+            xml_bytes = gzip.decompress(f.read())
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logging.warning(f'outbox: read {path.name}: {e}')
+        return
+
+    for enc in ('utf-8', 'cp1251'):
+        try:
+            xml_text = xml_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        logging.warning(f'outbox: {path.name}: undecodable')
+        return
+
+    parsed = _parse_outbox_xml(xml_text)
+    envelope_id = parsed.get('envelope_id')
+    if not envelope_id:
+        return  # без envelope_id наблюдать нечего — тихо пропускаем
+
+    if _state_seen(conn, envelope_id):
+        return
+
+    payload = {
+        'envelope_id':           envelope_id,
+        'msg_type':              parsed.get('msg_type', ''),
+        'prepared_at':           parsed.get('prepared_at') or None,
+        'common_waybill_number': parsed.get('common_waybill_number', ''),
+        'waybill_number':        parsed.get('waybill_number', ''),
+        'parsed_meta': {
+            'source_file':     path.name,
+            'document_number': parsed.get('document_number', ''),
+            'mcd_id':          parsed.get('mcd_id', ''),
+            'arch_id':         parsed.get('arch_id', ''),
+            'arch_decl_id':    parsed.get('arch_decl_id', ''),
+        },
+    }
+    status, body = _post_outbox(cfg, payload)
+    if status in (200, 409):
+        _state_mark(conn, envelope_id)
+        logging.info(
+            f'outbox: {path.name} envelope={envelope_id} '
+            f'mt={parsed.get("msg_type")} mawb={parsed.get("common_waybill_number","-")} → HTTP {status}'
+        )
+    else:
+        logging.error(f'outbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
+
+
+def outbox_loop(cfg: dict) -> None:
+    """Бесконечный поток: сканит watch_dir на 538134^*, POST'ит наблюдения."""
+    oc = cfg['outbox']
+    logging.info(
+        f'outbox: started, watching {oc["watch_dir"]} '
+        f'pattern={oc["name_pattern"].pattern!r} poll={oc["poll_interval"]}s'
+    )
+    try:
+        conn = _state_db_open(oc['state_db'])
+    except Exception as e:
+        logging.error(f'outbox: cannot open state db {oc["state_db"]}: {e}')
+        return
+
+    while True:
+        try:
+            files = glob.glob(os.path.join(str(oc['watch_dir']), '*.gz'))
+            picked = [Path(p) for p in files if oc['name_pattern'].search(os.path.basename(p))]
+            for p in picked:
+                try:
+                    _outbox_process_file(cfg, conn, p)
+                except Exception:
+                    logging.error(f'outbox: process {p.name}: {traceback.format_exc()}')
+        except Exception:
+            logging.error(f'outbox: scan crash: {traceback.format_exc()}')
+        time.sleep(oc['poll_interval'])
+
+
 def main() -> None:
     setup_logging()
     cfg = load_config()
@@ -394,6 +538,11 @@ def main() -> None:
         threading.Thread(target=inbox_loop, args=(cfg,), daemon=True, name='inbox-loop').start()
     else:
         logging.info('inbox: secton not configured in alta_agent.ini → inbox loop disabled')
+
+    if cfg.get('outbox'):
+        threading.Thread(target=outbox_loop, args=(cfg,), daemon=True, name='outbox-loop').start()
+    else:
+        logging.info('outbox: section not configured in alta_agent.ini → outbox loop disabled')
 
     # Outer guard: a crash inside the loop must not kill the agent silently.
     while True:

@@ -1882,6 +1882,9 @@ class AltaInboxMessage(models.Model):
     hawb = models.ForeignKey(HouseWaybill, on_delete=models.SET_NULL,
                              null=True, blank=True, related_name='inbox_messages',
                              verbose_name='HAWB (сматчена)')
+    cargo = models.ForeignKey(Cargo, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='inbox_messages',
+                              verbose_name='Партия (MAWB)')
     status_applied = models.BooleanField('Статус применён', default=False, db_index=True)
 
     class Meta:
@@ -1891,10 +1894,64 @@ class AltaInboxMessage(models.Model):
         indexes = [
             models.Index(fields=['msg_kind', '-received_at']),
             models.Index(fields=['hawb', '-received_at']),
+            models.Index(fields=['cargo', '-received_at']),
         ]
 
     def __str__(self) -> str:
         return f'[{self.get_msg_kind_display()}] {self.msg_type} — {self.envelope_id}'
+
+
+class AltaOutboxObservation(models.Model):
+    """Наблюдаемая копия исходящего ЭД-сообщения от Альты в таможню.
+
+    Альта складывает не только входящие (`serveralta^*.gz`), но и собственные
+    исходящие копии (`538134^*.gz`) в `C:\\GTDSERV\\ED\\IN`. Наш inbox-агент их
+    тоже забирает (отдельным regex) и POST'ит сюда. Назначение — построить
+    мост между нашим HAWB/Cargo и UUID Envelope, который Альта генерирует
+    для своих исходящих (мы их не контролируем).
+
+    Логика связки:
+      1) Парсим CommonWayBillNumber из исходящего → ищем Cargo по awb_number
+      2) Парсим WayBillNumber (если есть в исходящем) → HAWB
+      3) Сохраняем `envelope_id ↔ (cargo, hawb)`.
+      4) Когда таможня шлёт ответ с `InitialEnvelopeID = envelope_id`,
+         inbox match_hawb находит наши Cargo/HAWB через эту таблицу.
+
+    Идемпотентно по envelope_id (агент дедупит и сам, но и тут unique).
+    """
+    envelope_id = models.CharField('Envelope ID (Альта)', max_length=64,
+                                   unique=True, db_index=True)
+    msg_type    = models.CharField('MessageType', max_length=32, db_index=True)
+    prepared_at = models.DateTimeField('PreparationDateTime', null=True, blank=True)
+    received_at = models.DateTimeField('Получено агентом', auto_now_add=True, db_index=True)
+
+    common_waybill_number = models.CharField('CommonWayBillNumber (MAWB)',
+                                             max_length=64, blank=True, db_index=True)
+    waybill_number = models.CharField('WayBillNumber (HAWB)',
+                                      max_length=64, blank=True, db_index=True)
+
+    parsed_meta = models.JSONField('Распаршенные поля', default=dict, blank=True)
+
+    cargo = models.ForeignKey(Cargo, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='outbox_observations',
+                              verbose_name='Партия (MAWB)')
+    hawb  = models.ForeignKey(HouseWaybill, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='outbox_observations',
+                              verbose_name='HAWB')
+
+    class Meta:
+        verbose_name = 'Исходящая копия (Альта)'
+        verbose_name_plural = 'Исходящие копии (наблюдение)'
+        ordering = ['-received_at']
+        indexes = [
+            models.Index(fields=['msg_type', '-received_at']),
+        ]
+
+    def __str__(self) -> str:
+        link = ''
+        if self.cargo_id: link = f' cargo={self.common_waybill_number}'
+        if self.hawb_id:  link += f' hawb={self.waybill_number}'
+        return f'{self.msg_type} {self.envelope_id}{link}'
 
 
 # ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────

@@ -3172,7 +3172,65 @@ def api_alta_inbox_post(request):
         'created': created,
         'msg_kind': msg.msg_kind,
         'hawb_id': msg.hawb_id,
+        'cargo_id': msg.cargo_id,
         'status_applied': msg.status_applied,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_outbox_post(request):
+    """POST /api/v1/alta/outbox/ — наблюдение исходящей копии Альты.
+
+    Агент читает `538134^*.gz` из C:\\GTDSERV\\ED\\IN и шлёт сюда:
+      envelope_id            UUID (обязательно, unique)
+      msg_type               'CMN.00202', 'ED.1002018' и т.д.
+      prepared_at            ISO datetime, опц
+      common_waybill_number  MAWB номер (опц)
+      waybill_number         HAWB номер (опц)
+      parsed_meta            dict — прочие поля
+
+    Service ищет Cargo по common_waybill_number и/или HAWB по waybill_number.
+    Используем тот же ALTA_INBOX_TOKEN — это два потока одного агента.
+    """
+    if not _check_alta_inbox_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+
+    data = request.data if hasattr(request, 'data') else {}
+    envelope_id = (data.get('envelope_id') or '').strip()
+    if not envelope_id:
+        return Response({'detail': 'envelope_id required'}, status=400)
+
+    from .models import AltaOutboxObservation
+    from .services.alta.outbox import dispatch as outbox_dispatch
+
+    prepared_at = data.get('prepared_at')
+    if prepared_at:
+        try:
+            from django.utils.dateparse import parse_datetime
+            prepared_at = parse_datetime(prepared_at)
+        except (ValueError, TypeError):
+            prepared_at = None
+
+    obs, created = AltaOutboxObservation.objects.update_or_create(
+        envelope_id=envelope_id,
+        defaults={
+            'msg_type': (data.get('msg_type') or '').strip()[:32],
+            'prepared_at': prepared_at,
+            'common_waybill_number': (data.get('common_waybill_number') or '').strip()[:64],
+            'waybill_number': (data.get('waybill_number') or '').strip()[:64],
+            'parsed_meta': data.get('parsed_meta') or {},
+        },
+    )
+    if created:
+        outbox_dispatch(obs)
+    return Response({
+        'id': obs.pk,
+        'envelope_id': obs.envelope_id,
+        'created': created,
+        'cargo_id': obs.cargo_id,
+        'hawb_id': obs.hawb_id,
     })
 
 

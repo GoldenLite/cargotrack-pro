@@ -113,6 +113,7 @@ urlpatterns = [
     path('api/v1/alta/queue/<int:item_id>/ack/',     views.api_alta_queue_ack,  name='api_alta_queue_ack'),
     path('api/v1/alta/queue/<int:item_id>/fail/',    views.api_alta_queue_fail, name='api_alta_queue_fail'),
     path('api/v1/alta/inbox/',                       views.api_alta_inbox_post, name='api_alta_inbox'),
+    path('api/v1/alta/outbox/',                      views.api_alta_outbox_post, name='api_alta_outbox'),
 
     # ── Импорт из Google Sheets ──
     path('imports/sheets/',                            views.sheets_imports_page,  name='sheets_imports'),

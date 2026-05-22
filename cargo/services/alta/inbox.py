@@ -19,7 +19,7 @@ from typing import Optional
 
 from django.utils import timezone
 
-from cargo.models import AltaInboxMessage, HawbWorkflowEvent, HouseWaybill
+from cargo.models import AltaInboxMessage, Cargo, HawbWorkflowEvent, HouseWaybill
 
 
 logger = logging.getLogger('cargo.alta.inbox')
@@ -80,64 +80,80 @@ EVENT_TYPE_FROM_KIND: dict[str, str] = {
 }
 
 
-def match_hawb(msg: AltaInboxMessage) -> Optional[HouseWaybill]:
-    """Подобрать HAWB для входящего сообщения.
+def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill]]:
+    """Подобрать Cargo и/или HAWB для входящего сообщения.
 
     На рабочем сервере Альта обслуживает много workflow помимо CargoTrack,
     поэтому 99%+ inbox-сообщений нам не принадлежат. Матчинг возможен только
     через идентификаторы, которые мы сами породили при отправке.
 
-    Стратегия (по убыванию надёжности):
-    1. parsed_meta['initial_envelope'] → AltaQueueItem.envelope_id → hawb
-       Самое надёжное: UUID Envelope нашего исходящего, на который таможня
-       отвечает. Работает для большинства типов сообщений (CMN.00003 ACK,
-       CMN.11337, ED.* ответы и т.д.).
-    2. Построить customs_declaration_number из parsed_meta и искать HAWB
-       у которой это поле уже заполнено (для случая когда мы повторно ловим
-       сообщение по уже зарегистрированной ДТ).
-    3. Старое поле waybill_number_raw — оставлено на случай если когда-нибудь
-       найдётся тип сообщения с WayBillNumber в теле. Сейчас не наблюдалось.
+    В IndPost-flow Альта сама строит исходящие пакеты с собственными
+    EnvelopeID — мы их не контролируем. Связь восстанавливаем через
+    `AltaOutboxObservation` (записи наблюдаемых 538134^* файлов).
 
-    None — нормальный исход для чужих сообщений.
+    Стратегия:
+    1. parsed_meta['initial_envelope'] → AltaQueueItem.envelope_id → hawb
+       (если мы сами через свой queue послали что-то типа ED.1002018 — редкий путь)
+    2. parsed_meta['initial_envelope'] → AltaOutboxObservation.envelope_id
+       → (cargo, hawb). Основной путь.
+    3. Построить customs_declaration_number → ищем HAWB или Cargo с этим
+       номером ДТ (для повторных и кросс-кросс-вариантов).
+    4. waybill_number_raw → HouseWaybill (fallback, наблюдений не было).
+
+    Возвращает (cargo, hawb) — любой может быть None. Оба None — чужое.
     """
-    from cargo.models import AltaQueueItem
+    from cargo.models import AltaQueueItem, AltaOutboxObservation
 
     parsed = msg.parsed_meta or {}
 
-    # 1. По initial_envelope нашего исходящего пакета
+    # 1. Через наш собственный queue (для редких форматов с envelope_wrap)
     init = (parsed.get('initial_envelope') or '').strip()
     if init:
-        item = (
+        q = (
             AltaQueueItem.objects
             .filter(envelope_id__iexact=init)
             .exclude(hawb=None)
-            .select_related('hawb')
+            .select_related('hawb', 'hawb__mawb')
             .first()
         )
-        if item and item.hawb:
-            return item.hawb
+        if q and q.hawb:
+            return (q.hawb.mawb, q.hawb)
 
-    # 2. По собранному номеру ДТ — если кто-то уже его проставил
+        # 2. Через наблюдение исходящих копий Альты (основной путь для IndPost)
+        obs = (
+            AltaOutboxObservation.objects
+            .filter(envelope_id__iexact=init)
+            .select_related('cargo', 'hawb')
+            .first()
+        )
+        if obs and (obs.cargo or obs.hawb):
+            cargo = obs.cargo or (obs.hawb.mawb if obs.hawb and obs.hawb.mawb_id else None)
+            return (cargo, obs.hawb)
+
+    # 3. По собранному номеру ДТ
     decl = _build_declaration_number(parsed)
     if decl:
-        hawb = (
-            HouseWaybill.objects
-            .filter(customs_declaration_number=decl)
-            .first()
-        )
+        hawb = HouseWaybill.objects.filter(customs_declaration_number=decl).first()
         if hawb:
-            return hawb
+            return (hawb.mawb, hawb)
+        cargo = Cargo.objects.filter(customs_declaration_number=decl).first()
+        if cargo:
+            return (cargo, None)
 
-    # 3. Fallback — WayBillNumber из XML, если вдруг будет
+    # 4. Fallback — WayBillNumber из XML
     wn = (msg.waybill_number_raw or '').strip()
     if wn:
-        return (
-            HouseWaybill.objects
-            .filter(hawb_number__iexact=wn)
-            .first()
-        )
+        hawb = HouseWaybill.objects.filter(hawb_number__iexact=wn).first()
+        if hawb:
+            return (hawb.mawb, hawb)
 
-    return None
+    return (None, None)
+
+
+# Обратная совместимость для существующих импортов (если есть).
+def match_hawb(msg: AltaInboxMessage) -> Optional[HouseWaybill]:
+    _, hawb = match(msg)
+    return hawb
 
 
 def _build_declaration_number(parsed_meta: dict) -> str:
@@ -156,63 +172,101 @@ def _build_declaration_number(parsed_meta: dict) -> str:
     return f'{cc}/{rd_short}/{gn}'
 
 
-def apply_status(msg: AltaInboxMessage, hawb: HouseWaybill) -> Optional[str]:
-    """Применяет customs_status и (для регистрации/выпуска) customs_declaration_number.
+def apply_status(msg: AltaInboxMessage,
+                 cargo: Optional[Cargo],
+                 hawb: Optional[HouseWaybill]) -> Optional[str]:
+    """Применяет customs_declaration_number и статус.
 
-    customs_declaration_number записывается прямым UPDATE минуя HouseWaybill.save(),
-    потому что save() автостирает поле при отсутствии MAWB / неполном чек-листе
-    документов. Зеркало в Sheets вызываем вручную после refresh_from_db.
+    Cargo-only матч (без HAWB) — типичный случай для CMN-сообщений по ДТ.
+    Тогда ДТ пишется на Cargo, и статус применяется ко всем HAWB партии,
+    которые сейчас в *_CUSTOMS.
+
+    customs_declaration_number пишется прямым UPDATE минуя save(), т.к.
+    HouseWaybill.save() автостирает поле при отсутствии MAWB / неполном
+    чек-листе документов.
     """
     parsed = msg.parsed_meta or {}
     decl_number = _build_declaration_number(parsed)
 
-    # Если в сообщении есть № ДТ — пишем его в HAWB через прямой UPDATE
+    # Куда писать декларацию: на конкретный HAWB или на Cargo
     if decl_number:
         from django.db import transaction
         with transaction.atomic():
-            HouseWaybill.objects.filter(pk=hawb.pk).update(customs_declaration_number=decl_number)
-        # Вручную дёрнем writeback в Sheets (т.к. UPDATE не триггерит post_save)
-        try:
-            from cargo.services.sheets.writeback import write_declaration
-            hawb.refresh_from_db(fields=['customs_declaration_number'])
-            write_declaration(hawb)
-        except Exception:
-            logger.exception('sheets writeback after declaration write failed')
+            if hawb:
+                HouseWaybill.objects.filter(pk=hawb.pk).update(customs_declaration_number=decl_number)
+            elif cargo:
+                Cargo.objects.filter(pk=cargo.pk).update(customs_declaration_number=decl_number)
+        # Writeback в Sheets — только для конкретного HAWB (Cargo-уровня в Sheets нет)
+        if hawb:
+            try:
+                from cargo.services.sheets.writeback import write_declaration
+                hawb.refresh_from_db(fields=['customs_declaration_number'])
+                write_declaration(hawb)
+            except Exception:
+                logger.exception('sheets writeback after declaration write failed')
 
     new_status = STATUS_FROM_KIND.get(msg.msg_kind)
     if not new_status:
         return None  # info — статус не трогаем
 
-    # change_customs_status сам валидирует logistics_status. Если HAWB ещё не
-    # в таможне — статус просто не применяем (но declaration уже записан выше).
-    if hawb.logistics_status not in ('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'):
-        return f'HAWB не в таможне (logistics_status={hawb.logistics_status})'
+    targets: list[HouseWaybill] = []
+    if hawb:
+        targets = [hawb]
+    elif cargo:
+        # Все HAWB партии, находящиеся в таможне
+        targets = list(
+            cargo.house_waybills
+            .filter(logistics_status__in=('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'))
+        )
+        if not targets:
+            return f'В партии {cargo.awb_number} нет HAWB в таможне'
 
-    try:
-        err = hawb.change_customs_status(new_status, user=None)
-        if err:
-            return str(err)
-    except Exception as e:
-        logger.exception('change_customs_status failed for HAWB %s', hawb.pk)
-        return str(e)
+    errors = []
+    applied = 0
+    for h in targets:
+        if h.logistics_status not in ('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'):
+            errors.append(f'HAWB {h.hawb_number} не в таможне ({h.logistics_status})')
+            continue
+        try:
+            err = h.change_customs_status(new_status, user=None)
+            if err:
+                errors.append(f'HAWB {h.hawb_number}: {err}')
+            else:
+                applied += 1
+        except Exception as e:
+            logger.exception('change_customs_status failed for HAWB %s', h.pk)
+            errors.append(f'HAWB {h.hawb_number}: {e}')
+
+    if applied == 0 and errors:
+        return '; '.join(errors)
     return None
 
 
-def emit_event(msg: AltaInboxMessage, hawb: HouseWaybill) -> None:
-    """Создаёт HawbWorkflowEvent в таймлайне HAWB."""
+def emit_event(msg: AltaInboxMessage,
+               cargo: Optional[Cargo],
+               hawb: Optional[HouseWaybill]) -> None:
+    """Создаёт HawbWorkflowEvent в таймлайне HAWB(ов)."""
     event_type = EVENT_TYPE_FROM_KIND.get(msg.msg_kind, 'OTHER')
     occurred = msg.prepared_at or msg.received_at or timezone.now()
-    HawbWorkflowEvent.objects.update_or_create(
-        hawb=hawb,
-        event_type=event_type,
-        source_row=None,
-        defaults={
-            'occurred_at': occurred,
-            'raw_value': msg.declaration_number or msg.msg_type,
-            'comment': msg.get_msg_kind_display(),
-            'source': 'alta',
-        },
-    )
+
+    hawbs: list[HouseWaybill] = []
+    if hawb:
+        hawbs = [hawb]
+    elif cargo:
+        hawbs = list(cargo.house_waybills.all())
+
+    for h in hawbs:
+        HawbWorkflowEvent.objects.update_or_create(
+            hawb=h,
+            event_type=event_type,
+            source_row=None,
+            defaults={
+                'occurred_at': occurred,
+                'raw_value': msg.declaration_number or msg.msg_type,
+                'comment': msg.get_msg_kind_display(),
+                'source': 'alta',
+            },
+        )
 
 
 def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
@@ -233,15 +287,18 @@ def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → статус → событие → sheets writeback."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
 
-    hawb = match_hawb(msg)
-    if hawb:
+    cargo, hawb = match(msg)
+    if cargo or hawb:
+        msg.cargo = cargo
         msg.hawb = hawb
-        err = apply_status(msg, hawb)
+        err = apply_status(msg, cargo, hawb)
         if err:
             msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
             msg.status_applied = False
         else:
             msg.status_applied = True
-            emit_event(msg, hawb)
-            trigger_sheets_writeback(hawb)
-    msg.save(update_fields=['msg_kind', 'hawb', 'status_applied', 'parsed_meta'])
+            emit_event(msg, cargo, hawb)
+            if hawb:
+                trigger_sheets_writeback(hawb)
+    msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
+                            'status_applied', 'parsed_meta'])
