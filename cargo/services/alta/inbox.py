@@ -191,51 +191,91 @@ def _build_declaration_number(parsed_meta: dict) -> str:
     return f'{cc}/{rd_short}/{gn}'
 
 
+def recompute_declaration(cargo: Optional[Cargo],
+                          hawb: Optional[HouseWaybill]) -> list[HouseWaybill]:
+    """Пересчитывает customs_declaration_number из всей истории inbox-сообщений.
+
+    Берёт самое свежее по `prepared_at` (fallback `received_at`) сообщение
+    с kind ∈ {released, withdrawn} среди связанных с этим HAWB или Cargo:
+    - released → пишет ДТ, собранный из его parsed_meta
+    - withdrawn → стирает ДТ
+
+    Это снимает зависимость от порядка обработки и корректно отрабатывает:
+    1. Повторную подачу: новый release с более поздним prepared_at вытесняет старый.
+    2. Отзыв: withdrawn после release очищает ДТ.
+    3. Re-release после отзыва: новый release снова закрепляет.
+
+    Возвращает список HAWB у которых реально изменился номер — для sheets writeback.
+    """
+    qs = AltaInboxMessage.objects.filter(msg_kind__in=('released', 'withdrawn'))
+    if hawb:
+        qs = qs.filter(hawb=hawb)
+    elif cargo:
+        qs = qs.filter(cargo=cargo)
+    else:
+        return []
+
+    latest = qs.order_by('-prepared_at', '-received_at').first()
+    if not latest:
+        return []
+
+    if latest.msg_kind == 'withdrawn':
+        target_decl = ''
+    else:  # released
+        target_decl = _build_declaration_number(latest.parsed_meta or {})
+        if not target_decl:
+            return []
+
+    from django.db import transaction
+    changed: list[HouseWaybill] = []
+    with transaction.atomic():
+        if hawb:
+            current = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
+                'customs_declaration_number', flat=True).first() or ''
+            if current != target_decl:
+                HouseWaybill.objects.filter(pk=hawb.pk).update(
+                    customs_declaration_number=target_decl)
+                changed = [hawb]
+        elif cargo:
+            cur_cargo = Cargo.objects.filter(pk=cargo.pk).values_list(
+                'customs_declaration_number', flat=True).first() or ''
+            if cur_cargo != target_decl:
+                Cargo.objects.filter(pk=cargo.pk).update(
+                    customs_declaration_number=target_decl)
+            # Считаем HAWB-и которым реально нужно обновить значение
+            mismatched = list(HouseWaybill.objects
+                              .filter(mawb=cargo)
+                              .exclude(customs_declaration_number=target_decl))
+            if mismatched:
+                HouseWaybill.objects.filter(mawb=cargo).update(
+                    customs_declaration_number=target_decl)
+                changed = mismatched
+    return changed
+
+
 def apply_status(msg: AltaInboxMessage,
                  cargo: Optional[Cargo],
                  hawb: Optional[HouseWaybill]) -> Optional[str]:
     """Применяет customs_declaration_number и статус.
 
-    Правила записи ДТ-номера:
-    - Пишем ТОЛЬКО при msg_kind='released' (Design=10/11 или DecisionCode=10/11).
-      Промежуточные/отзывные сообщения номер не закрепляют.
-    - При матче на Cargo (без конкретной HAWB) — ДТ пишется на Cargo
-      И ПРОПАГАЦИЯ на все HAWB этой партии. Sheets writeback дёргается для
-      каждого HAWB у которого реально появился номер.
-    - При msg_kind='withdrawn' (Design=40) — ничего не пишем, ничего не меняем.
+    ДТ-номер пишется через `recompute_declaration()` — он берёт самое свежее
+    по prepared_at сообщение released/withdrawn для этой пары (cargo, hawb).
+    Это снимает зависимость от порядка обработки и поддерживает повторные
+    подачи + отзыв декларации.
+
+    customs_status (FILED/RELEASED/REJECTED/...) выставляется по этому
+    конкретному сообщению через HouseWaybill.change_customs_status().
 
     customs_declaration_number пишется прямым UPDATE минуя save() — иначе
     HouseWaybill.save() автостирает поле при отсутствии MAWB / неполном
     чек-листе документов.
     """
-    parsed = msg.parsed_meta or {}
-    decl_number = _build_declaration_number(parsed)
     kind = msg.msg_kind
 
-    # Withdrawn — игнорируем целиком (это «отзыв декларации», номер не наш)
-    if kind == 'withdrawn':
-        return None
+    # 1. Recompute ДТ из всей истории сообщений (включая текущее — уже сохранено)
+    updated_hawbs = recompute_declaration(cargo, hawb)
 
-    # Пишем ДТ только если это release/registered (положительные исходы)
-    write_decl = decl_number and kind in ('released', 'registered')
-    updated_hawbs: list[HouseWaybill] = []
-
-    if write_decl:
-        from django.db import transaction
-        with transaction.atomic():
-            if hawb:
-                HouseWaybill.objects.filter(pk=hawb.pk).update(customs_declaration_number=decl_number)
-                updated_hawbs = [hawb]
-            elif cargo:
-                # Cargo-уровень: записываем на Cargo + пропагируем на все HAWB партии
-                # (одна ДТ покрывает все накладные партии).
-                Cargo.objects.filter(pk=cargo.pk).update(customs_declaration_number=decl_number)
-                HouseWaybill.objects.filter(mawb=cargo).update(
-                    customs_declaration_number=decl_number,
-                )
-                updated_hawbs = list(cargo.hawbs.all())
-
-    # Sheets writeback — для каждого реально обновлённого HAWB
+    # 2. Sheets writeback — для каждого реально обновлённого HAWB
     if updated_hawbs:
         try:
             from cargo.services.sheets.writeback import write_declaration
@@ -244,6 +284,10 @@ def apply_status(msg: AltaInboxMessage,
                 write_declaration(h)
         except Exception:
             logger.exception('sheets writeback after declaration write failed')
+
+    # Withdrawn — статус HAWB не меняем (партия не выпущена)
+    if kind == 'withdrawn':
+        return None
 
     new_status = STATUS_FROM_KIND.get(kind)
     if not new_status:
@@ -323,13 +367,17 @@ def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
 
 
 def dispatch(msg: AltaInboxMessage) -> None:
-    """Главная точка входа: матчинг → статус → событие → sheets writeback."""
+    """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
 
     cargo, hawb = match(msg)
     if cargo or hawb:
         msg.cargo = cargo
         msg.hawb = hawb
+        # Сохраняем привязки ДО apply_status: recompute_declaration читает
+        # AltaInboxMessage.objects.filter(...) и должен увидеть и это сообщение.
+        msg.save(update_fields=['msg_kind', 'cargo', 'hawb', 'parsed_meta'])
+
         err = apply_status(msg, cargo, hawb)
         if err:
             msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
@@ -337,7 +385,7 @@ def dispatch(msg: AltaInboxMessage) -> None:
         else:
             msg.status_applied = True
             emit_event(msg, cargo, hawb)
-            if hawb:
-                trigger_sheets_writeback(hawb)
-    msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
-                            'status_applied', 'parsed_meta'])
+        msg.save(update_fields=['status_applied', 'parsed_meta'])
+    else:
+        msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
+                                'status_applied', 'parsed_meta'])
