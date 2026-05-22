@@ -215,7 +215,7 @@ def apply_status(msg: AltaInboxMessage,
     elif cargo:
         # Все HAWB партии, находящиеся в таможне
         targets = list(
-            cargo.house_waybills
+            cargo.hawbs
             .filter(logistics_status__in=('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'))
         )
         if not targets:
@@ -253,7 +253,7 @@ def emit_event(msg: AltaInboxMessage,
     if hawb:
         hawbs = [hawb]
     elif cargo:
-        hawbs = list(cargo.house_waybills.all())
+        hawbs = list(cargo.hawbs.all())
 
     for h in hawbs:
         HawbWorkflowEvent.objects.update_or_create(
