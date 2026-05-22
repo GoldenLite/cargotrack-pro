@@ -195,8 +195,9 @@ def recompute_declaration(cargo: Optional[Cargo],
                           hawb: Optional[HouseWaybill]) -> list[HouseWaybill]:
     """Пересчитывает customs_declaration_number из всей истории inbox-сообщений.
 
-    Берёт самое свежее по `prepared_at` (fallback `received_at`) сообщение
-    с kind ∈ {released, withdrawn} среди связанных с этим HAWB или Cargo:
+    Работает ТОЛЬКО когда сообщение привязано к конкретной HAWB. Берёт самое
+    свежее по `prepared_at` (fallback `received_at`) сообщение с kind ∈
+    {released, withdrawn} для этой HAWB:
     - released → пишет ДТ, собранный из его parsed_meta
     - withdrawn → стирает ДТ
 
@@ -205,16 +206,20 @@ def recompute_declaration(cargo: Optional[Cargo],
     2. Отзыв: withdrawn после release очищает ДТ.
     3. Re-release после отзыва: новый release снова закрепляет.
 
+    Если сообщение привязано только к Cargo (без конкретной HAWB) — мы НЕ
+    пропагируем ДТ на все HAWB партии: в одной партии у каждой HAWB может
+    быть собственная декларация. Cargo-level запись возможна только если в
+    партии единственная HAWB (см. caller-логику).
+
     Возвращает список HAWB у которых реально изменился номер — для sheets writeback.
     """
-    qs = AltaInboxMessage.objects.filter(msg_kind__in=('released', 'withdrawn'))
-    if hawb:
-        qs = qs.filter(hawb=hawb)
-    elif cargo:
-        qs = qs.filter(cargo=cargo)
-    else:
+    if not hawb:
         return []
 
+    qs = AltaInboxMessage.objects.filter(
+        hawb=hawb,
+        msg_kind__in=('released', 'withdrawn'),
+    )
     latest = qs.order_by('-prepared_at', '-received_at').first()
     if not latest:
         return []
@@ -227,30 +232,14 @@ def recompute_declaration(cargo: Optional[Cargo],
             return []
 
     from django.db import transaction
-    changed: list[HouseWaybill] = []
     with transaction.atomic():
-        if hawb:
-            current = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
-                'customs_declaration_number', flat=True).first() or ''
-            if current != target_decl:
-                HouseWaybill.objects.filter(pk=hawb.pk).update(
-                    customs_declaration_number=target_decl)
-                changed = [hawb]
-        elif cargo:
-            cur_cargo = Cargo.objects.filter(pk=cargo.pk).values_list(
-                'customs_declaration_number', flat=True).first() or ''
-            if cur_cargo != target_decl:
-                Cargo.objects.filter(pk=cargo.pk).update(
-                    customs_declaration_number=target_decl)
-            # Считаем HAWB-и которым реально нужно обновить значение
-            mismatched = list(HouseWaybill.objects
-                              .filter(mawb=cargo)
-                              .exclude(customs_declaration_number=target_decl))
-            if mismatched:
-                HouseWaybill.objects.filter(mawb=cargo).update(
-                    customs_declaration_number=target_decl)
-                changed = mismatched
-    return changed
+        current = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
+            'customs_declaration_number', flat=True).first() or ''
+        if current == target_decl:
+            return []
+        HouseWaybill.objects.filter(pk=hawb.pk).update(
+            customs_declaration_number=target_decl)
+    return [hawb]
 
 
 def apply_status(msg: AltaInboxMessage,

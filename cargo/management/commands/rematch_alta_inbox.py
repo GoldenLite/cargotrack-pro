@@ -1,12 +1,16 @@
-"""Передиспатчить уже сохранённые AltaInboxMessage с пустым матчем.
+"""Передиспатчить AltaInboxMessage.
 
-При первом проходе сообщений Cargo/HAWB могло не быть в БД, или outbox
-ещё не добежал — match вернул (None, None) и status_applied=False.
-После того как мы накатим Cargo (см. ensure_cargos_from_sheets) и
-поднимется AltaOutboxObservation, эти inbox можно передиспатчить.
+По умолчанию — только unmatched (cargo=None AND hawb=None): полезно когда
+после ensure_cargos_from_sheets / outbox добежал и появилось чем матчить.
+
+С `--all` — переобрабатывает ВСЁ, включая уже привязанные. Нужно когда
+поменялась classify-логика (например добавили парсинг Design в kind),
+чтобы старые сообщения получили актуальный msg_kind и пересчитали ДТ
+через recompute_declaration.
 
 Запуск:
     uv run python manage.py rematch_alta_inbox
+    uv run python manage.py rematch_alta_inbox --all
     uv run python manage.py rematch_alta_inbox --limit 100
 """
 from __future__ import annotations
@@ -18,23 +22,24 @@ from cargo.services.alta.inbox import dispatch
 
 
 class Command(BaseCommand):
-    help = 'Передиспатчить unmatched AltaInboxMessage (когда появились Cargo/HAWB)'
+    help = 'Передиспатчить AltaInboxMessage (unmatched по умолчанию, --all для всех)'
 
     def add_arguments(self, parser):
         parser.add_argument('--limit', type=int, default=0,
                             help='Сколько максимум обработать (0 = все)')
-        parser.add_argument('--only-unmatched', action='store_true', default=True,
-                            help='Только cargo=None AND hawb=None (по умолчанию)')
+        parser.add_argument('--all', action='store_true', default=False,
+                            help='Перебрать ВСЕ сообщения (для переклассификации)')
 
     def handle(self, *args, **opts):
-        qs = AltaInboxMessage.objects.all()
-        if opts['only_unmatched']:
+        qs = AltaInboxMessage.objects.all().order_by('prepared_at', 'received_at')
+        if not opts['all']:
             qs = qs.filter(cargo=None, hawb=None)
         if opts['limit']:
             qs = qs[:opts['limit']]
 
         total = qs.count() if not opts['limit'] else min(opts['limit'], AltaInboxMessage.objects.count())
-        self.stdout.write(f'Re-dispatching {total} messages...')
+        scope = 'ALL' if opts['all'] else 'unmatched only'
+        self.stdout.write(f'Re-dispatching {total} messages ({scope})...')
 
         matched = 0
         applied = 0
@@ -49,5 +54,5 @@ class Command(BaseCommand):
                 self.stdout.write(f'  progress: {i}/{total}  matched={matched}  applied={applied}')
 
         self.stdout.write(self.style.SUCCESS(
-            f'Done. processed={total}, newly matched={matched}, status_applied={applied}'
+            f'Done. processed={total}, matched={matched}, status_applied={applied}'
         ))
