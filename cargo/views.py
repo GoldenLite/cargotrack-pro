@@ -119,6 +119,13 @@ def cargo_detail(request, awb_number: str):
     hawbs = cargo.hawbs.select_related('assigned_to').order_by('hawb_number')
     hawbs_list = list(hawbs)
 
+    inbox_messages = (
+        cargo.inbox_messages
+        .order_by('-received_at')
+        .only('id', 'received_at', 'msg_type', 'msg_kind', 'declaration_number',
+              'status_applied', 'envelope_id')
+    )
+
     context = {
         'cargo': cargo,
         'history': history_with_duration,
@@ -131,6 +138,7 @@ def cargo_detail(request, awb_number: str):
         'total_hawbs': len(hawbs_list),
         'docs_complete': sum(1 for h in hawbs_list if h.docs_ready),
         'released': sum(1 for h in hawbs_list if h.customs_status == 'RELEASED'),
+        'inbox_messages': inbox_messages,
     }
     return render(request, 'cargo/detail_pro.html', context)
 

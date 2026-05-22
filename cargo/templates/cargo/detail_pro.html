@@ -729,6 +729,56 @@
   </div>
 </div>
 
+<!-- Сообщения от таможни (Альта) -->
+{% if inbox_messages %}
+<div class="card mt-3">
+  <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted d-flex align-items-center justify-content-between">
+    <span><i class="bi bi-envelope-paper me-2"></i>Сообщения от таможни</span>
+    <span class="badge bg-secondary">{{ inbox_messages|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead>
+          <tr>
+            <th class="px-3">Получено</th>
+            <th>Тип</th>
+            <th>Что</th>
+            <th>№ ДТ</th>
+            <th>Envelope</th>
+            <th>Применено</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in inbox_messages %}
+          <tr>
+            <td class="px-3 small text-muted">{{ m.received_at|date:"d.m.Y H:i" }}</td>
+            <td class="small"><code>{{ m.msg_type }}</code></td>
+            <td>
+              <span class="badge
+                {% if m.msg_kind == 'released' %}bg-success
+                {% elif m.msg_kind == 'rejected' %}bg-danger
+                {% elif m.msg_kind == 'examination' or m.msg_kind == 'hold' %}bg-warning text-dark
+                {% elif m.msg_kind == 'registered' %}bg-primary
+                {% else %}bg-secondary{% endif %}">
+                {{ m.get_msg_kind_display }}
+              </span>
+            </td>
+            <td class="small">{{ m.declaration_number|default:"—" }}</td>
+            <td class="small text-muted" title="{{ m.envelope_id }}">{{ m.envelope_id|truncatechars:14 }}</td>
+            <td>
+              {% if m.status_applied %}<i class="bi bi-check-circle text-success"></i>
+              {% else %}<i class="bi bi-dash-circle text-muted"></i>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- История статусов -->
 <div class="card mt-3">
   <div class="card-header bg-white py-2 fw-bold small text-uppercase text-muted d-flex align-items-center justify-content-between">
