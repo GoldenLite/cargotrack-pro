@@ -60,3 +60,29 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         obs.save(update_fields=update_fields)
         logger.info('outbox %s linked: cargo=%s hawb=%s', obs.envelope_id,
                     obs.cargo_id, obs.hawb_id)
+
+
+def relink_for_cargo(cargo: Cargo) -> int:
+    """После появления нового Cargo — допривязать к нему уже накопленные
+    AltaOutboxObservation с тем же CommonWayBillNumber. Возвращает счётчик.
+    """
+    awb = (cargo.awb_number or '').strip()
+    if not awb:
+        return 0
+    return (
+        AltaOutboxObservation.objects
+        .filter(common_waybill_number__iexact=awb, cargo=None)
+        .update(cargo=cargo)
+    )
+
+
+def relink_for_hawb(hawb: HouseWaybill) -> int:
+    """Аналогично для HAWB по WayBillNumber."""
+    wb = (hawb.hawb_number or '').strip()
+    if not wb:
+        return 0
+    return (
+        AltaOutboxObservation.objects
+        .filter(waybill_number__iexact=wb, hawb=None)
+        .update(hawb=hawb)
+    )

@@ -34,6 +34,29 @@ from .mapping import (
     normalize_inn,
     parse_date_safe,
 )
+from .transport import guess_transport_mode
+
+
+def _ensure_cargo(awb_number: str) -> Optional[Cargo]:
+    """Находит или создаёт Cargo с указанным номером партии.
+
+    awb_number здесь — generic id партии (может быть AWB, CMR, коносамент).
+    Транспорт угадывается по формату; пользователь правит в админке.
+
+    Возвращает None если строка пустая.
+    """
+    awb = (awb_number or '').strip()
+    if not awb:
+        return None
+    existing = Cargo.objects.filter(awb_number__iexact=awb).first()
+    if existing:
+        return existing
+    return Cargo.objects.create(
+        awb_number=awb,
+        transportation_mode=guess_transport_mode(awb),
+        stage='DRAFT',
+        is_draft=True,
+    )
 
 
 def _resolve_user(alias_text: str, role_hint: str) -> Optional[User]:
@@ -74,11 +97,10 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
     ved      = _resolve_user(ved_raw, 'ved_manager')
     warehouse_hint = (data.get(GEN_WAREHOUSE_LIC) or '').strip()
 
-    # Если в БД уже есть партия с MAWB = ТСД — привяжем HAWB сразу.
-    # Тогда HAWB.save() не сотрёт scan_into_bond / customs_declaration_number.
-    parent_cargo = None
-    if tsd_raw:
-        parent_cargo = Cargo.objects.filter(awb_number__iexact=tsd_raw).first()
+    # Создаём (или находим) партию с MAWB = ТСД — нужна для матчинга
+    # ответов таможни через AltaOutboxObservation. Транспорт угадывается
+    # по формату (AWB / CMR / коносамент), пользователь правит вручную.
+    parent_cargo = _ensure_cargo(tsd_raw)
 
     # Собираем notes: комментарий + подсказки про СВХ/ФИО, если их не удалось
     # сматчить с пользователями/складами.
@@ -95,8 +117,6 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
         parts.append(f'Ответственный по ТО (из Sheets, нужен alias): {resp_raw}')
     if ved_raw and not ved:
         parts.append(f'Менеджер ВЭД (из Sheets, нужен alias): {ved_raw}')
-    if not parent_cargo and tsd_raw:
-        parts.append(f'ТСД (партия не найдена в БД): {tsd_raw}')
     user_comment = (data.get(GEN_COMMENT) or '').strip()
     if user_comment:
         parts.append(user_comment)
@@ -121,6 +141,16 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
     row.matched_hawb = hawb
     row.promoted_hawb = hawb
     row.save(update_fields=['match_status', 'matched_hawb', 'promoted_hawb'])
+
+    # Допривязать накопленные outbox-наблюдения к свежим Cargo/HAWB
+    try:
+        from cargo.services.alta.outbox import relink_for_cargo, relink_for_hawb
+        if parent_cargo:
+            relink_for_cargo(parent_cargo)
+        relink_for_hawb(hawb)
+    except Exception:
+        import logging
+        logging.getLogger('cargo.sheets.promote').exception('relink alta outbox failed')
 
     # Авто-сматчить CRM-строки с тем же номером, чтобы события появились сразу
     for crm_row in ImportedSheetRow.objects.filter(

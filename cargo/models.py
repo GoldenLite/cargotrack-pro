@@ -148,7 +148,10 @@ class Cargo(models.Model):
     """Основная модель груза"""
 
     # ── Идентификация ──
-    awb_number = models.CharField('AWB номер', max_length=30, unique=True, db_index=True)
+    awb_number = models.CharField(
+        'Номер партии', max_length=30, unique=True, db_index=True,
+        help_text='AWB (123-12345678), CMR (050526-2), коносамент или любой другой ID партии',
+    )
     description = models.TextField('Описание груза (EN)', blank=True)
     description_ru = models.TextField('Описание груза (RU)', blank=True)
 
