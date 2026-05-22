@@ -56,10 +56,6 @@ class Command(BaseCommand):
         for r in (ImportedSheetRow.objects
                   .filter(source__kind='general')
                   .select_related('source')
-                  .only('hawb_number_norm', 'source_row_index', 'last_imported_at',
-                        'source__id', 'source__kind', 'source__name',
-                        'source__spreadsheet_id', 'source__worksheet_name',
-                        'source__header_row')
                   .iterator()):
             key = (r.hawb_number_norm or '').strip().lower()
             if not key:
