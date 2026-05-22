@@ -214,29 +214,32 @@ def recompute_declaration(cargo: Optional[Cargo],
                           hawb: Optional[HouseWaybill]) -> list[HouseWaybill]:
     """Пересчитывает customs_declaration_number из всей истории inbox-сообщений.
 
-    Работает ТОЛЬКО когда сообщение привязано к конкретной HAWB. Берёт самое
-    свежее по `prepared_at` (fallback `received_at`) сообщение с kind ∈
-    {released, withdrawn} для этой HAWB:
-    - released → пишет ДТ, собранный из его parsed_meta
+    Работает по конкретной HAWB. Ищет released/withdrawn сообщения двумя путями:
+    1. msg.hawb=X — прямая привязка из dispatch.
+    2. raw_xml содержит X.hawb_number И msg.cargo=X.mawb — для release-сообщений
+       одной ДТ, покрывающей несколько HAWB одной партии: в CMN.11350 у Альты
+       лежит список из N <PrDocumentNumber>, и наш match привязал msg только
+       к одной HAWB. Раз HAWB-номер встречается в raw_xml того сообщения и
+       партия совпадает — этой HAWB тоже relevant.
+
+    Берёт самое свежее по prepared_at:
+    - released → пишет ДТ из его parsed_meta
     - withdrawn → стирает ДТ
-
-    Это снимает зависимость от порядка обработки и корректно отрабатывает:
-    1. Повторную подачу: новый release с более поздним prepared_at вытесняет старый.
-    2. Отзыв: withdrawn после release очищает ДТ.
-    3. Re-release после отзыва: новый release снова закрепляет.
-
-    Если сообщение привязано только к Cargo (без конкретной HAWB) — мы НЕ
-    пропагируем ДТ на все HAWB партии: в одной партии у каждой HAWB может
-    быть собственная декларация. Cargo-level запись возможна только если в
-    партии единственная HAWB (см. caller-логику).
 
     Возвращает список HAWB у которых реально изменился номер — для sheets writeback.
     """
     if not hawb:
         return []
 
+    from django.db.models import Q
+    cond = Q(hawb=hawb)
+    if hawb.mawb_id and hawb.hawb_number:
+        # Фильтр по Cargo защищает от случайных совпадений номеров между
+        # разными партиями (HAWB-номера не уникальны глобально).
+        cond = cond | (Q(raw_xml__icontains=hawb.hawb_number) & Q(cargo=hawb.mawb))
+
     qs = AltaInboxMessage.objects.filter(
-        hawb=hawb,
+        cond,
         msg_kind__in=('released', 'withdrawn'),
     )
     latest = qs.order_by('-prepared_at', '-received_at').first()
@@ -261,6 +264,18 @@ def recompute_declaration(cargo: Optional[Cargo],
     return [hawb]
 
 
+def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
+    if not hawbs:
+        return
+    try:
+        from cargo.services.sheets.writeback import write_declaration
+        for h in hawbs:
+            h.refresh_from_db(fields=['customs_declaration_number'])
+            write_declaration(h)
+    except Exception:
+        logger.exception('sheets writeback after declaration write failed')
+
+
 def apply_status(msg: AltaInboxMessage,
                  cargo: Optional[Cargo],
                  hawb: Optional[HouseWaybill]) -> Optional[str]:
@@ -271,6 +286,11 @@ def apply_status(msg: AltaInboxMessage,
     Это снимает зависимость от порядка обработки и поддерживает повторные
     подачи + отзыв декларации.
 
+    Для release-сообщений где одна ДТ покрывает несколько HAWB партии
+    (multi-waybill release) — recompute проходит по ВСЕМ HAWB этой Cargo,
+    т.к. raw_xml сообщения содержит их номера, и recompute найдёт его через
+    raw_xml__icontains.
+
     customs_status (FILED/RELEASED/REJECTED/...) выставляется по этому
     конкретному сообщению через HouseWaybill.change_customs_status().
 
@@ -280,18 +300,21 @@ def apply_status(msg: AltaInboxMessage,
     """
     kind = msg.msg_kind
 
-    # 1. Recompute ДТ из всей истории сообщений (включая текущее — уже сохранено)
+    # 1. Recompute для конкретной HAWB (если есть)
     updated_hawbs = recompute_declaration(cargo, hawb)
+    _writeback_hawbs(updated_hawbs)
 
-    # 2. Sheets writeback — для каждого реально обновлённого HAWB
-    if updated_hawbs:
-        try:
-            from cargo.services.sheets.writeback import write_declaration
-            for h in updated_hawbs:
-                h.refresh_from_db(fields=['customs_declaration_number'])
-                write_declaration(h)
-        except Exception:
-            logger.exception('sheets writeback after declaration write failed')
+    # 2. Multi-waybill propagation: для release/withdrawn, если cargo известна,
+    #    проходим по всем HAWB партии — раз release-сообщение CMN.11350 может
+    #    содержать список PrDocumentNumber из нескольких HAWB-ов, и recompute
+    #    их подхватит через raw_xml__icontains.
+    if cargo and kind in ('released', 'withdrawn'):
+        siblings = cargo.hawbs.all()
+        if hawb:
+            siblings = siblings.exclude(pk=hawb.pk)
+        for sib in siblings:
+            sib_updated = recompute_declaration(cargo, sib)
+            _writeback_hawbs(sib_updated)
 
     # Withdrawn — статус HAWB не меняем (партия не выпущена)
     if kind == 'withdrawn':
