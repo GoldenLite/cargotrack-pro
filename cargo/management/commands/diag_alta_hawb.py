@@ -103,16 +103,22 @@ class Command(BaseCommand):
             if meta.get('apply_error'):
                 self.stdout.write(f'         apply_error: {meta["apply_error"]}')
 
-        # Что recompute даст ПО КОНКРЕТНОЙ HAWB (новая логика: только при hawb-привязке)
+        # Что recompute даст ПО КОНКРЕТНОЙ HAWB — отражает реальную логику
+        # recompute_declaration: msg.hawb=X ИЛИ (raw_xml содержит X.hawb_number AND msg.cargo=X.mawb).
         self.stdout.write(self.style.WARNING('\n=== Что даст recompute (без записи) ==='))
         if hawb:
+            from django.db.models import Q
+            cond = Q(hawb=hawb)
+            if hawb.mawb_id and hawb.hawb_number:
+                cond = cond | (Q(raw_xml__icontains=hawb.hawb_number) & Q(cargo=hawb.mawb))
             hawb_qs = AltaInboxMessage.objects.filter(
-                hawb=hawb, msg_kind__in=('released', 'withdrawn'))\
+                cond, msg_kind__in=('released', 'withdrawn'))\
                 .order_by('-prepared_at', '-received_at')
             latest = hawb_qs.first()
             if latest:
                 built = _build_declaration_number(latest.parsed_meta or {})
-                self.stdout.write(f'  По HAWB {hawb.hawb_number}: latest msg #{latest.pk}  '
+                via = 'direct' if latest.hawb_id == hawb.pk else 'raw_xml+cargo'
+                self.stdout.write(f'  По HAWB {hawb.hawb_number}: latest msg #{latest.pk} ({via})  '
                                   f'kind={latest.msg_kind}  prepared={latest.prepared_at}')
                 if latest.msg_kind == 'withdrawn':
                     self.stdout.write('  → стереть customs_declaration_number')
