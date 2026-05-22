@@ -15,7 +15,10 @@
 """
 from __future__ import annotations
 
+import time
+
 from django.core.management.base import BaseCommand
+from django.db import connection, OperationalError
 
 from cargo.models import AltaInboxMessage
 from cargo.services.alta.inbox import dispatch
@@ -31,6 +34,12 @@ class Command(BaseCommand):
                             help='Перебрать ВСЕ сообщения (для переклассификации)')
 
     def handle(self, *args, **opts):
+        # Поднять busy_timeout: waitress пишет в ту же БД, иначе быстро падаем
+        # на 'database is locked' при первом конфликте.
+        if connection.vendor == 'sqlite':
+            with connection.cursor() as c:
+                c.execute('PRAGMA busy_timeout=60000;')
+
         qs = AltaInboxMessage.objects.all().order_by('prepared_at', 'received_at')
         if not opts['all']:
             qs = qs.filter(cargo=None, hawb=None)
@@ -43,16 +52,39 @@ class Command(BaseCommand):
 
         matched = 0
         applied = 0
-        for i, msg in enumerate(qs.iterator(), 1):
-            dispatch(msg)
-            msg.refresh_from_db(fields=['cargo_id', 'hawb_id', 'status_applied'])
-            if msg.cargo_id or msg.hawb_id:
-                matched += 1
-            if msg.status_applied:
-                applied += 1
+        errors = 0
+        # Перевести в список — iterator() держит курсор открытым и сам блокирует
+        msgs = list(qs.values_list('pk', flat=True))
+        for i, pk in enumerate(msgs, 1):
+            # Каждое сообщение — отдельная транзакция; при OperationalError
+            # ретраим до 3 раз с backoff.
+            for attempt in range(3):
+                try:
+                    msg = AltaInboxMessage.objects.get(pk=pk)
+                    dispatch(msg)
+                    msg.refresh_from_db(fields=['cargo_id', 'hawb_id', 'status_applied'])
+                    if msg.cargo_id or msg.hawb_id:
+                        matched += 1
+                    if msg.status_applied:
+                        applied += 1
+                    break
+                except OperationalError as e:
+                    if 'locked' in str(e).lower() and attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    errors += 1
+                    if errors < 10:
+                        self.stdout.write(f'  ERR msg {pk}: {e}')
+                    break
+                except Exception as e:
+                    errors += 1
+                    if errors < 10:
+                        self.stdout.write(f'  ERR msg {pk}: {e}')
+                    break
             if i % 200 == 0:
-                self.stdout.write(f'  progress: {i}/{total}  matched={matched}  applied={applied}')
+                self.stdout.write(
+                    f'  progress: {i}/{total}  matched={matched}  applied={applied}  errors={errors}')
 
         self.stdout.write(self.style.SUCCESS(
-            f'Done. processed={total}, matched={matched}, status_applied={applied}'
+            f'Done. processed={len(msgs)}, matched={matched}, applied={applied}, errors={errors}'
         ))
