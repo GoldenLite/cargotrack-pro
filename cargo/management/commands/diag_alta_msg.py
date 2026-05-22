@@ -20,6 +20,10 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('msg_id', type=int)
+        parser.add_argument('--grep', default='',
+                            help='Фрагмент для поиска в raw_xml — покажет окно вокруг каждого вхождения')
+        parser.add_argument('--raw', action='store_true',
+                            help='Вывести raw_xml целиком')
 
     def handle(self, *args, **opts):
         m = AltaInboxMessage.objects.filter(pk=opts['msg_id']).first()
@@ -59,11 +63,34 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('\n=== built decl_number ==='))
         self.stdout.write(f'  {_build_declaration_number(meta)!r}')
 
-        # Print first 1000 chars of raw_xml to look for actual Design tag in source
         raw = m.raw_xml or ''
-        self.stdout.write(self.style.SUCCESS('\n=== raw_xml fragment around Design tag ==='))
-        if 'Design' in raw:
-            idx = raw.find('Design')
-            self.stdout.write(raw[max(0, idx - 80):idx + 200])
+        grep = (opts.get('grep') or '').strip()
+        if grep:
+            self.stdout.write(self.style.SUCCESS(f'\n=== raw_xml: окна вокруг {grep!r} ==='))
+            idx = 0
+            n = 0
+            while True:
+                pos = raw.find(grep, idx)
+                if pos < 0:
+                    break
+                n += 1
+                start = max(0, pos - 200)
+                end = min(len(raw), pos + len(grep) + 200)
+                self.stdout.write(f'--- match #{n} at offset {pos} ---')
+                self.stdout.write(raw[start:end])
+                idx = pos + len(grep)
+            if n == 0:
+                self.stdout.write(f'  {grep!r} НЕ найдено в raw_xml')
+            else:
+                self.stdout.write(f'\n  всего {n} вхождений')
+        elif opts.get('raw'):
+            self.stdout.write(self.style.SUCCESS('\n=== raw_xml целиком ==='))
+            self.stdout.write(raw)
         else:
-            self.stdout.write('  (нет тега Design в raw_xml)')
+            self.stdout.write(self.style.SUCCESS('\n=== raw_xml fragment around Design tag ==='))
+            if 'Design' in raw:
+                idx = raw.find('Design')
+                self.stdout.write(raw[max(0, idx - 80):idx + 200])
+            else:
+                self.stdout.write('  (нет тега Design в raw_xml)')
+                self.stdout.write('  Используй --grep <фрагмент> или --raw чтобы посмотреть содержимое.')
