@@ -81,7 +81,9 @@ def load_config() -> dict:
                 # читаем только incoming-файлы; outgoing-копии типа `538134^*.gz` пропускаем
                 'name_pattern':  re.compile(ib.get('name_pattern', r'^serveralta\^')),
                 'archive_dir':       archive_dir,
-                'archive_keep_days': int(ib.get('archive_keep_days', '30')),
+                # В норме файлы удаляются сразу после успешного POST. Этот
+                # параметр — safety-net для застрявших (постоянно failed POST).
+                'archive_keep_days': int(ib.get('archive_keep_days', '7')),
             }
     cfg['inbox'] = inbox
 
@@ -363,7 +365,17 @@ def _post_inbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
 
 
 def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None:
-    """Обрабатывает один .gz. Не удаляет файл."""
+    """Обрабатывает один .gz из архива.
+
+    После успешного POST на VPS (HTTP 200/409) файл из архива удаляется —
+    raw_xml уже в БД на VPS, держать вторую копию незачем. При ошибках
+    POST файл остаётся для ретрая в следующем цикле.
+
+    Race-protect: если файл уже processed в state.sqlite (был залит в
+    предыдущей сессии и почему-то не удалился) — удаляем сразу.
+    """
+    is_in_archive = (path.parent.name == 'inbox_archive')
+
     try:
         with open(path, 'rb') as f:
             xml_bytes = gzip.decompress(f.read())
@@ -383,16 +395,23 @@ def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None
             continue
     else:
         logging.warning(f'inbox: {path.name}: undecodable')
+        if is_in_archive:
+            _unlink_quiet(path)
         return
 
     parsed = _parse_inbox_xml(xml_text)
     envelope_id = parsed.get('envelope_id')
     if not envelope_id:
         logging.warning(f'inbox: {path.name}: no EnvelopeID; skipping')
+        if is_in_archive:
+            _unlink_quiet(path)
         return
 
     if _state_seen(conn, envelope_id):
-        return  # уже отправляли
+        # Уже отправляли раньше — архивная копия больше не нужна
+        if is_in_archive:
+            _unlink_quiet(path)
+        return
 
     payload = {
         'envelope_id':        envelope_id,
@@ -421,21 +440,41 @@ def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None
     if status in (200, 409):
         _state_mark(conn, envelope_id)
         logging.info(f'inbox: {path.name} envelope={envelope_id} kind={parsed.get("msg_type")} → HTTP {status}')
+        # Успешно залили на VPS — архивная копия больше не нужна, raw_xml в БД
+        if is_in_archive:
+            _unlink_quiet(path)
     else:
         logging.error(f'inbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
+        # При ошибке файл остаётся в архиве — следующий цикл попытается снова
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _inbox_cleanup_archive(archive_dir: Path, keep_days: int) -> None:
-    """Удаляет .gz файлы из archive_dir старше keep_days."""
+    """Safety-net cleanup: удаляет файлы старше keep_days.
+
+    В норме файлы удаляются сразу после успешного POST в _inbox_process_file.
+    Этот cleanup ловит только «застрявшие» — те, что не удалось обработать
+    (например, постоянно валился HTTP 500) и которые не имеет смысла держать.
+    """
     if keep_days <= 0:
         return
     cutoff = time.time() - keep_days * 86400
+    removed = 0
     for p in archive_dir.glob('*.gz'):
         try:
             if p.stat().st_mtime < cutoff:
                 p.unlink()
+                removed += 1
         except OSError:
             pass
+    if removed:
+        logging.info(f'inbox: cleanup removed {removed} stale .gz from archive')
 
 
 def inbox_loop(cfg: dict) -> None:
