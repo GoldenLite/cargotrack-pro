@@ -14,8 +14,6 @@
   на 12K строк прогон ~1 МБ при unchanged-fast-path, выживёт долго).
 #>
 
-$ErrorActionPreference = 'Stop'
-
 $ROOT     = 'C:\cargotrack'
 $VENV_PY  = Join-Path $ROOT '.venv\Scripts\python.exe'
 $MANAGE   = Join-Path $ROOT 'manage.py'
@@ -31,14 +29,26 @@ function Write-Log($msg) {
 
 function Run-Import($source) {
     Write-Log "=== START $source ==="
-    try {
-        $output = & $VENV_PY $MANAGE import_sheets --source $source 2>&1
-        $exit = $LASTEXITCODE
-        foreach ($l in $output) { Write-Log $l }
-        Write-Log "=== END $source (exit=$exit) ==="
-    } catch {
-        Write-Log "EXCEPTION ${source}: $($_.Exception.Message)"
+    # ВАЖНО: НЕ редиректим stderr внутри PowerShell (2>&1) — PS 5.1
+    # оборачивает каждую строку stderr в ErrorRecord и при ErrorActionPreference=Stop
+    # сразу падает. Django logs идут в stderr — отправляем их в файл напрямую
+    # через Start-Process, который не делает обёртку.
+    $stdoutFile = Join-Path $env:TEMP "sheets_${source}_out.log"
+    $stderrFile = Join-Path $env:TEMP "sheets_${source}_err.log"
+    $proc = Start-Process -FilePath $VENV_PY `
+        -ArgumentList @($MANAGE, 'import_sheets', '--source', $source) `
+        -WorkingDirectory $ROOT `
+        -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutFile `
+        -RedirectStandardError  $stderrFile
+    $exit = $proc.ExitCode
+    foreach ($f in @($stdoutFile, $stderrFile)) {
+        if (Test-Path $f) {
+            Get-Content $f | ForEach-Object { Write-Log $_ }
+            Remove-Item $f -ErrorAction SilentlyContinue
+        }
     }
+    Write-Log "=== END $source (exit=$exit) ==="
 }
 
 Set-Location $ROOT
