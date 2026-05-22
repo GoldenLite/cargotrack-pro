@@ -122,6 +122,11 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
         parts.append(user_comment)
     notes = '\n\n'.join(parts)
 
+    # HAWB.save() требует AT_ORIGIN_WH при первой привязке к партии. Раз ТСД
+    # есть в Sheets — фактически уже на складе отправки. Без партии — стандартный
+    # CREATED.
+    initial_status = 'AT_ORIGIN_WH' if parent_cargo else 'CREATED'
+
     hawb = HouseWaybill.objects.create(
         hawb_number=row.hawb_number_norm,
         mawb=parent_cargo,
@@ -134,7 +139,7 @@ def promote_row(row: ImportedSheetRow, *, user: Optional[User] = None) -> HouseW
         assigned_to=assigned,
         ved_manager=ved,
         scan_into_bond=bond_dt,
-        logistics_status='CREATED',
+        logistics_status=initial_status,
     )
 
     row.match_status = 'promoted'
