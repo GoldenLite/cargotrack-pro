@@ -45,18 +45,37 @@ DECISION_CODE_KIND: dict[str, str] = {
     '91': 'rejected',
 }
 
+# GoodsShipment_HouseShipment\Design — более точный код решения чем DecisionCode.
+# Если Design=40 — это отзыв декларации, ДТ-номер становится недействительным
+# и должен быть НЕ записан / стёрт.
+DESIGN_CODE_KIND: dict[str, str] = {
+    '10': 'released',      # выпуск товаров
+    '11': 'released',      # выпуск с условиями
+    '40': 'withdrawn',     # отзыв декларации
+    '90': 'rejected',
+    '91': 'rejected',
+}
+
 
 def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
     """MessageType (+ опц parsed_meta из тела) → kind.
 
-    Если у MessageType есть DecisionCode в теле — уточняем kind по нему.
+    Приоритет: Design > DecisionCode > MessageType.
     Неизвестные коды → 'info' (статус не меняем).
     """
     base = MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
-    if parsed_meta:
-        dc = (parsed_meta.get('decision_code') or '').strip()
-        if dc and msg_type in ('CMN.11350', 'CMN.11010'):
-            return DECISION_CODE_KIND.get(dc, base)
+    if not parsed_meta:
+        return base
+
+    # 1. Design — самый точный код по конкретной ДТ
+    dsn = (parsed_meta.get('design_code') or '').strip()
+    if dsn:
+        return DESIGN_CODE_KIND.get(dsn, base)
+
+    # 2. DecisionCode — fallback для тех типов где он встречается
+    dc = (parsed_meta.get('decision_code') or '').strip()
+    if dc and msg_type in ('CMN.11350', 'CMN.11010'):
+        return DECISION_CODE_KIND.get(dc, base)
     return base
 
 STATUS_FROM_KIND: dict[str, str] = {
@@ -177,43 +196,63 @@ def apply_status(msg: AltaInboxMessage,
                  hawb: Optional[HouseWaybill]) -> Optional[str]:
     """Применяет customs_declaration_number и статус.
 
-    Cargo-only матч (без HAWB) — типичный случай для CMN-сообщений по ДТ.
-    Тогда ДТ пишется на Cargo, и статус применяется ко всем HAWB партии,
-    которые сейчас в *_CUSTOMS.
+    Правила записи ДТ-номера:
+    - Пишем ТОЛЬКО при msg_kind='released' (Design=10/11 или DecisionCode=10/11).
+      Промежуточные/отзывные сообщения номер не закрепляют.
+    - При матче на Cargo (без конкретной HAWB) — ДТ пишется на Cargo
+      И ПРОПАГАЦИЯ на все HAWB этой партии. Sheets writeback дёргается для
+      каждого HAWB у которого реально появился номер.
+    - При msg_kind='withdrawn' (Design=40) — ничего не пишем, ничего не меняем.
 
-    customs_declaration_number пишется прямым UPDATE минуя save(), т.к.
+    customs_declaration_number пишется прямым UPDATE минуя save() — иначе
     HouseWaybill.save() автостирает поле при отсутствии MAWB / неполном
     чек-листе документов.
     """
     parsed = msg.parsed_meta or {}
     decl_number = _build_declaration_number(parsed)
+    kind = msg.msg_kind
 
-    # Куда писать декларацию: на конкретный HAWB или на Cargo
-    if decl_number:
+    # Withdrawn — игнорируем целиком (это «отзыв декларации», номер не наш)
+    if kind == 'withdrawn':
+        return None
+
+    # Пишем ДТ только если это release/registered (положительные исходы)
+    write_decl = decl_number and kind in ('released', 'registered')
+    updated_hawbs: list[HouseWaybill] = []
+
+    if write_decl:
         from django.db import transaction
         with transaction.atomic():
             if hawb:
                 HouseWaybill.objects.filter(pk=hawb.pk).update(customs_declaration_number=decl_number)
+                updated_hawbs = [hawb]
             elif cargo:
+                # Cargo-уровень: записываем на Cargo + пропагируем на все HAWB партии
+                # (одна ДТ покрывает все накладные партии).
                 Cargo.objects.filter(pk=cargo.pk).update(customs_declaration_number=decl_number)
-        # Writeback в Sheets — только для конкретного HAWB (Cargo-уровня в Sheets нет)
-        if hawb:
-            try:
-                from cargo.services.sheets.writeback import write_declaration
-                hawb.refresh_from_db(fields=['customs_declaration_number'])
-                write_declaration(hawb)
-            except Exception:
-                logger.exception('sheets writeback after declaration write failed')
+                HouseWaybill.objects.filter(mawb=cargo).update(
+                    customs_declaration_number=decl_number,
+                )
+                updated_hawbs = list(cargo.hawbs.all())
 
-    new_status = STATUS_FROM_KIND.get(msg.msg_kind)
+    # Sheets writeback — для каждого реально обновлённого HAWB
+    if updated_hawbs:
+        try:
+            from cargo.services.sheets.writeback import write_declaration
+            for h in updated_hawbs:
+                h.refresh_from_db(fields=['customs_declaration_number'])
+                write_declaration(h)
+        except Exception:
+            logger.exception('sheets writeback after declaration write failed')
+
+    new_status = STATUS_FROM_KIND.get(kind)
     if not new_status:
-        return None  # info — статус не трогаем
+        return None  # info / withdrawn — статус не трогаем
 
     targets: list[HouseWaybill] = []
     if hawb:
         targets = [hawb]
     elif cargo:
-        # Все HAWB партии, находящиеся в таможне
         targets = list(
             cargo.hawbs
             .filter(logistics_status__in=('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'))

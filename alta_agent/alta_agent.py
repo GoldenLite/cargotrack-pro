@@ -269,6 +269,9 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         'registration_date':  _xml_field(xml_text, 'RegistrationDate'),
         'gtd_number':         _xml_field(xml_text, 'GTDNumber'),
         'decision_code':      _xml_field(xml_text, 'DecisionCode'),
+        # GoodsShipment_HouseShipment\Design — точный код решения по конкретной
+        # ДТ (10/11=выпуск, 40=отзыв, …). Точнее чем DecisionCode для CMN.11350.
+        'design_code':        _xml_field(xml_text, 'Design'),
         'reason_code':        _xml_field(xml_text, 'ReasonCode'),
         'reason_text':        _xml_field(xml_text, 'Reason'),
         'resolution_text':    _xml_field(xml_text, 'ResolutionDescription'),
@@ -361,6 +364,7 @@ def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None
             'registration_date':  parsed.get('registration_date', ''),
             'gtd_number':         parsed.get('gtd_number', ''),
             'decision_code':      parsed.get('decision_code', ''),
+            'design_code':        parsed.get('design_code', ''),
             'reason_code':        parsed.get('reason_code', ''),
             'reason_text':        parsed.get('reason_text', ''),
             'resolution_text':    parsed.get('resolution_text', ''),

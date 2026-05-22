@@ -1859,6 +1859,7 @@ class AltaInboxMessage(models.Model):
         ('registered',  'Регистрация ДТ'),
         ('released',    'Выпуск ДТ'),
         ('rejected',    'Отказ в выпуске'),
+        ('withdrawn',   'Отзыв декларации'),
         ('examination', 'Досмотр / запрос'),
         ('hold',        'Требование / арест'),
         ('info',        'Информационное'),
