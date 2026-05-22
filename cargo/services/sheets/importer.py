@@ -47,11 +47,15 @@ class SheetImporter:
     """Один прогон импорта по конкретному SheetSource."""
 
     def __init__(self, source: SheetSource, *, dry_run: bool = False,
-                 user: Optional[User] = None, verbose: bool = False):
+                 user: Optional[User] = None, verbose: bool = False,
+                 auto_promote: bool = False):
         self.source  = source
         self.dry_run = dry_run
         self.user    = user
         self.verbose = verbose
+        # auto_promote: для kind='general' каждый свежесозданный orphan
+        # сразу прогоняется через promote_row → HAWB + Cargo + relink.
+        self.auto_promote = auto_promote
         self.run: Optional[SheetImportRun] = None
 
     def run_once(self) -> SheetImportRun:
@@ -142,6 +146,17 @@ class SheetImporter:
             obj.save()
             if self.source.kind == 'crm' and obj.matched_hawb_id:
                 emit_workflow_events(obj)
+            # Auto-promote: orphan-ряд из «Общее» сразу превращаем в HAWB +
+            # автосоздание Cargo. Включается флагом --auto-promote в CLI.
+            if (self.auto_promote
+                    and self.source.kind == 'general'
+                    and obj.match_status == 'orphan'
+                    and obj.hawb_number_norm):
+                try:
+                    from .promote import promote_row
+                    promote_row(obj, user=self.user)
+                except Exception:
+                    logger.exception('auto-promote failed for row %s', obj.pk)
             self._tick_counters(obj, created=True, changed=True)
             if self.verbose:
                 logger.info('#%s: NEW %s', row_index, obj.match_status)

@@ -30,6 +30,8 @@ class Command(BaseCommand):
         parser.add_argument('--rematch', action='store_true',
                             help='Не читать Sheets, только заново прогнать matcher по существующим строкам')
         parser.add_argument('--verbose', action='store_true', help='Логировать каждую строку')
+        parser.add_argument('--auto-promote', action='store_true',
+                            help='Для kind=general: orphan-ряды сразу → HAWB + Cargo (+ Alta relink)')
 
     def handle(self, *args, **opts):
         qs = SheetSource.objects.filter(is_active=True)
@@ -52,6 +54,7 @@ class Command(BaseCommand):
                 src,
                 dry_run=opts['dry_run'],
                 verbose=opts['verbose'],
+                auto_promote=opts['auto_promote'],
             )
             run = importer.run_once()
             self.stdout.write(self._format_run(run))

@@ -35,8 +35,9 @@ function Run-Import($source) {
     # через Start-Process, который не делает обёртку.
     $stdoutFile = Join-Path $env:TEMP "sheets_${source}_out.log"
     $stderrFile = Join-Path $env:TEMP "sheets_${source}_err.log"
+    # --auto-promote: orphan-ряды «Общее» сразу → HAWB+Cargo. Для CRM флаг игнорится.
     $proc = Start-Process -FilePath $VENV_PY `
-        -ArgumentList @($MANAGE, 'import_sheets', '--source', $source) `
+        -ArgumentList @($MANAGE, 'import_sheets', '--source', $source, '--auto-promote') `
         -WorkingDirectory $ROOT `
         -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $stdoutFile `
