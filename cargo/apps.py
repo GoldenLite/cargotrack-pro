@@ -9,11 +9,26 @@ class CargoConfig(AppConfig):
     def ready(self):
         # Регистрируем сигналы для авто-запуска воркфлоу при создании сущностей
         import threading
+        from django.db.backends.signals import connection_created
         from django.db.models.signals import post_save
         from django.dispatch import receiver
 
         from .models import Cargo, HouseWaybill
         from . import workflow_runner
+
+        @receiver(connection_created)
+        def sqlite_pragmas(sender, connection, **kwargs):
+            """Включаем WAL и normal sync для SQLite — без этого agent-poll
+            и долгие импорты конкурируют за write-lock и роняют запросы с
+            `database is locked`. WAL живёт в файле БД, но PRAGMA нужно
+            повторять на каждом новом соединении (waitress открывает их пачкой).
+            """
+            if connection.vendor != 'sqlite':
+                return
+            with connection.cursor() as cur:
+                cur.execute('PRAGMA journal_mode=WAL;')
+                cur.execute('PRAGMA synchronous=NORMAL;')
+                cur.execute('PRAGMA busy_timeout=5000;')
 
         @receiver(post_save, sender=Cargo, weak=False)
         def cargo_created(sender, instance, created, **kwargs):
