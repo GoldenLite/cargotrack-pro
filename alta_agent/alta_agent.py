@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import threading
@@ -67,6 +68,10 @@ def load_config() -> dict:
         watch_dir = Path(ib.get('watch_dir', ''))
         token = ib.get('token', '').strip()
         if watch_dir and token:
+            # Архив — куда копируем каждую .gz ДО парсинга, чтобы s3_upload_files_ek5
+            # своим удалением не лишил нас данных. Default — <script_dir>/inbox_archive.
+            archive_dir = ib.get('archive_dir', '').strip()
+            archive_dir = Path(archive_dir) if archive_dir else (Path(__file__).resolve().parent / 'inbox_archive')
             inbox = {
                 'watch_dir':     watch_dir,
                 'token':         token,
@@ -75,6 +80,8 @@ def load_config() -> dict:
                 'endpoint':      ib.get('endpoint', '/api/v1/alta/inbox/').lstrip('/'),
                 # читаем только incoming-файлы; outgoing-копии типа `538134^*.gz` пропускаем
                 'name_pattern':  re.compile(ib.get('name_pattern', r'^serveralta\^')),
+                'archive_dir':       archive_dir,
+                'archive_keep_days': int(ib.get('archive_keep_days', '30')),
             }
     cfg['inbox'] = inbox
 
@@ -245,6 +252,43 @@ def _pr_document_number_for(xml_text: str, doc_name_substr: str) -> str:
     return ''
 
 
+_DECL_TRIPLE_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?CustomsCode\b[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?CustomsCode>\s*'
+    r'<(?:[a-zA-Z][\w-]*:)?RegistrationDate\b[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?RegistrationDate>\s*'
+    r'<(?:[a-zA-Z][\w-]*:)?GTDNumber\b[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?GTDNumber>',
+    re.S
+)
+
+
+def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
+    """В CMN.11309 (КДТ-уведомление о выпуске) в одном XML может лежать
+    несколько разных ДТ — старая и новая корректировочная. Старый парсер брал
+    первое попавшееся <GTDNumber> — попадалась старая.
+
+    Приоритет:
+    1. Тройка внутри <goom:GTDoutCustomsMark> (release stamp) — актуальная.
+    2. Тройка с самой поздней RegistrationDate (новая КДТ).
+    3. Fallback на плоские теги (обычное сообщение с одной ДТ).
+    """
+    mark_block = re.search(
+        r'<(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark>',
+        xml_text, re.S
+    )
+    if mark_block:
+        m = _DECL_TRIPLE_RE.search(mark_block.group(1))
+        if m:
+            return (m.group(1).strip(), m.group(2).strip(), m.group(3).strip())
+
+    triples = _DECL_TRIPLE_RE.findall(xml_text)
+    if triples:
+        best = max(triples, key=lambda t: t[1].strip())
+        return (best[0].strip(), best[1].strip(), best[2].strip())
+
+    return (_xml_field(xml_text, 'CustomsCode'),
+            _xml_field(xml_text, 'RegistrationDate'),
+            _xml_field(xml_text, 'GTDNumber'))
+
+
 def _parse_inbox_xml(xml_text: str) -> dict:
     """Выкусывает ключевые поля без полноценного XML-парсинга.
 
@@ -258,6 +302,7 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         _xml_field(xml_text, 'WayBillNumber')
         or _pr_document_number_for(xml_text, 'Индивидуальная накладная')
     )
+    cc, rd, gn = _pick_effective_decl(xml_text)
     return {
         'envelope_id':        _xml_field(xml_text, 'EnvelopeID'),
         'initial_envelope':   _xml_field(xml_text, 'InitialEnvelopeID'),
@@ -265,9 +310,9 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         'prepared_at':        _xml_field(xml_text, 'PreparationDateTime'),
         'waybill_number':     waybill,
         'declaration_number': _xml_field(xml_text, 'DeclarationNumber'),
-        'customs_code':       _xml_field(xml_text, 'CustomsCode'),
-        'registration_date':  _xml_field(xml_text, 'RegistrationDate'),
-        'gtd_number':         _xml_field(xml_text, 'GTDNumber'),
+        'customs_code':       cc,
+        'registration_date':  rd,
+        'gtd_number':         gn,
         'decision_code':      _xml_field(xml_text, 'DecisionCode'),
         # GoodsShipment_HouseShipment\Design — точный код решения по конкретной
         # ДТ (10/11=выпуск, 40=отзыв, …). Точнее чем DecisionCode для CMN.11350.
@@ -380,12 +425,39 @@ def _inbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None
         logging.error(f'inbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
 
 
+def _inbox_cleanup_archive(archive_dir: Path, keep_days: int) -> None:
+    """Удаляет .gz файлы из archive_dir старше keep_days."""
+    if keep_days <= 0:
+        return
+    cutoff = time.time() - keep_days * 86400
+    for p in archive_dir.glob('*.gz'):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
+
+
 def inbox_loop(cfg: dict) -> None:
-    """Бесконечный поток: периодически сканит watch_dir, POST новые файлы."""
+    """Бесконечный поток: копирует новые .gz из watch_dir в archive_dir и
+    обрабатывает из архива.
+
+    Зачем архив: на рабочем сервере параллельно работает s3_upload_files_ek5.py,
+    который удаляет файлы из watch_dir после своей обработки. Если он опередит
+    нас — файл пропадёт. Мы первым делом делаем shutil.copy2 в собственный
+    каталог, и работаем уже с копией. Это race-safe.
+    """
     ic = cfg['inbox']
+    archive_dir: Path = ic['archive_dir']
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logging.error(f'inbox: cannot create archive dir {archive_dir}: {e}')
+        return
     logging.info(
-        f'inbox: started, watching {ic["watch_dir"]} '
-        f'pattern={ic["name_pattern"].pattern!r} poll={ic["poll_interval"]}s'
+        f'inbox: started, watching {ic["watch_dir"]} archive={archive_dir} '
+        f'pattern={ic["name_pattern"].pattern!r} poll={ic["poll_interval"]}s '
+        f'keep_days={ic["archive_keep_days"]}'
     )
     try:
         conn = _state_db_open(ic['state_db'])
@@ -393,15 +465,40 @@ def inbox_loop(cfg: dict) -> None:
         logging.error(f'inbox: cannot open state db {ic["state_db"]}: {e}')
         return
 
+    last_cleanup = 0.0
     while True:
         try:
-            files = glob.glob(os.path.join(str(ic['watch_dir']), '*.gz'))
-            picked = [Path(p) for p in files if ic['name_pattern'].search(os.path.basename(p))]
-            for p in picked:
+            # 1. Скопировать новые .gz из watch_dir в archive (race-safe)
+            for p_path in glob.glob(os.path.join(str(ic['watch_dir']), '*.gz')):
+                p = Path(p_path)
+                if not ic['name_pattern'].search(p.name):
+                    continue
+                target = archive_dir / p.name
+                if target.exists():
+                    continue
+                try:
+                    shutil.copy2(str(p), str(target))
+                except FileNotFoundError:
+                    # s3_upload удалил между glob и copy — не критично
+                    pass
+                except OSError as e:
+                    logging.warning(f'inbox: copy {p.name}: {e}')
+
+            # 2. Обработать всё из archive (state.sqlite пропускает дубли)
+            for p_path in glob.glob(os.path.join(str(archive_dir), '*.gz')):
+                p = Path(p_path)
+                if not ic['name_pattern'].search(p.name):
+                    continue
                 try:
                     _inbox_process_file(cfg, conn, p)
                 except Exception:
                     logging.error(f'inbox: process {p.name}: {traceback.format_exc()}')
+
+            # 3. Cleanup archive раз в час
+            now = time.time()
+            if now - last_cleanup > 3600:
+                _inbox_cleanup_archive(archive_dir, ic['archive_keep_days'])
+                last_cleanup = now
         except Exception:
             logging.error(f'inbox: scan crash: {traceback.format_exc()}')
         time.sleep(ic['poll_interval'])
