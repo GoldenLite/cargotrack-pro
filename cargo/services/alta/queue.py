@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +23,9 @@ from .generators import (
 )
 
 
+_ENVELOPE_RE = re.compile(rb'<(?:[a-z]+:)?EnvelopeID>([^<]+)', re.IGNORECASE)
+
+
 def _safe(name: str, fallback: str) -> str:
     s = (name or fallback).strip()
     for ch in '/\\:*?"<>|':
@@ -31,6 +35,18 @@ def _safe(name: str, fallback: str) -> str:
 
 def _ts() -> str:
     return datetime.now().strftime('%Y%m%d_%H%M%S')
+
+
+def _extract_envelope_id(content: bytes) -> Optional[str]:
+    """Выкусывает UUID из <roi:EnvelopeID>... в исходящем XML."""
+    if not content:
+        return None
+    if isinstance(content, memoryview):
+        content = bytes(content)
+    m = _ENVELOPE_RE.search(content)
+    if not m:
+        return None
+    return m.group(1).decode('ascii', errors='replace').strip() or None
 
 
 def _carrier_kwargs() -> dict:
@@ -66,6 +82,7 @@ def enqueue_indpost(hawb, *, user: Optional[User] = None):
     return AltaQueueItem.objects.create(
         doc_type='indpost', hawb=hawb, cargo=hawb.mawb,
         filename=filename, content=content, content_encoding='windows-1251',
+        envelope_id=_extract_envelope_id(content),
         created_by=user,
     )
 
@@ -78,6 +95,7 @@ def enqueue_waybill(hawb, *, user: Optional[User] = None):
     return AltaQueueItem.objects.create(
         doc_type='waybill', hawb=hawb, cargo=hawb.mawb,
         filename=filename, content=content, content_encoding='utf-8',
+        envelope_id=_extract_envelope_id(content),
         created_by=user,
     )
 
@@ -90,6 +108,7 @@ def enqueue_invoice(hawb, *, user: Optional[User] = None):
     return AltaQueueItem.objects.create(
         doc_type='invoice', hawb=hawb, cargo=hawb.mawb,
         filename=filename, content=content, content_encoding='utf-8',
+        envelope_id=_extract_envelope_id(content),
         created_by=user,
     )
 
@@ -102,6 +121,7 @@ def enqueue_express(cargo, *, user: Optional[User] = None):
     return AltaQueueItem.objects.create(
         doc_type='express', cargo=cargo,
         filename=filename, content=content, content_encoding='utf-8',
+        envelope_id=_extract_envelope_id(content),
         created_by=user,
     )
 
@@ -118,5 +138,6 @@ def enqueue_dt(cargo, *, user: Optional[User] = None):
     return AltaQueueItem.objects.create(
         doc_type='dt', cargo=cargo,
         filename=filename, content=content, content_encoding='utf-8',
+        envelope_id=_extract_envelope_id(content),
         created_by=user,
     )

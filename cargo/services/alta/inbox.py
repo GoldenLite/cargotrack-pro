@@ -81,15 +81,63 @@ EVENT_TYPE_FROM_KIND: dict[str, str] = {
 
 
 def match_hawb(msg: AltaInboxMessage) -> Optional[HouseWaybill]:
-    """Найти HAWB по WayBillNumber из XML."""
+    """Подобрать HAWB для входящего сообщения.
+
+    На рабочем сервере Альта обслуживает много workflow помимо CargoTrack,
+    поэтому 99%+ inbox-сообщений нам не принадлежат. Матчинг возможен только
+    через идентификаторы, которые мы сами породили при отправке.
+
+    Стратегия (по убыванию надёжности):
+    1. parsed_meta['initial_envelope'] → AltaQueueItem.envelope_id → hawb
+       Самое надёжное: UUID Envelope нашего исходящего, на который таможня
+       отвечает. Работает для большинства типов сообщений (CMN.00003 ACK,
+       CMN.11337, ED.* ответы и т.д.).
+    2. Построить customs_declaration_number из parsed_meta и искать HAWB
+       у которой это поле уже заполнено (для случая когда мы повторно ловим
+       сообщение по уже зарегистрированной ДТ).
+    3. Старое поле waybill_number_raw — оставлено на случай если когда-нибудь
+       найдётся тип сообщения с WayBillNumber в теле. Сейчас не наблюдалось.
+
+    None — нормальный исход для чужих сообщений.
+    """
+    from cargo.models import AltaQueueItem
+
+    parsed = msg.parsed_meta or {}
+
+    # 1. По initial_envelope нашего исходящего пакета
+    init = (parsed.get('initial_envelope') or '').strip()
+    if init:
+        item = (
+            AltaQueueItem.objects
+            .filter(envelope_id__iexact=init)
+            .exclude(hawb=None)
+            .select_related('hawb')
+            .first()
+        )
+        if item and item.hawb:
+            return item.hawb
+
+    # 2. По собранному номеру ДТ — если кто-то уже его проставил
+    decl = _build_declaration_number(parsed)
+    if decl:
+        hawb = (
+            HouseWaybill.objects
+            .filter(customs_declaration_number=decl)
+            .first()
+        )
+        if hawb:
+            return hawb
+
+    # 3. Fallback — WayBillNumber из XML, если вдруг будет
     wn = (msg.waybill_number_raw or '').strip()
-    if not wn:
-        return None
-    return (
-        HouseWaybill.objects
-        .filter(hawb_number__iexact=wn)
-        .first()
-    )
+    if wn:
+        return (
+            HouseWaybill.objects
+            .filter(hawb_number__iexact=wn)
+            .first()
+        )
+
+    return None
 
 
 def _build_declaration_number(parsed_meta: dict) -> str:

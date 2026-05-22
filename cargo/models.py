@@ -1810,6 +1810,12 @@ class AltaQueueItem(models.Model):
     error_message = models.TextField('Сообщение об ошибке', blank=True)
     retry_count   = models.IntegerField('Попыток отправки', default=0)
 
+    # UUID из <roi:EnvelopeID> в content. Заполняется при enqueue.
+    # Используется для матчинга входящих ЭД (AltaInboxMessage.parsed_meta.initial_envelope
+    # → этот envelope_id → hawb). Nullable для старых записей до миграции.
+    envelope_id = models.CharField('Envelope ID (UUID)', max_length=64,
+                                   unique=True, null=True, blank=True, db_index=True)
+
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='alta_queue_items', verbose_name='Кто поставил')
     created_at = models.DateTimeField('Создан', auto_now_add=True, db_index=True)
