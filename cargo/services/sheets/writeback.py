@@ -32,6 +32,7 @@ logger = logging.getLogger('cargo.sheets.writeback')
 CARGOTRACK_COL_HEADER         = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DATE_HEADER    = 'CargoTrack: дата размещения'
+CARGOTRACK_SVH_DO1_HEADER     = 'CargoTrack: рег. номер ДО1'
 
 # Кеш индекса колонки на процесс — {(worksheet_key, header): 1-based col_index}
 _col_index_cache: dict[tuple[str, str], int] = {}
@@ -119,7 +120,8 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     """
     lic = (cargo.warehouse_license or '').strip()
     placed_dt = cargo.scan_into_bond
-    if not (lic or placed_dt):
+    do1_reg = (cargo.svh_do1_reg_number or '').strip()
+    if not (lic or placed_dt or do1_reg):
         return 0  # нечего писать
 
     # Дата для Sheets — русский формат дд.мм.гггг (как у сотрудников
@@ -168,21 +170,25 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                                             CARGOTRACK_SVH_LICENSE_HEADER)
             col_date = _ensure_named_column(ws, source.header_row,
                                             CARGOTRACK_SVH_DATE_HEADER)
+            col_do1  = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_DO1_HEADER)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: ensure column failed: %s', e)
             continue
 
-        # Читаем существующие значения обеих колонок одним запросом каждая,
+        # Читаем существующие значения трёх колонок одним запросом каждая,
         # чтобы не писать совпадающее (Google биллит каждый write).
         try:
             existing_lic  = ws.col_values(col_lic)
             existing_date = ws.col_values(col_date)
+            existing_do1  = ws.col_values(col_do1)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: col_values failed: %s', e)
             continue
 
         letter_lic  = _col_letter(col_lic)
         letter_date = _col_letter(col_date)
+        letter_do1  = _col_letter(col_do1)
 
         updates = []
         for row_idx in row_indices:
@@ -190,10 +196,14 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                        if row_idx - 1 < len(existing_lic) else '').strip()
             cur_date = (existing_date[row_idx - 1]
                         if row_idx - 1 < len(existing_date) else '').strip()
+            cur_do1 = (existing_do1[row_idx - 1]
+                       if row_idx - 1 < len(existing_do1) else '').strip()
             if lic and cur_lic != lic:
                 updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
             if placed_str and cur_date != placed_str:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
+            if do1_reg and cur_do1 != do1_reg:
+                updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
 
         if not updates:
             continue

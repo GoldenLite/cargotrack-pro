@@ -463,11 +463,18 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     license_ = (parsed.get('svh_warehouse_license') or '').strip()
     do1_date = (parsed.get('svh_do1_present_date') or '').strip()
     do1_time = (parsed.get('svh_do1_present_time') or '').strip()
+    do1_reg  = (parsed.get('svh_presentation_reg_number') or '').strip()
 
     update_fields = []
     if license_ and not (cargo.warehouse_license or '').strip():
         cargo.warehouse_license = license_
         update_fields.append('warehouse_license')
+
+    if do1_reg and (cargo.svh_do1_reg_number or '').strip() != do1_reg:
+        # Рег.номер ДО1 может прийти раньше Cargo и наоборот, и переподача
+        # тоже возможна — перезаписываем последним значением.
+        cargo.svh_do1_reg_number = do1_reg
+        update_fields.append('svh_do1_reg_number')
 
     if do1_date and not cargo.scan_into_bond:
         d = parse_date(do1_date)

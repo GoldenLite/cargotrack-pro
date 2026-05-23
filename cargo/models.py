@@ -195,6 +195,8 @@ class Cargo(models.Model):
     bond_location = models.CharField('Ячейка хранения', max_length=100, blank=True)
     scan_into_bond = models.DateTimeField('Въезд на склад', null=True, blank=True)
     scan_out_of_bond = models.DateTimeField('Выезд со склада', null=True, blank=True)
+    svh_do1_reg_number = models.CharField('Рег. номер ДО1', max_length=64, blank=True,
+                                          help_text='10001020/220526/5005840 — из CMN.13029 (опись СВХ)')
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True, db_index=True)

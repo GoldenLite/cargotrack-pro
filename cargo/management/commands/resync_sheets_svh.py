@@ -32,22 +32,29 @@ class Command(BaseCommand):
         parser.add_argument('--dry-run', action='store_true')
 
     def handle(self, *args, **opts):
+        from django.db.models import Q
+        # Партия попадает в выборку если у неё ЛЮБОЕ из СВХ-полей заполнено —
+        # лицензия / дата размещения / рег.номер ДО1. Часть полей может
+        # отсутствовать у исторических партий, но писать что есть всё равно надо.
         qs = (Cargo.objects
-              .exclude(warehouse_license='')
-              .exclude(scan_into_bond__isnull=True))
+              .filter(Q(warehouse_license__gt='') |
+                      Q(scan_into_bond__isnull=False) |
+                      Q(svh_do1_reg_number__gt=''))
+              .filter(warehouse_license='10001/060324/10009/1'))
         if opts['cargo']:
             qs = qs.filter(awb_number__iexact=opts['cargo'])
         if opts['limit']:
             qs = qs[:opts['limit']]
 
         cargos = list(qs)
-        self.stdout.write(f'Cargo с лицензией СВХ и датой размещения: {len(cargos)}')
+        self.stdout.write(f'Cargo с заполненными СВХ-полями: {len(cargos)}')
 
         if opts['dry_run']:
             for c in cargos[:30]:
+                date_str = c.scan_into_bond.strftime('%d.%m.%Y') if c.scan_into_bond else '—'
                 self.stdout.write(
                     f'  {c.awb_number:<22} {c.warehouse_license:<25} '
-                    f'{c.scan_into_bond:%Y-%m-%d}'
+                    f'{date_str:<12} {c.svh_do1_reg_number}'
                 )
             if len(cargos) > 30:
                 self.stdout.write(f'  ... и ещё {len(cargos) - 30}')
