@@ -33,12 +33,38 @@ def is_moscow_cargo_candidate(cargo: Cargo) -> bool:
     return awb[:3] in MOSCOW_CARGO_PREFIXES
 
 
+def _save_with_retry(cargo: Cargo, fields: list[str], attempts: int = 5) -> None:
+    """save(update_fields=) с retry на 'database is locked'.
+
+    SQLite WAL терпит несколько писателей, но Sheets-writeback держит DB-сессию
+    долго (HTTP в Google) и может перекрыть наш save. PRAGMA busy_timeout
+    (5000ms) обычно справляется, но при гонке с import_sheets cron окно может
+    превысить лимит. Простой backoff закрывает кейс без архитектурных правок.
+    """
+    import time as _time
+    from django.db import OperationalError
+
+    delay = 1.0
+    for i in range(attempts):
+        try:
+            cargo.save(update_fields=fields)
+            return
+        except OperationalError as e:
+            if 'locked' not in str(e).lower() or i == attempts - 1:
+                raise
+            logger.warning('moscow-cargo save locked for %s, retry in %.1fs',
+                           cargo.awb_number, delay)
+            _time.sleep(delay)
+            delay *= 2
+
+
 def apply_to_cargo(cargo: Cargo, parsed: dict) -> bool:
     """Заполняет пустые СВХ-поля Cargo из parsed-данных moscow-cargo.
 
     Возвращает True если что-то реально записали (тогда писать в Sheets имеет
     смысл).
     """
+    import threading
     from datetime import datetime, time as dt_time
     from django.utils.dateparse import parse_date
     from django.utils import timezone as tz
@@ -69,15 +95,20 @@ def apply_to_cargo(cargo: Cargo, parsed: dict) -> bool:
     if not updated:
         return False
 
-    cargo.save(update_fields=updated)
+    _save_with_retry(cargo, updated)
     logger.info('moscow-cargo applied to %s: %s', cargo.awb_number, updated)
 
-    # Триггер writeback в Sheets (те же 3 колонки что для Альты-СВХ)
-    try:
-        from cargo.services.sheets.writeback import write_svh_placement_for_cargo
-        write_svh_placement_for_cargo(cargo)
-    except Exception:
-        logger.exception('moscow-cargo sheets writeback failed for %s', cargo.awb_number)
+    # Writeback в Sheets — в фоновом потоке, чтобы основной процесс не держал
+    # SQLite-сессию пока Google API отвечает (2-5 секунд) и не блокировал
+    # параллельный import_sheets/agent inbox.
+    def _bg_writeback():
+        try:
+            from cargo.services.sheets.writeback import write_svh_placement_for_cargo
+            write_svh_placement_for_cargo(cargo)
+        except Exception:
+            logger.exception('moscow-cargo sheets writeback failed for %s',
+                             cargo.awb_number)
+    threading.Thread(target=_bg_writeback, daemon=True).start()
 
     return True
 
