@@ -35,6 +35,30 @@ class CargoConfig(AppConfig):
             if created:
                 workflow_runner.start_for_entity(instance, 'cargo')
 
+        @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_moscow_cargo_fetch')
+        def cargo_moscow_cargo_fetch(sender, instance, created, **kwargs):
+            """При создании Cargo с префиксом Москва-Карго → fetch внешнего ДО1.
+
+            Только для партий с префиксами MOSCOW_CARGO_PREFIXES. Делаем в фоне
+            чтобы не блокировать promote/save. Если ДО1 на сайте ещё нет —
+            подберёт cron `refresh_moscow_cargo` позже.
+            """
+            if not created:
+                return
+            def _run():
+                try:
+                    from .services.external_warehouse.applier import (
+                        is_moscow_cargo_candidate, fetch_and_apply,
+                    )
+                    if not is_moscow_cargo_candidate(instance):
+                        return
+                    fetch_and_apply(instance)
+                except Exception:
+                    import logging
+                    logging.getLogger('cargo.external.moscow_cargo').exception(
+                        'cargo_moscow_cargo_fetch failed for %s', instance.pk)
+            threading.Thread(target=_run, daemon=True).start()
+
         @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_svh_backfill')
         def cargo_svh_backfill(sender, instance, created, **kwargs):
             """При создании Cargo подхватываем висящие CMN.13029/CMN.13010.
