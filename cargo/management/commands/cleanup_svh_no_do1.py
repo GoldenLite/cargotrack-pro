@@ -22,7 +22,8 @@ from cargo.models import AltaInboxMessage, Cargo, ImportedSheetRow
 from cargo.services.alta.inbox import OUR_WAREHOUSE_LICENSE
 from cargo.services.sheets.client import SheetsConfigError, open_worksheet
 from cargo.services.sheets.writeback import (
-    CARGOTRACK_SVH_DATE_HEADER, CARGOTRACK_SVH_DO1_HEADER, _ensure_named_column,
+    CARGOTRACK_SVH_DATE_HEADER, CARGOTRACK_SVH_DO1_HEADER,
+    CARGOTRACK_SVH_LICENSE_HEADER, _ensure_named_column,
 )
 
 
@@ -54,15 +55,16 @@ class Command(BaseCommand):
             ).exists()
             if has_do1:
                 continue
-            # У партии нет ДО1 — но есть какие-то СВХ-данные (от представления)
-            if c.svh_do1_reg_number or c.scan_into_bond:
+            # У партии нет ДО1 — все СВХ-данные легаси (из представления)
+            if c.svh_do1_reg_number or c.scan_into_bond or c.warehouse_license:
                 orphans.append(c)
 
-        self.stdout.write(f'Партий с лицензией СВХ но без CMN.13010: {len(orphans)}')
+        self.stdout.write(f'Партий с СВХ-данными но без CMN.13010: {len(orphans)}')
         for c in orphans:
             self.stdout.write(
-                f'  {c.awb_number:<22} svh_do1_reg_number={c.svh_do1_reg_number!r} '
-                f'scan_into_bond={c.scan_into_bond}'
+                f'  {c.awb_number:<22} license={c.warehouse_license!r} '
+                f'reg={c.svh_do1_reg_number!r} '
+                f'date={c.scan_into_bond}'
             )
 
         if not orphans:
@@ -71,11 +73,13 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('DRY RUN — ничего не делаем'))
             return
 
-        # 1. Стираем поля в Cargo
+        # 1. Стираем СВХ-поля в Cargo (включая лицензию)
         for c in orphans:
             c.svh_do1_reg_number = ''
             c.scan_into_bond = None
-            c.save(update_fields=['svh_do1_reg_number', 'scan_into_bond'])
+            c.warehouse_license = ''
+            c.save(update_fields=['svh_do1_reg_number', 'scan_into_bond',
+                                  'warehouse_license'])
         self.stdout.write(self.style.SUCCESS(f'Cargo: очищено {len(orphans)}'))
 
         # 2. Чистим ячейки в Sheets для всех HAWB этих партий
@@ -111,6 +115,8 @@ class Command(BaseCommand):
             self.stdout.write(f'  {source.name}: {len(indices)} HAWB')
             try:
                 ws = open_worksheet(source)
+                col_lic  = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_LICENSE_HEADER)
                 col_date = _ensure_named_column(ws, source.header_row,
                                                 CARGOTRACK_SVH_DATE_HEADER)
                 col_do1  = _ensure_named_column(ws, source.header_row,
@@ -121,9 +127,11 @@ class Command(BaseCommand):
 
             # batch_update с пустыми значениями — это и есть очистка
             updates = []
+            letter_lic  = _col_letter(col_lic)
             letter_date = _col_letter(col_date)
             letter_do1  = _col_letter(col_do1)
             for row_idx in indices:
+                updates.append({'range': f'{letter_lic}{row_idx}',  'values': [['']]})
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [['']]})
                 updates.append({'range': f'{letter_do1}{row_idx}',  'values': [['']]})
 

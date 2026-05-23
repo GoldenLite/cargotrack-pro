@@ -501,24 +501,15 @@ def _writeback_svh_cargo(cargo: Cargo) -> None:
 def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     """Обработка представления (CMN.13029).
 
-    Заполняет ТОЛЬКО лицензию — дата размещения и рег.номер берутся
-    из CMN.13010 (apply_svh_do1), потому что представление != ДО1.
+    НЕ пишет НИЧЕГО в Cargo. Семантика: партия «размещена на СВХ»
+    только когда есть CMN.13010 (регистрация ДО1). До этого момента
+    — заявка подана, ждём подтверждения таможни. В Sheets никаких
+    СВХ-данных не показываем до факта размещения.
 
-    Триггерит writeback (на случай если CMN.13010 для этой партии уже
-    лежит в БД и привязка прокатит — типичный кейс при rematch).
+    Единственная задача — триггернуть backfill: если CMN.13010 для этой
+    партии уже пришёл раньше представления (race), сейчас доматчим его.
     """
-    parsed = msg.parsed_meta or {}
-    license_ = (parsed.get('svh_warehouse_license') or '').strip()
-
-    if license_ and not (cargo.warehouse_license or '').strip():
-        cargo.warehouse_license = license_
-        cargo.save(update_fields=['warehouse_license'])
-
-    # Если CMN.13010 для этой партии уже пришла раньше (race), reparse её
-    # тоже — иначе она навечно зависнет UNMATCHED.
     _backfill_do1_for_presentation(msg, cargo)
-
-    _writeback_svh_cargo(cargo)
     return None
 
 
