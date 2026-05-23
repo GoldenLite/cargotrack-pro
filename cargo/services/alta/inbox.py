@@ -436,29 +436,47 @@ def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
 
 
 def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[AltaInboxMessage]]:
-    """Match CMN.13010 (регистрация ДО1) → Cargo через цепочку:
+    """Match CMN.13010 (регистрация ДО1) → Cargo по времени и лицензии.
 
-    CMN.13010.RefDocumentID → CMN.13029.parsed_meta['svh_document_id']
-                            → CMN.13029.cargo
+    UUID-связи нет: RefDocumentID в ДО1 указывает на локальный документ
+    Альта-СВХ («регистрация груза»), который мы не наблюдаем — этот
+    промежуточный документ существует только внутри их софта.
 
-    Возвращает (cargo, представление-сообщение). Любое может быть None
-    если связь не сложилась (например представление пришло позже регистрации).
+    Эвристика: для нашей лицензии в одной операции цепочка
+        представление (CMN.13029)
+            ↓ ~секунды-минуты
+        регистрация груза (внутри Альта-СВХ)
+            ↓ ~минуты-час
+        ДО1 (CMN.13010)
+    Представление всегда строго раньше ДО1. Окно поиска — `LOOKBACK`.
+    Если в окне несколько представлений — берём ближайшее по времени
+    (= скорее всего из той же операции).
+
+    Возвращает (cargo, представление-сообщение).
     """
-    parsed = msg.parsed_meta or {}
-    ref = (parsed.get('svh_ref_document_id') or '').strip()
-    if not ref:
+    from datetime import timedelta
+
+    if not msg.prepared_at:
         return (None, None)
 
-    # JSON-фильтр работает на Postgres и SQLite (Django 5+).
-    presentation = (
+    LOOKBACK = timedelta(hours=4)
+    window_start = msg.prepared_at - LOOKBACK
+
+    presentations = (
         AltaInboxMessage.objects
-        .filter(msg_type='CMN.13029', parsed_meta__svh_document_id=ref)
+        .filter(
+            msg_type='CMN.13029',
+            msg_kind='svh_placed',  # уже отфильтровано по нашей лицензии в classify
+            prepared_at__gte=window_start,
+            prepared_at__lte=msg.prepared_at,
+        )
+        .exclude(cargo=None)
         .select_related('cargo')
-        .order_by('-received_at')
-        .first()
+        .order_by('-prepared_at')  # ближайшее раньше = первое
     )
-    if presentation:
-        return (presentation.cargo, presentation)
+    nearest = presentations.first()
+    if nearest:
+        return (nearest.cargo, nearest)
     return (None, None)
 
 
@@ -506,21 +524,39 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
 
 def _backfill_do1_for_presentation(presentation_msg: AltaInboxMessage,
                                    cargo: Cargo) -> None:
-    """Если CMN.13010 пришла РАНЬШЕ представления — рематчит её сейчас.
+    """Если CMN.13010 пришла, но к моменту не было представления —
+    подхватываем «зависшие» ДО1 (без cargo) после привязки представления.
 
-    ДО1-сообщение знает ref_document_id, но связь с Cargo была невозможна
-    пока представление не появилось в БД с привязкой. После того как
-    представление matched → возвращаемся и подхватываем висящие ДО1.
+    Так как UUID-якоря нет, используем то же окно по времени что и
+    match_svh_do1, но в обратную сторону: ДО1 в окне `[prepared_at,
+    prepared_at + 4 часа]` после представления = вероятно той же
+    операции (см. комментарий match_svh_do1).
     """
-    doc_id = (presentation_msg.parsed_meta or {}).get('svh_document_id', '').strip()
-    if not doc_id:
+    from datetime import timedelta
+
+    if not presentation_msg.prepared_at:
         return
+
+    LOOKAHEAD = timedelta(hours=4)
+    window_end = presentation_msg.prepared_at + LOOKAHEAD
+
     pending = AltaInboxMessage.objects.filter(
-        msg_type='CMN.13010',
-        parsed_meta__svh_ref_document_id=doc_id,
+        msg_kind='svh_do1_registered',
         cargo__isnull=True,
-    )
+        prepared_at__gte=presentation_msg.prepared_at,
+        prepared_at__lte=window_end,
+    ).order_by('prepared_at')
     for do1 in pending:
+        # Защита: если в окне есть БОЛЕЕ ранее представление чем наше —
+        # тот ДО1 матчится туда, не сюда.
+        ahead = AltaInboxMessage.objects.filter(
+            msg_type='CMN.13029',
+            msg_kind='svh_placed',
+            prepared_at__gt=presentation_msg.prepared_at,
+            prepared_at__lte=do1.prepared_at,
+        ).exists()
+        if ahead:
+            continue
         do1.cargo = cargo
         do1.save(update_fields=['cargo'])
         apply_svh_do1(do1, cargo)
