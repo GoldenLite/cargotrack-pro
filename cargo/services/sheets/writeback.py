@@ -29,10 +29,11 @@ logger = logging.getLogger('cargo.sheets.writeback')
 
 # Имена наших колонок в шапке таблицы «Общее».
 # Порядок здесь = порядок добавления справа от существующих.
-CARGOTRACK_COL_HEADER         = 'CargoTrack: ДТ'
-CARGOTRACK_SVH_LICENSE_HEADER = 'CargoTrack: лицензия СВХ'
-CARGOTRACK_SVH_DATE_HEADER    = 'CargoTrack: дата ДО1'
-CARGOTRACK_SVH_DO1_HEADER     = 'CargoTrack: рег. номер ДО1'
+CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
+CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
+CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
+CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
+CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
 # данные представления вместо ДО1). Команда cleanup_svh_legacy_columns
@@ -352,6 +353,148 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                     time.sleep(wait)
                     continue
                 logger.exception('batch svh: batch_update failed: %s', e)
+                break
+
+    return total
+
+
+def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
+    """Пишет HouseWaybill.release_date в Sheets-колонку «CargoTrack: дата выпуска».
+
+    Per-HAWB writeback (формат дд.мм.гггг). Идемпотентна — если в ячейке
+    уже стоит ровно та же дата, ничего не пишет (Google биллит каждый write).
+    Никогда не падает — все Exception ловятся.
+    """
+    if not hawb.release_date:
+        return False
+
+    date_str = hawb.release_date.strftime('%d.%m.%Y')
+
+    found = _find_general_row(hawb)
+    if not found:
+        logger.info('release_date writeback skipped: HAWB %s has no row in general',
+                    hawb.hawb_number)
+        return False
+    source, row_index = found
+
+    backoff_steps = [2, 4, 8]
+    for attempt in range(len(backoff_steps) + 1):
+        try:
+            ws = open_worksheet(source)
+            col = _ensure_named_column(ws, source.header_row,
+                                       CARGOTRACK_RELEASE_DATE_HEADER)
+
+            current = (ws.cell(row_index, col).value or '').strip()
+            if current == date_str:
+                return False
+
+            ws.update_cell(row_index, col, date_str)
+            logger.info('Wrote release_date=%s into %s row=%d col=%d (HAWB %s)',
+                        date_str, source.name, row_index, col, hawb.hawb_number)
+            return True
+        except SheetsConfigError as e:
+            logger.warning('release_date writeback skipped (no creds): %s', e)
+            return False
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, 'status_code', None)
+            if status == 429 and attempt < len(backoff_steps):
+                wait = backoff_steps[attempt]
+                logger.warning('release_date writeback 429, retry in %ds', wait)
+                time.sleep(wait)
+                continue
+            logger.exception('release_date writeback APIError for HAWB %s',
+                             hawb.hawb_number)
+            return False
+        except Exception:
+            logger.exception('release_date writeback error for HAWB %s',
+                             hawb.hawb_number)
+            return False
+    return False
+
+
+def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
+    """Batch writeback дат выпуска — ОДИН проход по таблице на весь список.
+
+    Аналогично batch_write_svh_for_cargos: 1 col_values + 1 batch_update,
+    независимо от числа HAWB. Используется для бэкфилла (resync_release_dates).
+    """
+    if not hawbs:
+        return 0
+
+    by_hawb: dict[str, HouseWaybill] = {
+        h.hawb_number: h for h in hawbs if h.hawb_number and h.release_date
+    }
+    if not by_hawb:
+        return 0
+
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(by_hawb.keys()))
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    if not rows.exists():
+        logger.info('batch release_date: no Sheets rows for %d hawbs', len(by_hawb))
+        return 0
+
+    sources: dict[int, SheetSource] = {}
+    items_by_source: dict[int, list[tuple[int, HouseWaybill]]] = defaultdict(list)
+    seen: set[str] = set()
+    for r in rows:
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        h = by_hawb.get(r.hawb_number_norm)
+        if not h:
+            continue
+        sources[r.source_id] = r.source
+        items_by_source[r.source_id].append((r.source_row_index, h))
+
+    total = 0
+    for source_id, items in items_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = open_worksheet(source)
+            col = _ensure_named_column(ws, source.header_row,
+                                       CARGOTRACK_RELEASE_DATE_HEADER)
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('batch release_date: open/ensure failed: %s', e)
+            continue
+
+        try:
+            existing = ws.col_values(col)
+        except gspread.exceptions.APIError as e:
+            logger.exception('batch release_date: col_values failed: %s', e)
+            continue
+
+        letter = _col_letter(col)
+        updates = []
+        for row_idx, h in items:
+            date_str = h.release_date.strftime('%d.%m.%Y')
+            cur = (existing[row_idx - 1]
+                   if row_idx - 1 < len(existing) else '').strip()
+            if cur != date_str:
+                updates.append({'range': f'{letter}{row_idx}',
+                                'values': [[date_str]]})
+
+        if not updates:
+            continue
+
+        backoff_steps = [2, 4, 8, 16]
+        for attempt in range(len(backoff_steps) + 1):
+            try:
+                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                total += len(updates)
+                logger.info('batch release_date: wrote %d cells in %s',
+                            len(updates), source.name)
+                break
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status == 429 and attempt < len(backoff_steps):
+                    wait = backoff_steps[attempt]
+                    logger.warning('batch release_date 429, retry in %ds', wait)
+                    time.sleep(wait)
+                    continue
+                logger.exception('batch release_date: batch_update failed')
                 break
 
     return total

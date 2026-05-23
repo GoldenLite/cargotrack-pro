@@ -112,3 +112,25 @@ class CargoConfig(AppConfig):
                     import logging
                     logging.getLogger('cargo.sheets.writeback').exception('writeback thread crashed')
             threading.Thread(target=_run, daemon=True).start()
+
+        @receiver(post_save, sender=HouseWaybill, weak=False,
+                  dispatch_uid='hawb_release_date_writeback')
+        def hawb_release_date_writeback(sender, instance, created, update_fields, **kwargs):
+            """При установке/изменении release_date — пишем в Sheets «дата выпуска».
+
+            Фоновый поток (как customs_declaration_number writeback). Если save()
+            был с update_fields — фильтруем, чтобы не дёргать Sheets на каждый save.
+            """
+            if not instance.release_date:
+                return
+            if update_fields is not None and 'release_date' not in update_fields:
+                return
+            def _run():
+                try:
+                    from .services.sheets.writeback import write_release_date_for_hawb
+                    write_release_date_for_hawb(instance)
+                except Exception:
+                    import logging
+                    logging.getLogger('cargo.sheets.writeback').exception(
+                        'release_date writeback thread crashed')
+            threading.Thread(target=_run, daemon=True).start()
