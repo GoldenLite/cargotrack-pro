@@ -122,8 +122,9 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     if not (lic or placed_dt):
         return 0  # нечего писать
 
-    # Дата для Sheets — формат `2026-05-22` (можно потом локализовать)
-    placed_str = placed_dt.date().isoformat() if placed_dt else ''
+    # Дата для Sheets — русский формат дд.мм.гггг (как у сотрудников
+    # в остальных колонках таблицы «Общее»).
+    placed_str = placed_dt.strftime('%d.%m.%Y') if placed_dt else ''
 
     # Все HAWB партии
     hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
