@@ -326,9 +326,12 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         'result_code':        _xml_field(xml_text, 'ResultCode'),
         'result_description': _xml_field(xml_text, 'ResultDescription'),
     }
-    # CMN.13029 (WHDocInventory) — добавляет svh_* поля для интеграции со СВХ.
+    # CMN.13029 (WHDocInventory) — представление в таможню, MAWB + якорь UUID.
     if 'WHDocInventory' in xml_text or 'whdi:' in xml_text:
         out.update(_parse_svh_inventory(xml_text))
+    # CMN.13010 (DORegInfo) — регистрация ДО1, дата + рег.номер + RefDocumentID.
+    if 'DORegInfo' in xml_text or 'dori:' in xml_text:
+        out.update(_parse_svh_do1_reg(xml_text))
     return out
 
 
@@ -390,16 +393,63 @@ def _parse_svh_inventory(xml_text: str) -> dict:
             except ValueError:
                 rd_short = rd
             out['svh_presentation_reg_number'] = f'{cc}/{rd_short}/{gn}'
-        if rd:
-            # В реальных CMN.13029 нет DO1PresentDocumentDate — берём дату
-            # регистрации описи как дату размещения партии на СВХ.
-            out['svh_do1_present_date'] = rd
+        out['svh_presentation_date'] = rd
 
     iid = _xml_field(xml_text, 'InventoryInstanceDate')
     if iid:
         out['svh_inventory_instance_date'] = iid
-        if not out.get('svh_do1_present_date'):
-            out['svh_do1_present_date'] = iid
+
+    # Якорь связи с CMN.13010 (он положит ссылку в RefDocumentID).
+    doc_id = _xml_field(xml_text, 'DocumentID')
+    if doc_id:
+        out['svh_document_id'] = doc_id
+
+    return out
+
+
+# ─── CMN.13010 (Регистрация ДО1) ──
+_DOREG_INFO_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?DORegInfo\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?DORegInfo>',
+    re.S
+)
+_REGISTER_NUMBER_REPORT_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?RegisterNumberReport\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegisterNumberReport>',
+    re.S
+)
+
+
+def _parse_svh_do1_reg(xml_text: str) -> dict:
+    """CMN.13010 (DORegInfo) → svh_do1_* поля. Зеркалит xml_extract."""
+    out: dict = {}
+
+    lic = _WAREHOUSE_LICENSE_RE.search(xml_text)
+    if lic:
+        body = lic.group(1)
+        out['svh_warehouse_license']  = _xml_field(body, 'CertificateNumber')
+        out['svh_warehouse_lic_date'] = _xml_field(body, 'CertificateDate')
+        out['svh_warehouse_lic_kind'] = _xml_field(body, 'CertificateKind')
+
+    doreg = _DOREG_INFO_RE.search(xml_text)
+    if doreg:
+        body = doreg.group(1)
+        out['svh_do1_reg_date']    = _xml_field(body, 'RegDate')
+        out['svh_do1_reg_time']    = _xml_field(body, 'RegTime')
+        out['svh_do1_form_report'] = _xml_field(body, 'FormReport')
+        out['svh_ref_document_id'] = _xml_field(body, 'RefDocumentID')
+
+        rnr = _REGISTER_NUMBER_REPORT_RE.search(body)
+        if rnr:
+            rb = rnr.group(1)
+            cc = _xml_field(rb, 'CustomsCode')
+            rd = _xml_field(rb, 'RegistrationDate')
+            gn = _xml_field(rb, 'GTDNumber')
+            if cc and rd and gn:
+                try:
+                    y, m, d = rd.split('-')
+                    rd_short = f'{d}{m}{y[2:]}'
+                except ValueError:
+                    rd_short = rd
+                out['svh_do1_reg_number'] = f'{cc}/{rd_short}/{gn}'
 
     return out
 

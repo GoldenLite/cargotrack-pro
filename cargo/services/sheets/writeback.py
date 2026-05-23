@@ -31,8 +31,15 @@ logger = logging.getLogger('cargo.sheets.writeback')
 # Порядок здесь = порядок добавления справа от существующих.
 CARGOTRACK_COL_HEADER         = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER = 'CargoTrack: лицензия СВХ'
-CARGOTRACK_SVH_DATE_HEADER    = 'CargoTrack: дата размещения'
+CARGOTRACK_SVH_DATE_HEADER    = 'CargoTrack: дата ДО1'
 CARGOTRACK_SVH_DO1_HEADER     = 'CargoTrack: рег. номер ДО1'
+
+# Старые заголовки которые мы один раз использовали (содержание было неверным —
+# данные представления вместо ДО1). Команда cleanup_svh_legacy_columns
+# очищает их в Sheets, после чего сотрудник может удалить колонку руками.
+LEGACY_SVH_HEADERS = (
+    'CargoTrack: дата размещения',  # теперь = «дата ДО1»
+)
 
 # Кеш индекса колонки на процесс — {(worksheet_key, header): 1-based col_index}
 _col_index_cache: dict[tuple[str, str], int] = {}

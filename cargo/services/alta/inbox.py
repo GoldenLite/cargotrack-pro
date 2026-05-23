@@ -38,8 +38,11 @@ MSG_KIND_MAP: dict[str, str] = {
                                  # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify().
     'CMN.11314': 'info',         # Закрытие процедуры (DO1Close)
     'CMN.13021': 'info',         # DO1KeepLimits — лимит хранения / размещение на СВХ
-    'CMN.13029': 'svh_placed',   # WHDocInventory — полная опись СВХ с датой подачи ДО1
-                                 # и MAWB. Refine в classify() — отсекает чужие лицензии.
+    'CMN.13029': 'svh_placed',   # WHDocInventory — представление в таможню с MAWB.
+                                 # Якорь (DocumentID) — для связи с CMN.13010.
+    'CMN.13010': 'svh_do1_registered',  # DORegInfo — РЕАЛЬНАЯ регистрация ДО1.
+                                        # Дата размещения + рег.номер ДО1. Связь с партией
+                                        # через RefDocumentID → CMN.13029.DocumentID → Cargo.
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -83,11 +86,16 @@ def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
 
     # СВХ-ветка: refine на свою лицензию. Чужие склады отсекаем в info, чтобы
     # не загромождать UI и не пытаться матчить их MAWB к нашим Cargo.
-    if base == 'svh_placed':
+    if base in ('svh_placed', 'svh_do1_registered'):
         lic = (parsed_meta.get('svh_warehouse_license') or '').strip()
         if lic and lic != OUR_WAREHOUSE_LICENSE:
             return 'info'
-        return 'svh_placed'
+        # ДО2 (FormReport=2) тоже приходит как CMN.13010 — пока не интересует
+        if base == 'svh_do1_registered':
+            form = (parsed_meta.get('svh_do1_form_report') or '').strip()
+            if form and form != '1':
+                return 'info'
+        return base
 
     # 1. Design — самый точный код по конкретной ДТ (когда есть)
     dsn = (parsed_meta.get('design_code') or '').strip()
@@ -427,6 +435,33 @@ def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
     return Cargo.objects.filter(awb_number__iexact=mawb).first()
 
 
+def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[AltaInboxMessage]]:
+    """Match CMN.13010 (регистрация ДО1) → Cargo через цепочку:
+
+    CMN.13010.RefDocumentID → CMN.13029.parsed_meta['svh_document_id']
+                            → CMN.13029.cargo
+
+    Возвращает (cargo, представление-сообщение). Любое может быть None
+    если связь не сложилась (например представление пришло позже регистрации).
+    """
+    parsed = msg.parsed_meta or {}
+    ref = (parsed.get('svh_ref_document_id') or '').strip()
+    if not ref:
+        return (None, None)
+
+    # JSON-фильтр работает на Postgres и SQLite (Django 5+).
+    presentation = (
+        AltaInboxMessage.objects
+        .filter(msg_type='CMN.13029', parsed_meta__svh_document_id=ref)
+        .select_related('cargo')
+        .order_by('-received_at')
+        .first()
+    )
+    if presentation:
+        return (presentation.cargo, presentation)
+    return (None, None)
+
+
 def _writeback_svh_cargo(cargo: Cargo) -> None:
     """Лёгкий фон. Триггерит запись лицензии СВХ и даты размещения в Sheets.
 
@@ -446,24 +481,71 @@ def _writeback_svh_cargo(cargo: Cargo) -> None:
 
 
 def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
-    """Обработка размещения на СВХ.
+    """Обработка представления (CMN.13029).
 
-    1. Заполняет Cargo.warehouse_license если пусто (сотрудники могли уже
-       проставить вручную — не переписываем).
-    2. Заполняет Cargo.scan_into_bond если пусто, собирая datetime из
-       DO1PresentDocumentDate + DO1PresentDocumentTime.
-    3. Триггерит writeback в Sheets с двумя новыми колонками.
+    Заполняет ТОЛЬКО лицензию — дата размещения и рег.номер берутся
+    из CMN.13010 (apply_svh_do1), потому что представление != ДО1.
 
-    Возвращает None при успехе или строку с описанием ошибки.
+    Триггерит writeback (на случай если CMN.13010 для этой партии уже
+    лежит в БД и привязка прокатит — типичный кейс при rematch).
+    """
+    parsed = msg.parsed_meta or {}
+    license_ = (parsed.get('svh_warehouse_license') or '').strip()
+
+    if license_ and not (cargo.warehouse_license or '').strip():
+        cargo.warehouse_license = license_
+        cargo.save(update_fields=['warehouse_license'])
+
+    # Если CMN.13010 для этой партии уже пришла раньше (race), reparse её
+    # тоже — иначе она навечно зависнет UNMATCHED.
+    _backfill_do1_for_presentation(msg, cargo)
+
+    _writeback_svh_cargo(cargo)
+    return None
+
+
+def _backfill_do1_for_presentation(presentation_msg: AltaInboxMessage,
+                                   cargo: Cargo) -> None:
+    """Если CMN.13010 пришла РАНЬШЕ представления — рематчит её сейчас.
+
+    ДО1-сообщение знает ref_document_id, но связь с Cargo была невозможна
+    пока представление не появилось в БД с привязкой. После того как
+    представление matched → возвращаемся и подхватываем висящие ДО1.
+    """
+    doc_id = (presentation_msg.parsed_meta or {}).get('svh_document_id', '').strip()
+    if not doc_id:
+        return
+    pending = AltaInboxMessage.objects.filter(
+        msg_type='CMN.13010',
+        parsed_meta__svh_ref_document_id=doc_id,
+        cargo__isnull=True,
+    )
+    for do1 in pending:
+        do1.cargo = cargo
+        do1.save(update_fields=['cargo'])
+        apply_svh_do1(do1, cargo)
+
+
+def apply_svh_do1(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
+    """Обработка регистрации ДО1 (CMN.13010).
+
+    Заполняет Cargo:
+    - svh_do1_reg_number ← рег.номер ДО1 (например 10001020/230526/5012272)
+    - scan_into_bond ← дата+время регистрации ДО1
+    - warehouse_license ← если ещё пусто
+
+    Перезаписывает предыдущие значения (например, если представление
+    раньше проставило неверные данные). Триггерит writeback.
     """
     from datetime import datetime, time as dt_time
     from django.utils.dateparse import parse_date
+    from django.utils import timezone as tz
 
     parsed = msg.parsed_meta or {}
     license_ = (parsed.get('svh_warehouse_license') or '').strip()
-    do1_date = (parsed.get('svh_do1_present_date') or '').strip()
-    do1_time = (parsed.get('svh_do1_present_time') or '').strip()
-    do1_reg  = (parsed.get('svh_presentation_reg_number') or '').strip()
+    do1_date = (parsed.get('svh_do1_reg_date') or '').strip()
+    do1_time = (parsed.get('svh_do1_reg_time') or '').strip()
+    do1_reg  = (parsed.get('svh_do1_reg_number') or '').strip()
 
     update_fields = []
     if license_ and not (cargo.warehouse_license or '').strip():
@@ -471,15 +553,12 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
         update_fields.append('warehouse_license')
 
     if do1_reg and (cargo.svh_do1_reg_number or '').strip() != do1_reg:
-        # Рег.номер ДО1 может прийти раньше Cargo и наоборот, и переподача
-        # тоже возможна — перезаписываем последним значением.
         cargo.svh_do1_reg_number = do1_reg
         update_fields.append('svh_do1_reg_number')
 
-    if do1_date and not cargo.scan_into_bond:
+    if do1_date:
         d = parse_date(do1_date)
         if d:
-            # Время приходит '15:45:42.4135115' — берём только HH:MM:SS
             t = dt_time(0, 0)
             if do1_time:
                 try:
@@ -488,9 +567,13 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
                     t = dt_time(int(h), int(m), sec)
                 except (ValueError, IndexError):
                     pass
-            from django.utils import timezone as tz
-            cargo.scan_into_bond = tz.make_aware(datetime.combine(d, t))
-            update_fields.append('scan_into_bond')
+            new_dt = tz.make_aware(datetime.combine(d, t))
+            # Перезаписываем scan_into_bond — он мог быть выставлен по
+            # представлению (была дата представления, не ДО1). Реальная
+            # дата размещения — момент регистрации ДО1.
+            if cargo.scan_into_bond != new_dt:
+                cargo.scan_into_bond = new_dt
+                update_fields.append('scan_into_bond')
 
     if update_fields:
         cargo.save(update_fields=update_fields)
@@ -503,7 +586,7 @@ def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
 
-    # ── СВХ-ветка (CMN.13029, наша лицензия) ──
+    # ── СВХ-ветка: представление (CMN.13029) ──
     if msg.msg_kind == 'svh_placed':
         cargo = match_svh(msg)
         if cargo:
@@ -517,7 +600,27 @@ def dispatch(msg: AltaInboxMessage) -> None:
                 msg.status_applied = True
             msg.save(update_fields=['status_applied', 'parsed_meta'])
         else:
-            # Cargo не найдена — записываем для аудита, но без статуса
+            msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
+                                    'status_applied', 'parsed_meta'])
+        return
+
+    # ── СВХ-ветка: регистрация ДО1 (CMN.13010) ──
+    if msg.msg_kind == 'svh_do1_registered':
+        cargo, presentation = match_svh_do1(msg)
+        if cargo:
+            msg.cargo = cargo
+            msg.save(update_fields=['msg_kind', 'cargo', 'parsed_meta'])
+            err = apply_svh_do1(msg, cargo)
+            if err:
+                msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
+                msg.status_applied = False
+            else:
+                msg.status_applied = True
+            msg.save(update_fields=['status_applied', 'parsed_meta'])
+        else:
+            # Представление ещё не пришло (race) — оставляем висеть.
+            # Когда представление прибудет → _backfill_do1_for_presentation
+            # подхватит это сообщение.
             msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
                                     'status_applied', 'parsed_meta'])
         return

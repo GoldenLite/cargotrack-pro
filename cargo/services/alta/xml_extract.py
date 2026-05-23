@@ -99,11 +99,16 @@ def parse_raw_xml(xml_text: str) -> dict:
         'result_description': _first(xml_text, 'ResultDescription'),
     }
 
-    # CMN.13029 (Опись СВХ / WHDocInventory) — отдельная семантика, тянет MAWB
-    # и дату подачи ДО1. Парсится дополнительными полями, чтобы не загрязнять
-    # основной парсер ED-таможни.
+    # CMN.13029 (Опись СВХ / WHDocInventory) — представление в таможню,
+    # содержит MAWB и UUID документа (якорь для связи с CMN.13010).
     if 'WHDocInventory' in xml_text or 'whdi:' in xml_text:
         base.update(parse_svh_inventory(xml_text))
+
+    # CMN.13010 (Регистрация ДО1 / DORegInfo) — реальная регистрация ДО1
+    # на СВХ. Содержит дату и рег.номер ДО1, ссылается на представление
+    # через RefDocumentID → DocumentID CMN.13029.
+    if 'DORegInfo' in xml_text or 'dori:' in xml_text:
+        base.update(parse_svh_do1_reg(xml_text))
 
     return base
 
@@ -163,10 +168,11 @@ def normalize_mawb(raw: str) -> str:
 
 
 def parse_svh_inventory(xml_text: str) -> dict:
-    """Парсит CMN.13029 (WHDocInventory) → словарь полей для parsed_meta.
+    """Парсит CMN.13029 (WHDocInventory, представление в таможню) → parsed_meta.
 
-    Извлекает MAWB, лицензию СВХ, дату регистрации описи (= дата размещения)
-    и рег.номер представления.
+    Содержит: MAWB, лицензию СВХ, рег.номер ПРЕДСТАВЛЕНИЯ (не ДО1!) и
+    `svh_document_id` — UUID документа, используется как якорь для связи
+    с CMN.13010 (где он в RefDocumentID).
 
     Все поля префиксированы `svh_` чтобы не пересекаться с ED-парсером.
     """
@@ -190,7 +196,7 @@ def parse_svh_inventory(xml_text: str) -> dict:
         out['svh_pr_document_date'] = _first(body, 'PrDocumentDate')
         out['svh_pr_document_mode'] = _first(body, 'PresentedDocumentModeCode')
 
-    # RegNumberDoc: дата регистрации описи (= дата размещения) + рег.номер
+    # RegNumberDoc: рег.номер ПРЕДСТАВЛЕНИЯ (не ДО1!)
     reg = _REG_NUMBER_BLOCK_RE.search(xml_text)
     if reg:
         body = reg.group(1)
@@ -204,19 +210,97 @@ def parse_svh_inventory(xml_text: str) -> dict:
             except ValueError:
                 rd_short = rd
             out['svh_presentation_reg_number'] = f'{cc}/{rd_short}/{gn}'
-        out['svh_reg_customs_code']      = cc
-        out['svh_reg_registration_date'] = rd
-        out['svh_reg_gtd_number']        = gn
-        # Реального DO1PresentDocumentDate в CMN.13029 нет — используем дату
-        # регистрации описи как дату размещения партии на СВХ.
-        if rd:
-            out['svh_do1_present_date'] = rd
+        out['svh_presentation_date'] = rd
 
-    # Fallback на дату описи если RegNumberDoc пустой
     iid = _first(xml_text, 'InventoryInstanceDate')
     if iid:
         out['svh_inventory_instance_date'] = iid
-        if not out.get('svh_do1_present_date'):
-            out['svh_do1_present_date'] = iid
+
+    # Якорь связи: DocumentID представления = RefDocumentID в CMN.13010
+    doc_id = _first(xml_text, 'DocumentID')
+    if doc_id:
+        out['svh_document_id'] = doc_id
+
+    return out
+
+
+# ─── CMN.13010 (Регистрация ДО1) ──
+#
+# Структура (разобрано 2026-05-23 на дампе msg #4240):
+#
+#   <dori:DORegInfo>
+#     <cat_ru:DocumentID>3275d8d9-…</cat_ru:DocumentID>
+#     <cat_ru:RefDocumentID>15e627c1-…</cat_ru:RefDocumentID>      ← = CMN.13029.DocumentID
+#     <dori:RegDate>2026-05-23</dori:RegDate>                       ← ДАТА РЕГИСТРАЦИИ ДО1
+#     <dori:RegTime>13:47:40.0991297</dori:RegTime>
+#     <dori:FormReport>1</dori:FormReport>                           ← 1=ДО1, 2=ДО2
+#     <dori:RegisterNumberReport>
+#       <cat_ru:CustomsCode>10001020</cat_ru:CustomsCode>
+#       <cat_ru:RegistrationDate>2026-05-23</cat_ru:RegistrationDate>
+#       <cat_ru:GTDNumber>5012272</cat_ru:GTDNumber>                 ← РЕГ.НОМЕР ДО1
+#     </dori:RegisterNumberReport>
+#   </dori:DORegInfo>
+#   <kl:DO1KeepLimits>
+#     <kl:WarehouseOwner>
+#       <catWH_ru:WarehouseLicense>
+#         <catWH_ru:CertificateNumber>10001/060324/10009/1</…>       ← лицензия (фильтр!)
+#       </catWH_ru:WarehouseLicense>
+#     </kl:WarehouseOwner>
+#     <!-- DO1GoodKeepingLimit × N — лимиты хранения товаров, нам не нужно -->
+#   </kl:DO1KeepLimits>
+
+_DOREG_INFO_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?DORegInfo\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?DORegInfo>',
+    re.S
+)
+_REGISTER_NUMBER_REPORT_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?RegisterNumberReport\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegisterNumberReport>',
+    re.S
+)
+
+
+def parse_svh_do1_reg(xml_text: str) -> dict:
+    """Парсит CMN.13010 (DORegInfo, регистрация ДО1) → parsed_meta.
+
+    Извлекает дату и рег.номер ДО1, форму отчёта (1=ДО1, 2=ДО2),
+    ссылку на представление (`svh_ref_document_id` = CMN.13029.DocumentID).
+
+    Лицензия — из вложенного блока WarehouseLicense (уже выкусит
+    parse_svh_inventory если он сработал; но здесь WarehouseLicense
+    лежит в DO1KeepLimits, не WHDocInventory — отдельно вызываем).
+    """
+    out: dict = {}
+
+    # Лицензия СВХ (внутри DO1KeepLimits/WarehouseOwner/WarehouseLicense)
+    lic_block = _WAREHOUSE_LICENSE_BLOCK_RE.search(xml_text)
+    if lic_block:
+        body = lic_block.group(1)
+        out['svh_warehouse_license']  = _first(body, 'CertificateNumber')
+        out['svh_warehouse_lic_date'] = _first(body, 'CertificateDate')
+        out['svh_warehouse_lic_kind'] = _first(body, 'CertificateKind')
+
+    # DORegInfo: основные данные регистрации ДО1
+    doreg = _DOREG_INFO_BLOCK_RE.search(xml_text)
+    if doreg:
+        body = doreg.group(1)
+        out['svh_do1_reg_date']    = _first(body, 'RegDate')
+        out['svh_do1_reg_time']    = _first(body, 'RegTime')
+        out['svh_do1_form_report'] = _first(body, 'FormReport')
+        out['svh_ref_document_id'] = _first(body, 'RefDocumentID')
+
+        # RegisterNumberReport: рег.номер ДО1
+        rnr = _REGISTER_NUMBER_REPORT_RE.search(body)
+        if rnr:
+            rb = rnr.group(1)
+            cc = _first(rb, 'CustomsCode')
+            rd = _first(rb, 'RegistrationDate')
+            gn = _first(rb, 'GTDNumber')
+            if cc and rd and gn:
+                try:
+                    y, m, d = rd.split('-')
+                    rd_short = f'{d}{m}{y[2:]}'
+                except ValueError:
+                    rd_short = rd
+                out['svh_do1_reg_number'] = f'{cc}/{rd_short}/{gn}'
 
     return out

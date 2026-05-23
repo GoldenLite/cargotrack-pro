@@ -1858,20 +1858,21 @@ class AltaInboxMessage(models.Model):
     inbox_loop в alta_agent.py, шлёт POST /api/v1/alta/inbox/ на VPS.
     """
     KIND_CHOICES = [
-        ('registered',  'Регистрация ДТ'),
-        ('released',    'Выпуск ДТ'),
-        ('rejected',    'Отказ в выпуске'),
-        ('withdrawn',   'Отзыв декларации'),
-        ('examination', 'Досмотр / запрос'),
-        ('hold',        'Требование / арест'),
-        ('svh_placed',  'Размещение на СВХ (ДО1)'),
-        ('info',        'Информационное'),
+        ('registered',         'Регистрация ДТ'),
+        ('released',           'Выпуск ДТ'),
+        ('rejected',           'Отказ в выпуске'),
+        ('withdrawn',          'Отзыв декларации'),
+        ('examination',        'Досмотр / запрос'),
+        ('hold',               'Требование / арест'),
+        ('svh_placed',         'Представление СВХ (CMN.13029)'),
+        ('svh_do1_registered', 'Регистрация ДО1 (CMN.13010)'),
+        ('info',               'Информационное'),
     ]
 
     envelope_id = models.CharField('Envelope ID (Альта)', max_length=64,
                                    unique=True, db_index=True)
     msg_type    = models.CharField('MessageType (ED.xxx)', max_length=32, db_index=True)
-    msg_kind    = models.CharField('Semantic kind', max_length=16,
+    msg_kind    = models.CharField('Semantic kind', max_length=24,
                                    choices=KIND_CHOICES, default='info', db_index=True)
 
     waybill_number_raw = models.CharField('WayBillNumber из XML',
