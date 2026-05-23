@@ -2010,6 +2010,7 @@ class ImportedSheetRow(models.Model):
         ('conflict',  'Несколько кандидатов'),
         ('ambiguous', 'Нет ключа для матчинга'),
         ('promoted',  'Промоутнуто в HAWB'),
+        ('duplicate', 'Дубль в Sheets (другая строка победила)'),
         ('ignored',   'Исключено вручную'),
     ]
 

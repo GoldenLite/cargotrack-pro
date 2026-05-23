@@ -35,6 +35,35 @@ class CargoConfig(AppConfig):
             if created:
                 workflow_runner.start_for_entity(instance, 'cargo')
 
+        @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_svh_backfill')
+        def cargo_svh_backfill(sender, instance, created, **kwargs):
+            """При создании Cargo подхватываем висящие CMN.13029/CMN.13010.
+
+            Сценарий: представление от таможни пришло до того как партия
+            заведена в CargoTrack (через promote из Sheets или вручную).
+            CMN.13029 в этот момент сохранился без cargo (match_svh не нашёл
+            Cargo с этим MAWB). После создания Cargo → пере-dispatch висящих
+            представлений → backfill ДО1 автоматически.
+            """
+            if not created:
+                return
+            def _run():
+                try:
+                    from .models import AltaInboxMessage
+                    from .services.alta.inbox import dispatch
+                    pending = AltaInboxMessage.objects.filter(
+                        msg_kind='svh_placed',
+                        cargo__isnull=True,
+                        parsed_meta__svh_mawb=instance.awb_number,
+                    )
+                    for msg in pending:
+                        dispatch(msg)
+                except Exception:
+                    import logging
+                    logging.getLogger('cargo.alta.inbox').exception(
+                        'cargo_svh_backfill failed for %s', instance.pk)
+            threading.Thread(target=_run, daemon=True).start()
+
         @receiver(post_save, sender=HouseWaybill, weak=False, dispatch_uid='hawb_created_workflow')
         def hawb_created(sender, instance, created, **kwargs):
             if created:
