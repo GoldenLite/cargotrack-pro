@@ -359,12 +359,26 @@ def apply_status(msg: AltaInboxMessage,
         if not targets:
             return f'В партии {cargo.awb_number} нет HAWB в таможне'
 
+    # Pre-customs logistics states: HAWB ещё не дошёл до таможни в нашей логике.
+    # Если CMN-выпуск приходит на такой HAWB — авто-бампим в IMPORT/EXPORT_CUSTOMS
+    # перед change_customs_status, чтобы тот авто-перевёл в READY_DELIVERY
+    # (импорт) или IN_TRANSIT_EXP (экспорт). Post-customs состояния
+    # (READY_DELIVERY и далее) и нештатные (RETURNED/LOST) не трогаем.
+    PRE_CUSTOMS = (
+        'CREATED', 'TO_ORIGIN_WH', 'AT_ORIGIN_WH', 'CONSOLIDATED', 'READY_TO_SHIP',
+        'IN_TRANSIT_EXP', 'ARRIVED_DEST', 'AT_SVH',
+    )
+
     errors = []
     applied = 0
     for h in targets:
-        if h.logistics_status not in ('EXPORT_CUSTOMS', 'IMPORT_CUSTOMS'):
-            errors.append(f'HAWB {h.hawb_number} не в таможне ({h.logistics_status})')
-            continue
+        # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
+        # в IMPORT_CUSTOMS в нашей БД» — потому что декларация может подаваться
+        # через Альту, минуя CargoTrack-workflow.
+        if new_status == 'RELEASED' and h.logistics_status in PRE_CUSTOMS:
+            is_export = (h.shipment_type or 'IMPORT').upper() == 'EXPORT'
+            h.logistics_status = 'EXPORT_CUSTOMS' if is_export else 'IMPORT_CUSTOMS'
+            h.logistics_status_date = timezone.now()
         try:
             err = h.change_customs_status(new_status, user=None)
             if err:
