@@ -285,6 +285,23 @@ def recompute_declaration(cargo: Optional[Cargo],
             return []
         HouseWaybill.objects.filter(pk=hawb.pk).update(
             customs_declaration_number=target_decl)
+
+        # filed_date: дата подачи декларации = дата регистрации в таможне
+        # (parsed_meta['registration_date'] из CMN-релиза). Ставим ОДИН раз
+        # на пустое поле, через прямой UPDATE (минуя save()-автоочистки).
+        # Writeback в Sheets отдельно — потому что direct UPDATE не дёргает
+        # post_save сигнал.
+        if target_decl:
+            reg_date_str = (latest.parsed_meta or {}).get('registration_date') or ''
+            if reg_date_str:
+                from django.utils.dateparse import parse_date
+                from datetime import datetime as _dt, time as _dt_time
+                d = parse_date(reg_date_str)
+                if d:
+                    filed_dt = timezone.make_aware(_dt.combine(d, _dt_time(0, 0)))
+                    HouseWaybill.objects.filter(
+                        pk=hawb.pk, filed_date__isnull=True
+                    ).update(filed_date=filed_dt)
     return [hawb]
 
 
@@ -292,10 +309,13 @@ def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
     if not hawbs:
         return
     try:
-        from cargo.services.sheets.writeback import write_declaration
+        from cargo.services.sheets.writeback import (
+            write_declaration, write_filed_date_for_hawb,
+        )
         for h in hawbs:
-            h.refresh_from_db(fields=['customs_declaration_number'])
+            h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
             write_declaration(h)
+            write_filed_date_for_hawb(h)
     except Exception:
         logger.exception('sheets writeback after declaration write failed')
 
@@ -474,16 +494,21 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
     UUID-связи нет: RefDocumentID в ДО1 указывает на локальный документ
     Альта-СВХ («регистрация груза»), который мы не наблюдаем — этот
     промежуточный документ существует только внутри их софта.
+    InitialEnvelopeID в обеих ED-цепочках — это наши собственные outbound
+    envelope (CMN.13009 vs CMN.13029), разные UUID, тоже не помогают.
 
     Эвристика: для нашей лицензии в одной операции цепочка
         представление (CMN.13029)
-            ↓ ~секунды-минуты
+            ↓ часы / иногда сутки
         регистрация груза (внутри Альта-СВХ)
-            ↓ ~минуты-час
+            ↓
         ДО1 (CMN.13010)
-    Представление всегда строго раньше ДО1. Окно поиска — `LOOKBACK`.
-    Если в окне несколько представлений — берём ближайшее по времени
-    (= скорее всего из той же операции).
+    Представление всегда строго раньше ДО1. Окно — `LOOKBACK` (7 дней,
+    с запасом под выходные между подачей представления и ДО1).
+
+    Чтобы не привязать ОДНО представление к двум ДО1 — исключаем
+    представления, у которых cargo уже имеет svh_do1_reg_number.
+    «Ближайшее по времени» из оставшихся — наш кандидат.
 
     Возвращает (cargo, представление-сообщение).
     """
@@ -492,7 +517,7 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
     if not msg.prepared_at:
         return (None, None)
 
-    LOOKBACK = timedelta(hours=4)
+    LOOKBACK = timedelta(days=7)
     window_start = msg.prepared_at - LOOKBACK
 
     presentations = (
@@ -504,6 +529,7 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
             prepared_at__lte=msg.prepared_at,
         )
         .exclude(cargo=None)
+        .exclude(cargo__svh_do1_reg_number__gt='')  # уже привязан к другому ДО1
         .select_related('cargo')
         .order_by('-prepared_at')  # ближайшее раньше = первое
     )
