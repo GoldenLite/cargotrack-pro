@@ -359,6 +359,25 @@ def apply_status(msg: AltaInboxMessage,
         if not targets:
             return f'В партии {cargo.awb_number} нет HAWB в таможне'
 
+    # Multi-waybill release: одна ДТ покрывает несколько HAWB партии.
+    # recompute_declaration выше уже проставил decl_number всем подходящим
+    # HAWB через raw_xml__icontains. Теперь расширяем targets всеми HAWB
+    # партии с этим же decl_number, чтобы release_date проставился по каждой,
+    # а не только по той одной, которую вернул match().
+    if cargo and kind in ('released', 'rejected', 'examination', 'hold'):
+        decl = ''
+        if targets:
+            decl = (targets[0].customs_declaration_number or '').strip()
+        if decl:
+            existing_ids = {h.pk for h in targets}
+            extra = list(
+                cargo.hawbs
+                .filter(customs_declaration_number=decl)
+                .exclude(pk__in=existing_ids)
+            )
+            if extra:
+                targets.extend(extra)
+
     # Pre-customs logistics states: HAWB ещё не дошёл до таможни в нашей логике.
     # Если CMN-выпуск приходит на такой HAWB — авто-бампим в IMPORT/EXPORT_CUSTOMS
     # перед change_customs_status, чтобы тот авто-перевёл в READY_DELIVERY
