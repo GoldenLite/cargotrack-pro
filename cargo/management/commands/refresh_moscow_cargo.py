@@ -72,6 +72,7 @@ class Command(BaseCommand):
         n_applied = 0
         n_empty = 0
         n_error = 0
+        applied_cargos: list = []
         with MoscowCargoClient() as client:
             for i, cargo in enumerate(cargos, 1):
                 try:
@@ -86,8 +87,11 @@ class Command(BaseCommand):
                     n_empty += 1
                 else:
                     n_found += 1
-                    if apply_to_cargo(cargo, parsed):
+                    # writeback=False — собираем applied и делаем batch ниже,
+                    # иначе на 100+ партий упираемся в Google API 300 read/min.
+                    if apply_to_cargo(cargo, parsed, writeback=False):
                         n_applied += 1
+                        applied_cargos.append(cargo)
                         self.stdout.write(self.style.SUCCESS(
                             f'  {cargo.awb_number}: {parsed["reg_number"]} '
                             f'({parsed["do1_date"]})'
@@ -103,6 +107,23 @@ class Command(BaseCommand):
                     time.sleep(opts['throttle'])
 
         self.stdout.write(self.style.SUCCESS(
-            f'Done. processed={len(cargos)} found={n_found} applied={n_applied} '
-            f'no_do1_yet={n_empty} errors={n_error}'
+            f'BD update done. processed={len(cargos)} found={n_found} '
+            f'applied={n_applied} no_do1_yet={n_empty} errors={n_error}'
         ))
+
+        if not applied_cargos:
+            return
+
+        # Batch Sheets writeback — ОДИН проход по таблице на все изменённые
+        # партии: 3 col_values + 1 batch_update = всего 4 API-вызова,
+        # независимо от количества партий. Без этого упираемся в Google API
+        # лимит 300 read/min уже на 100+ партиях.
+        self.stdout.write(f'\nSheets writeback для {len(applied_cargos)} партий...')
+        from cargo.services.sheets.writeback import batch_write_svh_for_cargos
+        try:
+            cells = batch_write_svh_for_cargos(applied_cargos)
+            self.stdout.write(self.style.SUCCESS(
+                f'Sheets done. cells_written={cells}'
+            ))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f'Sheets writeback failed: {e}'))

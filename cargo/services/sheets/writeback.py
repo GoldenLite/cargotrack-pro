@@ -239,6 +239,124 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     return total_writes
 
 
+def batch_write_svh_for_cargos(cargos: list) -> int:
+    """Batch-writeback СВХ-полей для списка партий — ОДИН проход по Sheets.
+
+    Per-cargo `write_svh_placement_for_cargo` делает по 3 read'а на колонку,
+    что упирается в Google quota 300 read/min уже на 100 партиях. Эта функция
+    читает каждую из трёх колонок ОДИН раз для всей таблицы и собирает
+    единый batch_update.
+
+    Возвращает кол-во записанных ячеек.
+    """
+    if not cargos:
+        return 0
+
+    # Собираем все HAWB в одну выборку с привязкой к Cargo
+    hawb_to_cargo: dict[str, Cargo] = {}
+    for c in cargos:
+        for hn in c.hawbs.values_list('hawb_number', flat=True):
+            hawb_to_cargo[hn] = c
+    if not hawb_to_cargo:
+        return 0
+
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(hawb_to_cargo.keys()))
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    if not rows.exists():
+        logger.info('batch svh: no Sheets rows for %d cargos', len(cargos))
+        return 0
+
+    # Группируем по source, дедупим по HAWB
+    sources: dict[int, SheetSource] = {}
+    rows_by_source: dict[int, list[tuple[int, Cargo]]] = defaultdict(list)
+    seen: set[str] = set()
+    for r in rows:
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        cargo = hawb_to_cargo.get(r.hawb_number_norm)
+        if not cargo:
+            continue
+        sources[r.source_id] = r.source
+        rows_by_source[r.source_id].append((r.source_row_index, cargo))
+
+    total = 0
+    for source_id, items in rows_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = open_worksheet(source)
+            col_lic  = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_LICENSE_HEADER)
+            col_date = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_DATE_HEADER)
+            col_do1  = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_DO1_HEADER)
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('batch svh: open/ensure failed: %s', e)
+            continue
+
+        # Читаем три колонки ОДИН РАЗ для всей таблицы
+        try:
+            existing_lic  = ws.col_values(col_lic)
+            existing_date = ws.col_values(col_date)
+            existing_do1  = ws.col_values(col_do1)
+        except gspread.exceptions.APIError as e:
+            logger.exception('batch svh: col_values failed: %s', e)
+            continue
+
+        letter_lic  = _col_letter(col_lic)
+        letter_date = _col_letter(col_date)
+        letter_do1  = _col_letter(col_do1)
+
+        updates = []
+        for row_idx, cargo in items:
+            lic = (cargo.warehouse_license or '').strip()
+            placed_str = (cargo.scan_into_bond.strftime('%d.%m.%Y')
+                          if cargo.scan_into_bond else '')
+            do1_reg = (cargo.svh_do1_reg_number or '').strip()
+
+            cur_lic = (existing_lic[row_idx - 1]
+                       if row_idx - 1 < len(existing_lic) else '').strip()
+            cur_date = (existing_date[row_idx - 1]
+                        if row_idx - 1 < len(existing_date) else '').strip()
+            cur_do1 = (existing_do1[row_idx - 1]
+                       if row_idx - 1 < len(existing_do1) else '').strip()
+
+            if lic and cur_lic != lic:
+                updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
+            if placed_str and cur_date != placed_str:
+                updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
+            if do1_reg and cur_do1 != do1_reg:
+                updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
+
+        if not updates:
+            continue
+
+        # Один batch на всю выборку (Google допускает ~10k ячеек за раз)
+        backoff_steps = [2, 4, 8, 16]
+        for attempt in range(len(backoff_steps) + 1):
+            try:
+                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                total += len(updates)
+                logger.info('batch svh: wrote %d cells in %s',
+                            len(updates), source.name)
+                break
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status == 429 and attempt < len(backoff_steps):
+                    wait = backoff_steps[attempt]
+                    logger.warning('batch svh 429, retry in %ds', wait)
+                    time.sleep(wait)
+                    continue
+                logger.exception('batch svh: batch_update failed: %s', e)
+                break
+
+    return total
+
+
 def write_declaration(hawb: HouseWaybill) -> bool:
     """Записывает hawb.customs_declaration_number в Sheets-колонку «CargoTrack: ДТ».
 

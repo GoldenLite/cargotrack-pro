@@ -58,11 +58,15 @@ def _save_with_retry(cargo: Cargo, fields: list[str], attempts: int = 5) -> None
             delay *= 2
 
 
-def apply_to_cargo(cargo: Cargo, parsed: dict) -> bool:
+def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> bool:
     """Заполняет пустые СВХ-поля Cargo из parsed-данных moscow-cargo.
 
-    Возвращает True если что-то реально записали (тогда писать в Sheets имеет
-    смысл).
+    Возвращает True если что-то реально записали.
+
+    Параметр `writeback=False` используется батч-сценариями (например
+    refresh_moscow_cargo) — там Sheets API ограничен 300 read/min, поэтому
+    дешевле собрать ВСЕ изменённые Cargo и сделать один общий resync,
+    чем делать per-cargo writeback (=~ 4 API-вызова на штуку).
     """
     import threading
     from datetime import datetime, time as dt_time
@@ -98,9 +102,11 @@ def apply_to_cargo(cargo: Cargo, parsed: dict) -> bool:
     _save_with_retry(cargo, updated)
     logger.info('moscow-cargo applied to %s: %s', cargo.awb_number, updated)
 
-    # Writeback в Sheets — в фоновом потоке, чтобы основной процесс не держал
-    # SQLite-сессию пока Google API отвечает (2-5 секунд) и не блокировал
-    # параллельный import_sheets/agent inbox.
+    if not writeback:
+        return True
+
+    # Single-cargo сценарий (signal post_save, fetch_moscow_cargo --apply) —
+    # writeback в фоновом потоке.
     def _bg_writeback():
         try:
             from cargo.services.sheets.writeback import write_svh_placement_for_cargo
