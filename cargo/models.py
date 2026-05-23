@@ -788,6 +788,7 @@ class HouseWaybill(models.Model):
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True)
+    filed_date   = models.DateTimeField('Дата подачи', null=True, blank=True)
     release_date = models.DateTimeField('Дата выпуска', null=True, blank=True)
 
     # ── Документы для таможенного оформления ──
@@ -966,6 +967,9 @@ class HouseWaybill(models.Model):
         self.customs_status = new_status
         self.customs_status_date = timezone.now()
         self.last_status_change = timezone.now()
+
+        if new_status == 'FILED':
+            self.filed_date = self.filed_date or timezone.now()
 
         if new_status == 'RELEASED':
             self.release_date = self.release_date or timezone.now()

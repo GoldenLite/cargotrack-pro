@@ -33,6 +33,7 @@ CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
+CARGOTRACK_FILED_DATE_HEADER   = 'CargoTrack: дата подачи'
 CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
@@ -358,22 +359,23 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
     return total
 
 
-def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
-    """Пишет HouseWaybill.release_date в Sheets-колонку «CargoTrack: дата выпуска».
+def _write_hawb_date(hawb: HouseWaybill, value, header_name: str,
+                     log_label: str) -> bool:
+    """Generic per-HAWB date writeback в указанную CargoTrack-колонку.
 
-    Per-HAWB writeback (формат дд.мм.гггг). Идемпотентна — если в ячейке
-    уже стоит ровно та же дата, ничего не пишет (Google биллит каждый write).
-    Никогда не падает — все Exception ловятся.
+    Используется для filed_date и release_date — логика одинаковая, отличается
+    только источник значения (поле HAWB) и имя колонки. value — datetime или None.
+    Формат дд.мм.гггг, идемпотент, ловит все исключения.
     """
-    if not hawb.release_date:
+    if not value:
         return False
 
-    date_str = hawb.release_date.strftime('%d.%m.%Y')
+    date_str = value.strftime('%d.%m.%Y')
 
     found = _find_general_row(hawb)
     if not found:
-        logger.info('release_date writeback skipped: HAWB %s has no row in general',
-                    hawb.hawb_number)
+        logger.info('%s writeback skipped: HAWB %s has no row in general',
+                    log_label, hawb.hawb_number)
         return False
     source, row_index = found
 
@@ -381,48 +383,63 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
     for attempt in range(len(backoff_steps) + 1):
         try:
             ws = open_worksheet(source)
-            col = _ensure_named_column(ws, source.header_row,
-                                       CARGOTRACK_RELEASE_DATE_HEADER)
+            col = _ensure_named_column(ws, source.header_row, header_name)
 
             current = (ws.cell(row_index, col).value or '').strip()
             if current == date_str:
                 return False
 
             ws.update_cell(row_index, col, date_str)
-            logger.info('Wrote release_date=%s into %s row=%d col=%d (HAWB %s)',
-                        date_str, source.name, row_index, col, hawb.hawb_number)
+            logger.info('Wrote %s=%s into %s row=%d col=%d (HAWB %s)',
+                        log_label, date_str, source.name, row_index, col,
+                        hawb.hawb_number)
             return True
         except SheetsConfigError as e:
-            logger.warning('release_date writeback skipped (no creds): %s', e)
+            logger.warning('%s writeback skipped (no creds): %s', log_label, e)
             return False
         except gspread.exceptions.APIError as e:
             status = getattr(e.response, 'status_code', None)
             if status == 429 and attempt < len(backoff_steps):
                 wait = backoff_steps[attempt]
-                logger.warning('release_date writeback 429, retry in %ds', wait)
+                logger.warning('%s writeback 429, retry in %ds', log_label, wait)
                 time.sleep(wait)
                 continue
-            logger.exception('release_date writeback APIError for HAWB %s',
-                             hawb.hawb_number)
+            logger.exception('%s writeback APIError for HAWB %s',
+                             log_label, hawb.hawb_number)
             return False
         except Exception:
-            logger.exception('release_date writeback error for HAWB %s',
-                             hawb.hawb_number)
+            logger.exception('%s writeback error for HAWB %s',
+                             log_label, hawb.hawb_number)
             return False
     return False
 
 
-def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
-    """Batch writeback дат выпуска — ОДИН проход по таблице на весь список.
+def write_filed_date_for_hawb(hawb: HouseWaybill) -> bool:
+    """Пишет HouseWaybill.filed_date в Sheets-колонку «CargoTrack: дата подачи»."""
+    return _write_hawb_date(hawb, hawb.filed_date,
+                            CARGOTRACK_FILED_DATE_HEADER, 'filed_date')
 
-    Аналогично batch_write_svh_for_cargos: 1 col_values + 1 batch_update,
-    независимо от числа HAWB. Используется для бэкфилла (resync_release_dates).
+
+def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
+    """Пишет HouseWaybill.release_date в Sheets-колонку «CargoTrack: дата выпуска»."""
+    return _write_hawb_date(hawb, hawb.release_date,
+                            CARGOTRACK_RELEASE_DATE_HEADER, 'release_date')
+
+
+def _batch_write_hawb_dates(hawbs: list, value_attr: str,
+                            header_name: str, log_label: str) -> int:
+    """Generic batch writeback per-HAWB даты — 1 col_values + 1 batch_update.
+
+    Используется и для filed_date, и для release_date. value_attr — имя
+    атрибута HAWB-объекта (например 'filed_date'), header_name — колонка в
+    Sheets, log_label — префикс для логов.
     """
     if not hawbs:
         return 0
 
     by_hawb: dict[str, HouseWaybill] = {
-        h.hawb_number: h for h in hawbs if h.hawb_number and h.release_date
+        h.hawb_number: h for h in hawbs
+        if h.hawb_number and getattr(h, value_attr)
     }
     if not by_hawb:
         return 0
@@ -433,7 +450,7 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
             .select_related('source')
             .order_by('-last_imported_at'))
     if not rows.exists():
-        logger.info('batch release_date: no Sheets rows for %d hawbs', len(by_hawb))
+        logger.info('batch %s: no Sheets rows for %d hawbs', log_label, len(by_hawb))
         return 0
 
     sources: dict[int, SheetSource] = {}
@@ -454,22 +471,22 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
         source = sources[source_id]
         try:
             ws = open_worksheet(source)
-            col = _ensure_named_column(ws, source.header_row,
-                                       CARGOTRACK_RELEASE_DATE_HEADER)
+            col = _ensure_named_column(ws, source.header_row, header_name)
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
-            logger.exception('batch release_date: open/ensure failed: %s', e)
+            logger.exception('batch %s: open/ensure failed: %s', log_label, e)
             continue
 
         try:
             existing = ws.col_values(col)
         except gspread.exceptions.APIError as e:
-            logger.exception('batch release_date: col_values failed: %s', e)
+            logger.exception('batch %s: col_values failed: %s', log_label, e)
             continue
 
         letter = _col_letter(col)
         updates = []
         for row_idx, h in items:
-            date_str = h.release_date.strftime('%d.%m.%Y')
+            value = getattr(h, value_attr)
+            date_str = value.strftime('%d.%m.%Y')
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
             if cur != date_str:
@@ -484,20 +501,32 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
             try:
                 ws.batch_update(updates, value_input_option='USER_ENTERED')
                 total += len(updates)
-                logger.info('batch release_date: wrote %d cells in %s',
-                            len(updates), source.name)
+                logger.info('batch %s: wrote %d cells in %s',
+                            log_label, len(updates), source.name)
                 break
             except gspread.exceptions.APIError as e:
                 status = getattr(e.response, 'status_code', None)
                 if status == 429 and attempt < len(backoff_steps):
                     wait = backoff_steps[attempt]
-                    logger.warning('batch release_date 429, retry in %ds', wait)
+                    logger.warning('batch %s 429, retry in %ds', log_label, wait)
                     time.sleep(wait)
                     continue
-                logger.exception('batch release_date: batch_update failed')
+                logger.exception('batch %s: batch_update failed', log_label)
                 break
 
     return total
+
+
+def batch_write_filed_dates_for_hawbs(hawbs: list) -> int:
+    """Batch writeback filed_date — для resync_filed_dates."""
+    return _batch_write_hawb_dates(hawbs, 'filed_date',
+                                   CARGOTRACK_FILED_DATE_HEADER, 'filed_date')
+
+
+def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
+    """Batch writeback release_date — для resync_release_dates."""
+    return _batch_write_hawb_dates(hawbs, 'release_date',
+                                   CARGOTRACK_RELEASE_DATE_HEADER, 'release_date')
 
 
 def write_declaration(hawb: HouseWaybill) -> bool:

@@ -114,6 +114,24 @@ class CargoConfig(AppConfig):
             threading.Thread(target=_run, daemon=True).start()
 
         @receiver(post_save, sender=HouseWaybill, weak=False,
+                  dispatch_uid='hawb_filed_date_writeback')
+        def hawb_filed_date_writeback(sender, instance, created, update_fields, **kwargs):
+            """При установке/изменении filed_date — пишем в Sheets «дата подачи»."""
+            if not instance.filed_date:
+                return
+            if update_fields is not None and 'filed_date' not in update_fields:
+                return
+            def _run():
+                try:
+                    from .services.sheets.writeback import write_filed_date_for_hawb
+                    write_filed_date_for_hawb(instance)
+                except Exception:
+                    import logging
+                    logging.getLogger('cargo.sheets.writeback').exception(
+                        'filed_date writeback thread crashed')
+            threading.Thread(target=_run, daemon=True).start()
+
+        @receiver(post_save, sender=HouseWaybill, weak=False,
                   dispatch_uid='hawb_release_date_writeback')
         def hawb_release_date_writeback(sender, instance, created, update_fields, **kwargs):
             """При установке/изменении release_date — пишем в Sheets «дата выпуска».
