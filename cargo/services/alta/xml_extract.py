@@ -79,7 +79,7 @@ def parse_raw_xml(xml_text: str) -> dict:
     плюс выбирает «правильную» ДТ при наличии нескольких упоминаний (КДТ).
     """
     cc, rd, gn = _pick_effective_decl(xml_text)
-    return {
+    base = {
         'envelope_id':        _first(xml_text, 'EnvelopeID'),
         'initial_envelope':   _first(xml_text, 'InitialEnvelopeID'),
         'msg_type':           _first(xml_text, 'MessageType'),
@@ -98,3 +98,109 @@ def parse_raw_xml(xml_text: str) -> dict:
         'result_code':        _first(xml_text, 'ResultCode'),
         'result_description': _first(xml_text, 'ResultDescription'),
     }
+
+    # CMN.13029 (Опись СВХ / WHDocInventory) — отдельная семантика, тянет MAWB
+    # и дату подачи ДО1. Парсится дополнительными полями, чтобы не загрязнять
+    # основной парсер ED-таможни.
+    if 'WHDocInventory' in xml_text or 'whdi:' in xml_text:
+        base.update(parse_svh_inventory(xml_text))
+
+    return base
+
+
+# ─── СВХ (CMN.13029) ──
+
+# Внутри <Receiver><SVH>…</SVH></Receiver> — лицензия + дата подачи ДО1
+_SVH_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?SVH\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVH>',
+    re.S
+)
+
+# Внутри <GoodsShipment>…</GoodsShipment> — параметры партии (MAWB и т.д.)
+_GOODS_SHIPMENT_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?GoodsShipment\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GoodsShipment>',
+    re.S
+)
+
+# Внутри <RegNumberDoc>…</RegNumberDoc> — рег.номер представления
+_REG_NUMBER_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?RegNumberDoc\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegNumberDoc>',
+    re.S
+)
+
+# Внутри <Avia>…</Avia> — данные авиарейса
+_AVIA_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?Avia\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Avia>',
+    re.S
+)
+
+
+def normalize_mawb(raw: str) -> str:
+    """`222-.40333075` → `222-40333075`. Убирает точки и пробелы.
+
+    Альта в XML вписывает MAWB с разделителями, наши Cargo.awb_number — без.
+    """
+    return (raw or '').replace('.', '').replace(' ', '').strip()
+
+
+def parse_svh_inventory(xml_text: str) -> dict:
+    """Парсит CMN.13029 (WHDocInventory) → словарь полей для parsed_meta.
+
+    Извлекает MAWB, лицензию СВХ, дату подачи ДО1 и рег.номер представления.
+    Опционально enrichment: перевозчик, рейс, вес, кол-во мест.
+
+    Все поля префиксированы `svh_` чтобы не пересекаться с ED-парсером.
+    """
+    out: dict = {}
+
+    # SVH-блок: лицензия + дата ДО1
+    svh = _SVH_BLOCK_RE.search(xml_text)
+    if svh:
+        body = svh.group(1)
+        out['svh_warehouse_license'] = _first(body, 'DocumentNumber')
+        out['svh_do1_present_date']  = _first(body, 'DO1PresentDocumentDate')
+        out['svh_do1_present_time']  = _first(body, 'DO1PresentDocumentTime')
+        out['svh_doc_mode_code']     = _first(body, 'DocumentModeCode')
+
+    # GoodsShipment: MAWB + параметры
+    goods = _GOODS_SHIPMENT_BLOCK_RE.search(xml_text)
+    if goods:
+        body = goods.group(1)
+        mawb_raw = _first(body, 'PrDocumentNumber')
+        out['svh_mawb_raw'] = mawb_raw
+        out['svh_mawb']     = normalize_mawb(mawb_raw)
+        out['svh_pr_document_date'] = _first(body, 'PrDocumentDate')
+        out['svh_pr_document_mode'] = _first(body, 'PresentedDocumentModeCode')
+        out['svh_goods_description'] = _first(body, 'GoodsDescription')
+
+    # RegNumberDoc: рег.номер представления (10001020/220526/5005840)
+    reg = _REG_NUMBER_BLOCK_RE.search(xml_text)
+    if reg:
+        body = reg.group(1)
+        cc = _first(body, 'CustomsCode')
+        rd = _first(body, 'RegistrationDate')
+        gn = _first(body, 'GTDNumber')
+        if cc and rd and gn:
+            try:
+                y, m, d = rd.split('-')
+                rd_short = f'{d}{m}{y[2:]}'
+            except ValueError:
+                rd_short = rd
+            out['svh_presentation_reg_number'] = f'{cc}/{rd_short}/{gn}'
+        out['svh_reg_customs_code']      = cc
+        out['svh_reg_registration_date'] = rd
+        out['svh_reg_gtd_number']        = gn
+
+    # Опционально: дата описи (когда нет DO1PresentDocumentDate)
+    iid = _first(xml_text, 'InventoryInstanceDate')
+    if iid:
+        out['svh_inventory_instance_date'] = iid
+
+    # Авиарейс (enrichment)
+    avia = _AVIA_BLOCK_RE.search(xml_text)
+    if avia:
+        body = avia.group(1)
+        out['svh_flight_number'] = _first(body, 'FlightNumber')
+        out['svh_flight_date']   = _first(body, 'FlightDate')
+
+    return out

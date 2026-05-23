@@ -305,7 +305,7 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         or _pr_document_number_for(xml_text, 'Индивидуальная накладная')
     )
     cc, rd, gn = _pick_effective_decl(xml_text)
-    return {
+    out = {
         'envelope_id':        _xml_field(xml_text, 'EnvelopeID'),
         'initial_envelope':   _xml_field(xml_text, 'InitialEnvelopeID'),
         'msg_type':           _xml_field(xml_text, 'MessageType'),
@@ -326,6 +326,87 @@ def _parse_inbox_xml(xml_text: str) -> dict:
         'result_code':        _xml_field(xml_text, 'ResultCode'),
         'result_description': _xml_field(xml_text, 'ResultDescription'),
     }
+    # CMN.13029 (WHDocInventory) — добавляет svh_* поля для интеграции со СВХ.
+    if 'WHDocInventory' in xml_text or 'whdi:' in xml_text:
+        out.update(_parse_svh_inventory(xml_text))
+    return out
+
+
+# ─── CMN.13029 (Опись СВХ) ──
+
+_SVH_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?SVH\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVH>',
+    re.S
+)
+_GOODS_SHIPMENT_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?GoodsShipment\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GoodsShipment>',
+    re.S
+)
+_REG_NUMBER_DOC_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?RegNumberDoc\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegNumberDoc>',
+    re.S
+)
+_AVIA_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?Avia\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Avia>',
+    re.S
+)
+
+
+def _normalize_mawb(raw: str) -> str:
+    """`222-.40333075` → `222-40333075`. Убирает точки и пробелы."""
+    return (raw or '').replace('.', '').replace(' ', '').strip()
+
+
+def _parse_svh_inventory(xml_text: str) -> dict:
+    """CMN.13029 → svh_*-поля.
+
+    Извлекает MAWB (нормализованный), лицензию СВХ, дату подачи ДО1 и
+    рег.номер представления. Зеркалит логику cargo.services.alta.xml_extract.
+    """
+    out: dict = {}
+
+    svh = _SVH_BLOCK_RE.search(xml_text)
+    if svh:
+        body = svh.group(1)
+        out['svh_warehouse_license'] = _xml_field(body, 'DocumentNumber')
+        out['svh_do1_present_date']  = _xml_field(body, 'DO1PresentDocumentDate')
+        out['svh_do1_present_time']  = _xml_field(body, 'DO1PresentDocumentTime')
+        out['svh_doc_mode_code']     = _xml_field(body, 'DocumentModeCode')
+
+    goods = _GOODS_SHIPMENT_RE.search(xml_text)
+    if goods:
+        body = goods.group(1)
+        raw = _xml_field(body, 'PrDocumentNumber')
+        out['svh_mawb_raw'] = raw
+        out['svh_mawb']     = _normalize_mawb(raw)
+        out['svh_pr_document_date'] = _xml_field(body, 'PrDocumentDate')
+        out['svh_pr_document_mode'] = _xml_field(body, 'PresentedDocumentModeCode')
+
+    reg = _REG_NUMBER_DOC_RE.search(xml_text)
+    if reg:
+        body = reg.group(1)
+        cc = _xml_field(body, 'CustomsCode')
+        rd = _xml_field(body, 'RegistrationDate')
+        gn = _xml_field(body, 'GTDNumber')
+        if cc and rd and gn:
+            try:
+                y, m, d = rd.split('-')
+                rd_short = f'{d}{m}{y[2:]}'
+            except ValueError:
+                rd_short = rd
+            out['svh_presentation_reg_number'] = f'{cc}/{rd_short}/{gn}'
+
+    iid = _xml_field(xml_text, 'InventoryInstanceDate')
+    if iid:
+        out['svh_inventory_instance_date'] = iid
+
+    avia = _AVIA_RE.search(xml_text)
+    if avia:
+        body = avia.group(1)
+        out['svh_flight_number'] = _xml_field(body, 'FlightNumber')
+        out['svh_flight_date']   = _xml_field(body, 'FlightDate')
+
+    return out
 
 
 def _state_db_open(path: Path) -> sqlite3.Connection:

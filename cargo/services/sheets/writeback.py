@@ -1,37 +1,40 @@
 """Writeback из CargoTrack обратно в Google Sheets.
 
-Цель: после того как у HAWB появился customs_declaration_number (через
-inbox от таможни или ручной ввод), записать его в новую колонку
-«CargoTrack: ДТ» в таблице «Общее» — рядом с X «Регистрационный номер ДТ»,
-которую сотрудники продолжают вести руками. Ручную колонку НЕ трогаем.
+Цель: после того как у HAWB/Cargo появилась новая информация (ДТ из ED-ответа
+таможни, дата размещения на СВХ из ДО1, лицензия СВХ) — записать её в наши
+«CargoTrack: *»-колонки в таблице «Общее». Ручные колонки сотрудников НЕ
+трогаем — добавляем свои справа.
 
 Защита от лишних API-вызовов (Google биллит каждый write):
 - читаем текущее значение ячейки перед записью
 - пишем только если не совпадает
-- кеш индекса нашей колонки на процесс (нет смысла дёргать шапку при каждой
-  записи)
+- кеш индекса колонки на процесс (нет смысла дёргать шапку при каждой записи)
 """
 from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from typing import Optional
 
 import gspread
 import gspread.exceptions
 
-from cargo.models import HouseWaybill, ImportedSheetRow, SheetSource
+from cargo.models import Cargo, HouseWaybill, ImportedSheetRow, SheetSource
 
 from .client import SheetsConfigError, open_worksheet
 
 
 logger = logging.getLogger('cargo.sheets.writeback')
 
-# Имя нашей колонки в шапке таблицы «Общее»
-CARGOTRACK_COL_HEADER = 'CargoTrack: ДТ'
+# Имена наших колонок в шапке таблицы «Общее».
+# Порядок здесь = порядок добавления справа от существующих.
+CARGOTRACK_COL_HEADER         = 'CargoTrack: ДТ'
+CARGOTRACK_SVH_LICENSE_HEADER = 'CargoTrack: лицензия СВХ'
+CARGOTRACK_SVH_DATE_HEADER    = 'CargoTrack: дата размещения'
 
-# Кеш индекса колонки на процесс — {worksheet_id: 1-based col_index}
-_col_index_cache: dict[str, int] = {}
+# Кеш индекса колонки на процесс — {(worksheet_key, header): 1-based col_index}
+_col_index_cache: dict[tuple[str, str], int] = {}
 
 
 def _find_general_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
@@ -53,32 +56,169 @@ def _find_general_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
     return (row.source, row.source_row_index)
 
 
-def _ensure_cargotrack_column(ws: gspread.Worksheet, header_row: int) -> int:
-    """Возвращает 1-based индекс нашей колонки, создавая её при необходимости.
+def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
+                         header_name: str) -> int:
+    """Возвращает 1-based индекс колонки `header_name`, создавая её при необходимости.
 
-    Логика:
-    - читаем заголовочную строку
-    - если CARGOTRACK_COL_HEADER уже есть — возвращаем индекс
-    - иначе пишем заголовок в первую пустую колонку справа от существующих
+    Generic helper: используется для всех наших «CargoTrack: *»-колонок
+    (ДТ, лицензия СВХ, дата размещения и будущих). Идемпотентно — если
+    колонка уже есть в шапке, возвращает её индекс из кеша.
+
+    Если колонки нет, ДОБАВЛЯЕТ её в первую свободную справа от всех
+    существующих и записывает заголовок. Это значит порядок наших колонок
+    в Sheets — это порядок их первого появления (т.е. ДТ → лицензия → дата,
+    в порядке вызовов).
     """
-    cache_key = f'{ws.spreadsheet.id}:{ws.id}'
+    ws_key = f'{ws.spreadsheet.id}:{ws.id}'
+    cache_key = (ws_key, header_name)
     cached = _col_index_cache.get(cache_key)
     if cached:
         return cached
 
     header_values = ws.row_values(header_row)
     for idx, value in enumerate(header_values, start=1):
-        if (value or '').strip() == CARGOTRACK_COL_HEADER:
+        if (value or '').strip() == header_name:
             _col_index_cache[cache_key] = idx
             return idx
 
     # Нет — добавляем в первую свободную справа
     new_col_idx = len(header_values) + 1
-    ws.update_cell(header_row, new_col_idx, CARGOTRACK_COL_HEADER)
+    ws.update_cell(header_row, new_col_idx, header_name)
     _col_index_cache[cache_key] = new_col_idx
     logger.info('Created column "%s" at index %d in worksheet %s',
-                CARGOTRACK_COL_HEADER, new_col_idx, ws.title)
+                header_name, new_col_idx, ws.title)
     return new_col_idx
+
+
+def _ensure_cargotrack_column(ws: gspread.Worksheet, header_row: int) -> int:
+    """Совместимость: тонкая обёртка над `_ensure_named_column` для колонки ДТ."""
+    return _ensure_named_column(ws, header_row, CARGOTRACK_COL_HEADER)
+
+
+def _col_letter(col_idx: int) -> str:
+    """1-based column index → A1 letter (1→A, 26→Z, 27→AA)."""
+    result = ''
+    n = col_idx
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        result = chr(ord('A') + rem) + result
+    return result
+
+
+def write_svh_placement_for_cargo(cargo: Cargo) -> int:
+    """Пишет лицензию СВХ и дату размещения в Sheets для всех HAWB партии.
+
+    СВХ-данные (CMN.13029) на уровне Cargo (партии), но строки в Sheets
+    «Общее» индексированы по HAWB. Эта функция:
+    1. Достаёт лицензию и дату из cargo (выставленных в apply_svh_placement).
+    2. Находит все HAWB партии → их строки в Sheets.
+    3. Группирует по SheetSource (обычно одна — таблица «Общее»).
+    4. Делает batch_update по 2 ячейкам на HAWB одним запросом.
+
+    Возвращает кол-во записанных ячеек (для логирования).
+    """
+    lic = (cargo.warehouse_license or '').strip()
+    placed_dt = cargo.scan_into_bond
+    if not (lic or placed_dt):
+        return 0  # нечего писать
+
+    # Дата для Sheets — формат `2026-05-22` (можно потом локализовать)
+    placed_str = placed_dt.date().isoformat() if placed_dt else ''
+
+    # Все HAWB партии
+    hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
+    if not hawbs:
+        return 0
+
+    # Группировка row_index по SheetSource — типично всё в одной general-таблице
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general', hawb_number_norm__in=hawbs)
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    if not rows.exists():
+        logger.info('svh writeback: no Sheets rows for Cargo %s (%d hawbs)',
+                    cargo.awb_number, len(hawbs))
+        return 0
+
+    sources: dict[int, SheetSource] = {}
+    rows_by_source: dict[int, list[int]] = defaultdict(list)
+    seen_hawb: set[str] = set()  # отсекаем дубли (исторические импорты)
+    for r in rows:
+        if r.hawb_number_norm in seen_hawb:
+            continue
+        seen_hawb.add(r.hawb_number_norm)
+        sources[r.source_id] = r.source
+        rows_by_source[r.source_id].append(r.source_row_index)
+
+    total_writes = 0
+    for source_id, row_indices in rows_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = open_worksheet(source)
+        except SheetsConfigError as e:
+            logger.warning('svh writeback: open failed for %s: %s', source.name, e)
+            continue
+        except Exception:
+            logger.exception('svh writeback: open error for %s', source.name)
+            continue
+
+        try:
+            col_lic  = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_LICENSE_HEADER)
+            col_date = _ensure_named_column(ws, source.header_row,
+                                            CARGOTRACK_SVH_DATE_HEADER)
+        except gspread.exceptions.APIError as e:
+            logger.exception('svh writeback: ensure column failed: %s', e)
+            continue
+
+        # Читаем существующие значения обеих колонок одним запросом каждая,
+        # чтобы не писать совпадающее (Google биллит каждый write).
+        try:
+            existing_lic  = ws.col_values(col_lic)
+            existing_date = ws.col_values(col_date)
+        except gspread.exceptions.APIError as e:
+            logger.exception('svh writeback: col_values failed: %s', e)
+            continue
+
+        letter_lic  = _col_letter(col_lic)
+        letter_date = _col_letter(col_date)
+
+        updates = []
+        for row_idx in row_indices:
+            cur_lic = (existing_lic[row_idx - 1]
+                       if row_idx - 1 < len(existing_lic) else '').strip()
+            cur_date = (existing_date[row_idx - 1]
+                        if row_idx - 1 < len(existing_date) else '').strip()
+            if lic and cur_lic != lic:
+                updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
+            if placed_str and cur_date != placed_str:
+                updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
+
+        if not updates:
+            continue
+
+        # Один batch_update на партию (типично ≤ 80 HAWB × 2 = 160 ячеек).
+        # При больших партиях разбить можно, но Google допускает до 10к ячеек.
+        backoff_steps = [2, 4, 8]
+        for attempt in range(len(backoff_steps) + 1):
+            try:
+                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                total_writes += len(updates)
+                logger.info('svh writeback Cargo %s: %d cells in %s',
+                            cargo.awb_number, len(updates), source.name)
+                break
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status == 429 and attempt < len(backoff_steps):
+                    wait = backoff_steps[attempt]
+                    logger.warning('svh writeback 429, retry in %ds (attempt %d)',
+                                   wait, attempt + 1)
+                    time.sleep(wait)
+                    continue
+                logger.exception('svh writeback batch failed: %s', e)
+                break
+
+    return total_writes
 
 
 def write_declaration(hawb: HouseWaybill) -> bool:

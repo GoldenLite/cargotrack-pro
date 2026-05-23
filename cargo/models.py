@@ -1862,6 +1862,7 @@ class AltaInboxMessage(models.Model):
         ('withdrawn',   'Отзыв декларации'),
         ('examination', 'Досмотр / запрос'),
         ('hold',        'Требование / арест'),
+        ('svh_placed',  'Размещение на СВХ (ДО1)'),
         ('info',        'Информационное'),
     ]
 

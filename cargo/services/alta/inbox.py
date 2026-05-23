@@ -38,7 +38,14 @@ MSG_KIND_MAP: dict[str, str] = {
                                  # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify().
     'CMN.11314': 'info',         # Закрытие процедуры (DO1Close)
     'CMN.13021': 'info',         # DO1KeepLimits — лимит хранения / размещение на СВХ
+    'CMN.13029': 'svh_placed',   # WHDocInventory — полная опись СВХ с датой подачи ДО1
+                                 # и MAWB. Refine в classify() — отсекает чужие лицензии.
 }
+
+# Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
+# приходят валом (рабочий сервер обслуживает много складов), но нас интересуют
+# только наши. Фильтр в classify() переводит чужое в 'info'.
+OUR_WAREHOUSE_LICENSE = '10001/060324/10009/1'
 
 # DecisionCode → конкретный kind для типов где он есть в теле.
 # 10 — выпуск, 90 — отказ; остальные считаем info до выяснения.
@@ -73,6 +80,14 @@ def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
     base = MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
     if not parsed_meta:
         return base
+
+    # СВХ-ветка: refine на свою лицензию. Чужие склады отсекаем в info, чтобы
+    # не загромождать UI и не пытаться матчить их MAWB к нашим Cargo.
+    if base == 'svh_placed':
+        lic = (parsed_meta.get('svh_warehouse_license') or '').strip()
+        if lic and lic != OUR_WAREHOUSE_LICENSE:
+            return 'info'
+        return 'svh_placed'
 
     # 1. Design — самый точный код по конкретной ДТ (когда есть)
     dsn = (parsed_meta.get('design_code') or '').strip()
@@ -114,6 +129,7 @@ EVENT_TYPE_FROM_KIND: dict[str, str] = {
     'rejected':    'OTHER',
     'examination': 'CUSTOMS_REQUEST',
     'hold':        'CUSTOMS_REQUEST',
+    'svh_placed':  'OTHER',
     'info':        'OTHER',
 }
 
@@ -397,10 +413,109 @@ def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
+    """Подбирает Cargo для СВХ-сообщения через MAWB из parsed_meta.
+
+    Альта пишет MAWB с разделителем-точкой (`222-.40333075`), наш Cargo
+    хранит его без точки (`222-40333075`). Нормализация уже сделана в
+    парсере — берём `parsed_meta['svh_mawb']`.
+    """
+    parsed = msg.parsed_meta or {}
+    mawb = (parsed.get('svh_mawb') or '').strip()
+    if not mawb:
+        return None
+    return Cargo.objects.filter(awb_number__iexact=mawb).first()
+
+
+def _writeback_svh_cargo(cargo: Cargo) -> None:
+    """Лёгкий фон. Триггерит запись лицензии СВХ и даты размещения в Sheets.
+
+    Сообщение СВХ привязано к Cargo (партии целиком), а строки Sheets
+    идут по HAWB-ам. Writeback итерирует по всем HAWB партии — для каждого
+    проставляет общую дату/лицензию в две новые колонки.
+    """
+    def _run():
+        try:
+            from cargo.services.sheets.writeback import write_svh_placement_for_cargo
+            write_svh_placement_for_cargo(cargo)
+        except ImportError:
+            logger.info('svh writeback not available yet, skipping')
+        except Exception:
+            logger.exception('svh writeback failed for cargo %s', cargo.pk)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
+    """Обработка размещения на СВХ.
+
+    1. Заполняет Cargo.warehouse_license если пусто (сотрудники могли уже
+       проставить вручную — не переписываем).
+    2. Заполняет Cargo.scan_into_bond если пусто, собирая datetime из
+       DO1PresentDocumentDate + DO1PresentDocumentTime.
+    3. Триггерит writeback в Sheets с двумя новыми колонками.
+
+    Возвращает None при успехе или строку с описанием ошибки.
+    """
+    from datetime import datetime, time as dt_time
+    from django.utils.dateparse import parse_date
+
+    parsed = msg.parsed_meta or {}
+    license_ = (parsed.get('svh_warehouse_license') or '').strip()
+    do1_date = (parsed.get('svh_do1_present_date') or '').strip()
+    do1_time = (parsed.get('svh_do1_present_time') or '').strip()
+
+    update_fields = []
+    if license_ and not (cargo.warehouse_license or '').strip():
+        cargo.warehouse_license = license_
+        update_fields.append('warehouse_license')
+
+    if do1_date and not cargo.scan_into_bond:
+        d = parse_date(do1_date)
+        if d:
+            # Время приходит '15:45:42.4135115' — берём только HH:MM:SS
+            t = dt_time(0, 0)
+            if do1_time:
+                try:
+                    h, m, s = do1_time.split(':', 2)
+                    sec = int(float(s.split('.')[0]))
+                    t = dt_time(int(h), int(m), sec)
+                except (ValueError, IndexError):
+                    pass
+            from django.utils import timezone as tz
+            cargo.scan_into_bond = tz.make_aware(datetime.combine(d, t))
+            update_fields.append('scan_into_bond')
+
+    if update_fields:
+        cargo.save(update_fields=update_fields)
+
+    _writeback_svh_cargo(cargo)
+    return None
+
+
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
 
+    # ── СВХ-ветка (CMN.13029, наша лицензия) ──
+    if msg.msg_kind == 'svh_placed':
+        cargo = match_svh(msg)
+        if cargo:
+            msg.cargo = cargo
+            msg.save(update_fields=['msg_kind', 'cargo', 'parsed_meta'])
+            err = apply_svh_placement(msg, cargo)
+            if err:
+                msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
+                msg.status_applied = False
+            else:
+                msg.status_applied = True
+            msg.save(update_fields=['status_applied', 'parsed_meta'])
+        else:
+            # Cargo не найдена — записываем для аудита, но без статуса
+            msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
+                                    'status_applied', 'parsed_meta'])
+        return
+
+    # ── ED-таможня (existing flow) ──
     cargo, hawb = match(msg)
     if cargo or hawb:
         msg.cargo = cargo

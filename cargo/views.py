@@ -3161,6 +3161,22 @@ def api_alta_inbox_post(request):
         except (ValueError, TypeError):
             prepared_at = None
 
+    # Если агент прислал raw_xml — обогащаем parsed_meta сервер-сайдным
+    # парсером (parse_raw_xml). Так SVH-поля доедут до dispatch даже если
+    # на рабочем сервере крутится старый agent без svh-парсинга.
+    raw_xml = data.get('raw_xml') or ''
+    parsed_meta = data.get('parsed_meta') or {}
+    if raw_xml:
+        try:
+            from .services.alta.xml_extract import parse_raw_xml
+            from_xml = parse_raw_xml(raw_xml)
+            # Агент в приоритете: его поля не перетираем
+            merged = {**{k: v for k, v in from_xml.items() if v}, **parsed_meta}
+            parsed_meta = merged
+        except Exception:
+            # парсер никогда не должен ронять view
+            pass
+
     msg, created = AltaInboxMessage.objects.update_or_create(
         envelope_id=envelope_id,
         defaults={
@@ -3168,8 +3184,8 @@ def api_alta_inbox_post(request):
             'waybill_number_raw': (data.get('waybill_number') or '').strip()[:64],
             'declaration_number': (data.get('declaration_number') or '').strip()[:64],
             'prepared_at': prepared_at,
-            'raw_xml': data.get('raw_xml') or '',
-            'parsed_meta': data.get('parsed_meta') or {},
+            'raw_xml': raw_xml,
+            'parsed_meta': parsed_meta,
         },
     )
     if created:
