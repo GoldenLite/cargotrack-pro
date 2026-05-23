@@ -333,9 +333,13 @@ def _parse_inbox_xml(xml_text: str) -> dict:
 
 
 # ─── CMN.13029 (Опись СВХ) ──
+# Реальная структура (см. cargo/services/alta/xml_extract.py для деталей):
+# лицензия в WarehouseOwner/WarehouseLicense/CertificateNumber,
+# дата размещения = RegNumberDoc/RegistrationDate,
+# MAWB в GoodsShipment/PrDocumentNumber.
 
-_SVH_BLOCK_RE = re.compile(
-    r'<(?:[a-zA-Z][\w-]*:)?SVH\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVH>',
+_WAREHOUSE_LICENSE_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?WarehouseLicense\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?WarehouseLicense>',
     re.S
 )
 _GOODS_SHIPMENT_RE = re.compile(
@@ -346,10 +350,6 @@ _REG_NUMBER_DOC_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?RegNumberDoc\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegNumberDoc>',
     re.S
 )
-_AVIA_RE = re.compile(
-    r'<(?:[a-zA-Z][\w-]*:)?Avia\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Avia>',
-    re.S
-)
 
 
 def _normalize_mawb(raw: str) -> str:
@@ -358,20 +358,15 @@ def _normalize_mawb(raw: str) -> str:
 
 
 def _parse_svh_inventory(xml_text: str) -> dict:
-    """CMN.13029 → svh_*-поля.
-
-    Извлекает MAWB (нормализованный), лицензию СВХ, дату подачи ДО1 и
-    рег.номер представления. Зеркалит логику cargo.services.alta.xml_extract.
-    """
+    """CMN.13029 → svh_*-поля. Зеркалит cargo.services.alta.xml_extract."""
     out: dict = {}
 
-    svh = _SVH_BLOCK_RE.search(xml_text)
-    if svh:
-        body = svh.group(1)
-        out['svh_warehouse_license'] = _xml_field(body, 'DocumentNumber')
-        out['svh_do1_present_date']  = _xml_field(body, 'DO1PresentDocumentDate')
-        out['svh_do1_present_time']  = _xml_field(body, 'DO1PresentDocumentTime')
-        out['svh_doc_mode_code']     = _xml_field(body, 'DocumentModeCode')
+    lic = _WAREHOUSE_LICENSE_RE.search(xml_text)
+    if lic:
+        body = lic.group(1)
+        out['svh_warehouse_license']  = _xml_field(body, 'CertificateNumber')
+        out['svh_warehouse_lic_date'] = _xml_field(body, 'CertificateDate')
+        out['svh_warehouse_lic_kind'] = _xml_field(body, 'CertificateKind')
 
     goods = _GOODS_SHIPMENT_RE.search(xml_text)
     if goods:
@@ -395,16 +390,16 @@ def _parse_svh_inventory(xml_text: str) -> dict:
             except ValueError:
                 rd_short = rd
             out['svh_presentation_reg_number'] = f'{cc}/{rd_short}/{gn}'
+        if rd:
+            # В реальных CMN.13029 нет DO1PresentDocumentDate — берём дату
+            # регистрации описи как дату размещения партии на СВХ.
+            out['svh_do1_present_date'] = rd
 
     iid = _xml_field(xml_text, 'InventoryInstanceDate')
     if iid:
         out['svh_inventory_instance_date'] = iid
-
-    avia = _AVIA_RE.search(xml_text)
-    if avia:
-        body = avia.group(1)
-        out['svh_flight_number'] = _xml_field(body, 'FlightNumber')
-        out['svh_flight_date']   = _xml_field(body, 'FlightDate')
+        if not out.get('svh_do1_present_date'):
+            out['svh_do1_present_date'] = iid
 
     return out
 

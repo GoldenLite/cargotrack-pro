@@ -109,28 +109,46 @@ def parse_raw_xml(xml_text: str) -> dict:
 
 
 # ─── СВХ (CMN.13029) ──
+#
+# Структура реального XML (разобрано 2026-05-23 на дампе msg #3979):
+#
+#   <whdi:WHDocInventory>
+#     <whdi:InventoryInstanceDate>2026-05-23</whdi:InventoryInstanceDate>
+#     <whdi:RegNumberDoc>
+#       <cat_ru:CustomsCode>10001020</cat_ru:CustomsCode>
+#       <cat_ru:RegistrationDate>2026-05-23</cat_ru:RegistrationDate>  ← дата размещения
+#       <cat_ru:GTDNumber>5005877</cat_ru:GTDNumber>                   ← рег.номер описи
+#     </whdi:RegNumberDoc>
+#     <whdi:WarehouseOwner>
+#       <catWH_ru:WarehouseLicense>
+#         <catWH_ru:CertificateNumber>10001/060324/10009/1</catWH_ru:CertificateNumber>  ← лицензия
+#         <catWH_ru:CertificateDate>2024-03-06</catWH_ru:CertificateDate>
+#       </catWH_ru:WarehouseLicense>
+#     </whdi:WarehouseOwner>
+#     <whdi:GoodsShipment>
+#       <cat_ru:PrDocumentNumber>220526-2</cat_ru:PrDocumentNumber>    ← MAWB/CMR
+#       <catWH_ru:PresentedDocumentModeCode>02015</catWH_ru:PresentedDocumentModeCode>  ← 02015=CMR, 02017=авиа
+#     </whdi:GoodsShipment>
+#   </whdi:WHDocInventory>
+#
+# Время подачи ДО1 (`DO1PresentDocumentTime`) в реальных сообщениях отсутствует —
+# scan_into_bond выставляется с временем 00:00.
 
-# Внутри <Receiver><SVH>…</SVH></Receiver> — лицензия + дата подачи ДО1
-_SVH_BLOCK_RE = re.compile(
-    r'<(?:[a-zA-Z][\w-]*:)?SVH\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVH>',
+# WarehouseLicense → CertificateNumber
+_WAREHOUSE_LICENSE_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?WarehouseLicense\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?WarehouseLicense>',
     re.S
 )
 
-# Внутри <GoodsShipment>…</GoodsShipment> — параметры партии (MAWB и т.д.)
+# GoodsShipment — параметры партии (MAWB, mode)
 _GOODS_SHIPMENT_BLOCK_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?GoodsShipment\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GoodsShipment>',
     re.S
 )
 
-# Внутри <RegNumberDoc>…</RegNumberDoc> — рег.номер представления
+# RegNumberDoc — рег.номер описи (= рег.номер размещения)
 _REG_NUMBER_BLOCK_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?RegNumberDoc\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegNumberDoc>',
-    re.S
-)
-
-# Внутри <Avia>…</Avia> — данные авиарейса
-_AVIA_BLOCK_RE = re.compile(
-    r'<(?:[a-zA-Z][\w-]*:)?Avia\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Avia>',
     re.S
 )
 
@@ -138,7 +156,8 @@ _AVIA_BLOCK_RE = re.compile(
 def normalize_mawb(raw: str) -> str:
     """`222-.40333075` → `222-40333075`. Убирает точки и пробелы.
 
-    Альта в XML вписывает MAWB с разделителями, наши Cargo.awb_number — без.
+    Альта в авиа-XML вписывает MAWB с разделителем-точкой, наш Cargo
+    хранит без точки. Для CMR-партий (формат `220526-2`) и других — no-op.
     """
     return (raw or '').replace('.', '').replace(' ', '').strip()
 
@@ -146,23 +165,22 @@ def normalize_mawb(raw: str) -> str:
 def parse_svh_inventory(xml_text: str) -> dict:
     """Парсит CMN.13029 (WHDocInventory) → словарь полей для parsed_meta.
 
-    Извлекает MAWB, лицензию СВХ, дату подачи ДО1 и рег.номер представления.
-    Опционально enrichment: перевозчик, рейс, вес, кол-во мест.
+    Извлекает MAWB, лицензию СВХ, дату регистрации описи (= дата размещения)
+    и рег.номер представления.
 
     Все поля префиксированы `svh_` чтобы не пересекаться с ED-парсером.
     """
     out: dict = {}
 
-    # SVH-блок: лицензия + дата ДО1
-    svh = _SVH_BLOCK_RE.search(xml_text)
-    if svh:
-        body = svh.group(1)
-        out['svh_warehouse_license'] = _first(body, 'DocumentNumber')
-        out['svh_do1_present_date']  = _first(body, 'DO1PresentDocumentDate')
-        out['svh_do1_present_time']  = _first(body, 'DO1PresentDocumentTime')
-        out['svh_doc_mode_code']     = _first(body, 'DocumentModeCode')
+    # Лицензия СВХ
+    lic_block = _WAREHOUSE_LICENSE_BLOCK_RE.search(xml_text)
+    if lic_block:
+        body = lic_block.group(1)
+        out['svh_warehouse_license']  = _first(body, 'CertificateNumber')
+        out['svh_warehouse_lic_date'] = _first(body, 'CertificateDate')
+        out['svh_warehouse_lic_kind'] = _first(body, 'CertificateKind')
 
-    # GoodsShipment: MAWB + параметры
+    # GoodsShipment: MAWB
     goods = _GOODS_SHIPMENT_BLOCK_RE.search(xml_text)
     if goods:
         body = goods.group(1)
@@ -171,9 +189,8 @@ def parse_svh_inventory(xml_text: str) -> dict:
         out['svh_mawb']     = normalize_mawb(mawb_raw)
         out['svh_pr_document_date'] = _first(body, 'PrDocumentDate')
         out['svh_pr_document_mode'] = _first(body, 'PresentedDocumentModeCode')
-        out['svh_goods_description'] = _first(body, 'GoodsDescription')
 
-    # RegNumberDoc: рег.номер представления (10001020/220526/5005840)
+    # RegNumberDoc: дата регистрации описи (= дата размещения) + рег.номер
     reg = _REG_NUMBER_BLOCK_RE.search(xml_text)
     if reg:
         body = reg.group(1)
@@ -190,17 +207,16 @@ def parse_svh_inventory(xml_text: str) -> dict:
         out['svh_reg_customs_code']      = cc
         out['svh_reg_registration_date'] = rd
         out['svh_reg_gtd_number']        = gn
+        # Реального DO1PresentDocumentDate в CMN.13029 нет — используем дату
+        # регистрации описи как дату размещения партии на СВХ.
+        if rd:
+            out['svh_do1_present_date'] = rd
 
-    # Опционально: дата описи (когда нет DO1PresentDocumentDate)
+    # Fallback на дату описи если RegNumberDoc пустой
     iid = _first(xml_text, 'InventoryInstanceDate')
     if iid:
         out['svh_inventory_instance_date'] = iid
-
-    # Авиарейс (enrichment)
-    avia = _AVIA_BLOCK_RE.search(xml_text)
-    if avia:
-        body = avia.group(1)
-        out['svh_flight_number'] = _first(body, 'FlightNumber')
-        out['svh_flight_date']   = _first(body, 'FlightDate')
+        if not out.get('svh_do1_present_date'):
+            out['svh_do1_present_date'] = iid
 
     return out
