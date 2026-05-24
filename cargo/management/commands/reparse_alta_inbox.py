@@ -74,24 +74,19 @@ class Command(BaseCommand):
         if not opts['dry_run']:
             begin_batch_writeback()
 
-        # Одноразовый ресет computed-полей перед --force-dispatch.
-        # Логика match_svh_do2 (commit 30c4c36) больше НЕ матчит ДО2 по
+        # Одноразовый ресет stale-полей перед --force-dispatch.
+        # match_svh_do2 (commit 30c4c36) больше НЕ матчит ДО2 по
         # customs_declaration_number — только по прямому hawb_number в
         # TransportDoc. Но apply_svh_do2 только записывает в matched HAWB,
         # не очищает в не-matched. Старые stale-значения (записанные раньше
-        # через ДТ-matching) висят в БД. То же для filed_date — поменяли
-        # источник с registration_date (00:00:00) на msg.prepared_at (полное
-        # время), стейл-значения остались. Зануляем — dispatch заново
-        # проставит правильно из CMN.11350/13014.
+        # через ДТ-matching) висят в БД. Зануляем — dispatch заново
+        # проставит правильно только тем HAWB кто реально в TransportDoc.
         if not opts['dry_run'] and opts['force_dispatch']:
             from cargo.models import HouseWaybill
             n_do2 = HouseWaybill.objects.filter(
                 svh_do2_send_at__isnull=False).update(svh_do2_send_at=None)
-            n_filed = HouseWaybill.objects.filter(
-                filed_date__isnull=False).update(filed_date=None)
             self.stdout.write(
-                f'Reset before reparse: svh_do2_send_at on {n_do2} HAWBs, '
-                f'filed_date on {n_filed} HAWBs')
+                f'Reset before reparse: svh_do2_send_at on {n_do2} HAWBs')
 
         changed = 0
         gtd_changed = 0
