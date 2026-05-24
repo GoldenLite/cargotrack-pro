@@ -98,8 +98,13 @@ class CargoConfig(AppConfig):
             """При изменении customs_declaration_number — пишем в Sheets.
 
             Запускаем в фоновом потоке, чтобы не блокировать сохранение HAWB.
-            Любые ошибки writeback ловятся внутри write_declaration().
+            Подавляется когда apply_status в inbox.py обрабатывает multi-waybill
+            релиз (49 HAWB одной декларации = 100+ API reads мгновенно → 429).
+            Inbox сам делает batch-writeback в конце.
             """
+            from .services.sheets.writeback import signals_suppressed
+            if signals_suppressed():
+                return
             if not (instance.customs_declaration_number or '').strip():
                 return
             if update_fields is not None and 'customs_declaration_number' not in update_fields:
@@ -117,6 +122,9 @@ class CargoConfig(AppConfig):
                   dispatch_uid='hawb_filed_date_writeback')
         def hawb_filed_date_writeback(sender, instance, created, update_fields, **kwargs):
             """При установке/изменении filed_date — пишем в Sheets «дата подачи»."""
+            from .services.sheets.writeback import signals_suppressed
+            if signals_suppressed():
+                return
             if not instance.filed_date:
                 return
             if update_fields is not None and 'filed_date' not in update_fields:
@@ -139,6 +147,9 @@ class CargoConfig(AppConfig):
             Фоновый поток (как customs_declaration_number writeback). Если save()
             был с update_fields — фильтруем, чтобы не дёргать Sheets на каждый save.
             """
+            from .services.sheets.writeback import signals_suppressed
+            if signals_suppressed():
+                return
             if not instance.release_date:
                 return
             if update_fields is not None and 'release_date' not in update_fields:

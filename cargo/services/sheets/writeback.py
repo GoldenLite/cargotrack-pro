@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
 from typing import Optional
@@ -26,6 +27,30 @@ from .client import SheetsConfigError, open_worksheet
 
 
 logger = logging.getLogger('cargo.sheets.writeback')
+
+# ── Подавление сигналов writeback во время batch-операций ────────────
+# Когда apply_status в inbox.py обрабатывает multi-waybill релиз (49 HAWB
+# одной декларации), 49 × change_customs_status() = 49 post_save сигналов,
+# каждый стартует фоновый поток с per-HAWB writeback'ом (2-3 reads на Sheets
+# API). 100+ reads моментально → Google quota 300/min превышается.
+# Решение: на время batch-обработки подавляем сигналы, в конце делаем
+# ОДИН batch-writeback на все HAWB сразу.
+_signal_suppressor = threading.local()
+
+
+def begin_batch_writeback() -> None:
+    """Подавляет per-HAWB сигналы writeback в текущем потоке."""
+    _signal_suppressor.active = True
+
+
+def end_batch_writeback() -> None:
+    """Снимает подавление."""
+    _signal_suppressor.active = False
+
+
+def signals_suppressed() -> bool:
+    """True если текущий поток находится в batch-режиме."""
+    return getattr(_signal_suppressor, 'active', False)
 
 # Имена наших колонок в шапке таблицы «Общее».
 # Порядок здесь = порядок добавления справа от существующих.
@@ -543,6 +568,95 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
     """Batch writeback release_date — для resync_release_dates."""
     return _batch_write_hawb_dates(hawbs, 'release_date',
                                    CARGOTRACK_RELEASE_DATE_HEADER, 'release_date')
+
+
+def batch_write_declarations_for_hawbs(hawbs: list) -> int:
+    """Batch writeback customs_declaration_number — 1 col_values + 1 batch_update.
+
+    Аналог batch_write_*_dates но для строкового decl-номера. Используется в
+    inbox.apply_status вместо 49 per-HAWB write_declaration вызовов при
+    multi-waybill релизе.
+    """
+    if not hawbs:
+        return 0
+
+    by_hawb: dict[str, HouseWaybill] = {}
+    for h in hawbs:
+        decl = (h.customs_declaration_number or '').strip()
+        if h.hawb_number and decl:
+            by_hawb[h.hawb_number] = h
+    if not by_hawb:
+        return 0
+
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(by_hawb.keys()))
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    if not rows.exists():
+        return 0
+
+    sources: dict[int, SheetSource] = {}
+    items_by_source: dict[int, list[tuple[int, HouseWaybill]]] = defaultdict(list)
+    seen: set[str] = set()
+    for r in rows:
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        h = by_hawb.get(r.hawb_number_norm)
+        if not h:
+            continue
+        sources[r.source_id] = r.source
+        items_by_source[r.source_id].append((r.source_row_index, h))
+
+    total = 0
+    for source_id, items in items_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = open_worksheet(source)
+            col = _ensure_cargotrack_column(ws, source.header_row)
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('batch decl: open/ensure failed: %s', e)
+            continue
+
+        try:
+            existing = ws.col_values(col)
+        except gspread.exceptions.APIError as e:
+            logger.exception('batch decl: col_values failed: %s', e)
+            continue
+
+        letter = _col_letter(col)
+        updates = []
+        for row_idx, h in items:
+            decl = (h.customs_declaration_number or '').strip()
+            cur = (existing[row_idx - 1]
+                   if row_idx - 1 < len(existing) else '').strip()
+            if cur != decl:
+                updates.append({'range': f'{letter}{row_idx}',
+                                'values': [[decl]]})
+
+        if not updates:
+            continue
+
+        backoff_steps = [2, 4, 8, 16]
+        for attempt in range(len(backoff_steps) + 1):
+            try:
+                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                total += len(updates)
+                logger.info('batch decl: wrote %d cells in %s',
+                            len(updates), source.name)
+                break
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status == 429 and attempt < len(backoff_steps):
+                    wait = backoff_steps[attempt]
+                    logger.warning('batch decl 429, retry in %ds', wait)
+                    time.sleep(wait)
+                    continue
+                logger.exception('batch decl: batch_update failed')
+                break
+
+    return total
 
 
 def write_declaration(hawb: HouseWaybill) -> bool:

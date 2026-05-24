@@ -306,16 +306,23 @@ def recompute_declaration(cargo: Optional[Cargo],
 
 
 def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
+    """Batch-writeback (decl + filed_date) для списка HAWB.
+
+    Раньше делал по-одному → 49 HAWB × 2 поля × 2-3 API reads = 200+ reads,
+    мгновенно ловили Google quota 429. Теперь — batch-функции делают
+    1 col_values + 1 batch_update на колонку независимо от числа HAWB.
+    """
     if not hawbs:
         return
     try:
         from cargo.services.sheets.writeback import (
-            write_declaration, write_filed_date_for_hawb,
+            batch_write_declarations_for_hawbs,
+            batch_write_filed_dates_for_hawbs,
         )
         for h in hawbs:
             h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
-            write_declaration(h)
-            write_filed_date_for_hawb(h)
+        batch_write_declarations_for_hawbs(hawbs)
+        batch_write_filed_dates_for_hawbs(hawbs)
     except Exception:
         logger.exception('sheets writeback after declaration write failed')
 
@@ -344,21 +351,20 @@ def apply_status(msg: AltaInboxMessage,
     """
     kind = msg.msg_kind
 
-    # 1. Recompute для конкретной HAWB (если есть)
-    updated_hawbs = recompute_declaration(cargo, hawb)
-    _writeback_hawbs(updated_hawbs)
+    # 1+2. Recompute: для matched HAWB + для siblings (multi-waybill).
+    # Собираем ВСЕ обновлённые HAWB в один список, делаем единый batch-writeback
+    # в конце — иначе 49 sibling × per-HAWB writeback = 100+ API reads → 429.
+    all_updated: list[HouseWaybill] = []
+    all_updated.extend(recompute_declaration(cargo, hawb))
 
-    # 2. Multi-waybill propagation: для release/withdrawn, если cargo известна,
-    #    проходим по всем HAWB партии — раз release-сообщение CMN.11350 может
-    #    содержать список PrDocumentNumber из нескольких HAWB-ов, и recompute
-    #    их подхватит через raw_xml__icontains.
     if cargo and kind in ('released', 'withdrawn'):
         siblings = cargo.hawbs.all()
         if hawb:
             siblings = siblings.exclude(pk=hawb.pk)
         for sib in siblings:
-            sib_updated = recompute_declaration(cargo, sib)
-            _writeback_hawbs(sib_updated)
+            all_updated.extend(recompute_declaration(cargo, sib))
+
+    _writeback_hawbs(all_updated)
 
     # Withdrawn — статус HAWB не меняем (партия не выпущена)
     if kind == 'withdrawn':
@@ -409,26 +415,64 @@ def apply_status(msg: AltaInboxMessage,
     )
 
     errors = []
-    applied = 0
-    for h in targets:
-        # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
-        # в IMPORT_CUSTOMS в нашей БД» — потому что декларация может подаваться
-        # через Альту, минуя CargoTrack-workflow.
-        if new_status == 'RELEASED' and h.logistics_status in PRE_CUSTOMS:
-            is_export = (h.shipment_type or 'IMPORT').upper() == 'EXPORT'
-            h.logistics_status = 'EXPORT_CUSTOMS' if is_export else 'IMPORT_CUSTOMS'
-            h.logistics_status_date = timezone.now()
-        try:
-            err = h.change_customs_status(new_status, user=None)
-            if err:
-                errors.append(f'HAWB {h.hawb_number}: {err}')
-            else:
-                applied += 1
-        except Exception as e:
-            logger.exception('change_customs_status failed for HAWB %s', h.pk)
-            errors.append(f'HAWB {h.hawb_number}: {e}')
+    applied_hawbs: list[HouseWaybill] = []
 
-    if applied == 0 and errors:
+    # Подавляем per-HAWB сигналы writeback (filed_date, release_date,
+    # customs_declaration_number) — каждый save() в change_customs_status
+    # обычно стартует фоновый поток с 2-3 API reads. На 49 HAWB одной
+    # декларации = 100+ reads → 429. После цикла делаем ОДИН batch-writeback.
+    from cargo.services.sheets.writeback import (
+        begin_batch_writeback, end_batch_writeback,
+        batch_write_release_dates_for_hawbs,
+        batch_write_filed_dates_for_hawbs,
+        batch_write_declarations_for_hawbs,
+    )
+    begin_batch_writeback()
+    try:
+        for h in targets:
+            # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
+            # в IMPORT_CUSTOMS в нашей БД» — декларация может подаваться через
+            # Альту, минуя CargoTrack-workflow.
+            if new_status == 'RELEASED' and h.logistics_status in PRE_CUSTOMS:
+                is_export = (h.shipment_type or 'IMPORT').upper() == 'EXPORT'
+                h.logistics_status = 'EXPORT_CUSTOMS' if is_export else 'IMPORT_CUSTOMS'
+                h.logistics_status_date = timezone.now()
+            try:
+                err = h.change_customs_status(new_status, user=None)
+                if err:
+                    errors.append(f'HAWB {h.hawb_number}: {err}')
+                else:
+                    applied_hawbs.append(h)
+            except Exception as e:
+                logger.exception('change_customs_status failed for HAWB %s', h.pk)
+                errors.append(f'HAWB {h.hawb_number}: {e}')
+    finally:
+        end_batch_writeback()
+
+    # Batch-writeback в Sheets для всех успешно изменённых HAWB.
+    # Делаем в фоновом потоке чтобы не блокировать ответ агенту.
+    if applied_hawbs:
+        # refresh — change_customs_status делал save() с auto-clear правилами
+        # (Rule 4 может стереть decl_number и т.п.), нужны актуальные значения.
+        for h in applied_hawbs:
+            h.refresh_from_db(fields=['customs_declaration_number',
+                                      'filed_date', 'release_date',
+                                      'customs_status', 'logistics_status'])
+
+        def _bg_batch():
+            try:
+                if new_status == 'RELEASED':
+                    batch_write_release_dates_for_hawbs(applied_hawbs)
+                if new_status == 'FILED':
+                    batch_write_filed_dates_for_hawbs(applied_hawbs)
+                # decl уже записан выше в _writeback_hawbs (recompute path).
+                # Но если status RELEASED стёр decl через Rule 4 — следующий
+                # recompute восстановит. Здесь не дублируем.
+            except Exception:
+                logger.exception('batch writeback after apply_status failed')
+        threading.Thread(target=_bg_batch, daemon=True).start()
+
+    if not applied_hawbs and errors:
         return '; '.join(errors)
     return None
 
