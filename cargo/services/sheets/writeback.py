@@ -115,6 +115,22 @@ def _col_letter(col_idx: int) -> str:
     return result
 
 
+def _local_date_str(dt) -> str:
+    """Форматирует aware-datetime в дд.мм.гггг по settings.TIME_ZONE.
+
+    strftime не конвертирует TZ — берёт дату как есть из datetime. Если в БД
+    лежит UTC «2026-05-22 21:00:00+00:00» (= 23.05 МСК по факту), прямой
+    strftime даст «22.05.2026». timezone.localtime() переводит в MSK перед
+    форматированием. Для naive datetime — strftime напрямую.
+    """
+    if dt is None:
+        return ''
+    from django.utils import timezone as _tz
+    if _tz.is_aware(dt):
+        dt = _tz.localtime(dt)
+    return dt.strftime('%d.%m.%Y')
+
+
 def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     """Пишет лицензию СВХ и дату размещения в Sheets для всех HAWB партии.
 
@@ -133,9 +149,10 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     if not (lic or placed_dt or do1_reg):
         return 0  # нечего писать
 
-    # Дата для Sheets — русский формат дд.мм.гггг (как у сотрудников
-    # в остальных колонках таблицы «Общее»).
-    placed_str = placed_dt.strftime('%d.%m.%Y') if placed_dt else ''
+    # Дата для Sheets — русский формат дд.мм.гггг по МСК (как у сотрудников
+    # в остальных колонках таблицы «Общее»). _local_date_str переводит из
+    # UTC если datetime aware — иначе strftime напрямую сдвигал бы дату.
+    placed_str = _local_date_str(placed_dt)
 
     # Все HAWB партии
     hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
@@ -316,8 +333,7 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         updates = []
         for row_idx, cargo in items:
             lic = (cargo.warehouse_license or '').strip()
-            placed_str = (cargo.scan_into_bond.strftime('%d.%m.%Y')
-                          if cargo.scan_into_bond else '')
+            placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
 
             cur_lic = (existing_lic[row_idx - 1]
@@ -370,7 +386,7 @@ def _write_hawb_date(hawb: HouseWaybill, value, header_name: str,
     if not value:
         return False
 
-    date_str = value.strftime('%d.%m.%Y')
+    date_str = _local_date_str(value)
 
     found = _find_general_row(hawb)
     if not found:
@@ -486,7 +502,7 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         updates = []
         for row_idx, h in items:
             value = getattr(h, value_attr)
-            date_str = value.strftime('%d.%m.%Y')
+            date_str = _local_date_str(value)
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
             if cur != date_str:
