@@ -58,6 +58,8 @@ CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
+CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
+CARGOTRACK_SVH_DO2_REG_HEADER  = 'CargoTrack: рег. номер ДО2'
 CARGOTRACK_FILED_DATE_HEADER   = 'CargoTrack: дата подачи'
 CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
 
@@ -92,17 +94,21 @@ def _find_general_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
 
 
 def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
-                         header_name: str) -> int:
+                         header_name: str,
+                         after_header: str = '') -> int:
     """Возвращает 1-based индекс колонки `header_name`, создавая её при необходимости.
 
     Generic helper: используется для всех наших «CargoTrack: *»-колонок
     (ДТ, лицензия СВХ, дата размещения и будущих). Идемпотентно — если
     колонка уже есть в шапке, возвращает её индекс из кеша.
 
-    Если колонки нет, ДОБАВЛЯЕТ её в первую свободную справа от всех
-    существующих и записывает заголовок. Это значит порядок наших колонок
-    в Sheets — это порядок их первого появления (т.е. ДТ → лицензия → дата,
-    в порядке вызовов).
+    after_header: если задан, новую колонку вставляем СРАЗУ ПОСЛЕ колонки
+    с этим заголовком (через insert_cols со сдвигом существующих). Если
+    after_header не найден — fallback в первую свободную справа.
+
+    Без after_header — добавляем в первую свободную справа от всех
+    существующих и записываем заголовок (порядок наших колонок — порядок
+    первого появления).
     """
     ws_key = f'{ws.spreadsheet.id}:{ws.id}'
     cache_key = (ws_key, header_name)
@@ -116,7 +122,30 @@ def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
             _col_index_cache[cache_key] = idx
             return idx
 
-    # Нет — добавляем в первую свободную справа
+    # Колонки нет. Решаем, КУДА её вставить.
+    if after_header:
+        after_idx = 0
+        for idx, value in enumerate(header_values, start=1):
+            if (value or '').strip() == after_header:
+                after_idx = idx
+                break
+        if after_idx > 0:
+            new_col_idx = after_idx + 1
+            # gspread.insert_cols сдвигает все колонки от new_col_idx вправо,
+            # затем записываем шапку. value_input_option важен для USER_ENTERED.
+            ws.insert_cols([['' for _ in range(ws.row_count)]], col=new_col_idx)
+            ws.update_cell(header_row, new_col_idx, header_name)
+            # Инвалидируем кеш для всех колонок этого ws — индексы сдвинулись.
+            for k in list(_col_index_cache.keys()):
+                if k[0] == ws_key and _col_index_cache[k] >= new_col_idx:
+                    _col_index_cache[k] += 1
+            _col_index_cache[cache_key] = new_col_idx
+            logger.info('Inserted column "%s" after "%s" at index %d in worksheet %s',
+                        header_name, after_header, new_col_idx, ws.title)
+            return new_col_idx
+        # after_header не найден — падаем во fallback (append справа)
+
+    # Append в первую свободную справа
     new_col_idx = len(header_values) + 1
     ws.update_cell(header_row, new_col_idx, header_name)
     _col_index_cache[cache_key] = new_col_idx
@@ -178,13 +207,15 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     lic = (cargo.warehouse_license or '').strip()
     placed_dt = cargo.scan_into_bond
     do1_reg = (cargo.svh_do1_reg_number or '').strip()
+    do2_dt  = getattr(cargo, 'svh_do2_send_at', None)
+    do2_reg = (getattr(cargo, 'svh_do2_reg_number', '') or '').strip()
     # Не делаем early-return при пустых значениях — функция должна
     # уметь ОЧИЩАТЬ Sheets-ячейки если данные были откачены на стороне БД.
 
-    # Дата для Sheets — русский формат дд.мм.гггг по МСК (как у сотрудников
-    # в остальных колонках таблицы «Общее»). _local_date_str переводит из
-    # UTC если datetime aware — иначе strftime напрямую сдвигал бы дату.
+    # Дата для Sheets — формат дд.мм.гггг чч:мм:сс по МСК. _local_date_str
+    # переводит из UTC если datetime aware.
     placed_str = _local_date_str(placed_dt)
+    do2_str    = _local_date_str(do2_dt)
 
     # Все HAWB партии
     hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
@@ -224,29 +255,41 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
             continue
 
         try:
-            col_lic  = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_LICENSE_HEADER)
-            col_date = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_DATE_HEADER)
-            col_do1  = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_DO1_HEADER)
+            col_lic      = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_LICENSE_HEADER)
+            col_date     = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DATE_HEADER)
+            col_do1      = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO1_HEADER)
+            # Дата ДО2 идёт СРАЗУ ПОСЛЕ колонки «дата выпуска» — юзер
+            # явно попросил порядок: подача → выпуск → ДО2 → дальше.
+            col_do2_date = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO2_DATE_HEADER,
+                                                after_header=CARGOTRACK_RELEASE_DATE_HEADER)
+            # Рег.номер ДО2 — рядом с остальными ДО, в конец.
+            col_do2_reg  = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO2_REG_HEADER)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: ensure column failed: %s', e)
             continue
 
-        # Читаем существующие значения трёх колонок одним запросом каждая,
+        # Читаем существующие значения колонок одним запросом каждая,
         # чтобы не писать совпадающее (Google биллит каждый write).
         try:
-            existing_lic  = ws.col_values(col_lic)
-            existing_date = ws.col_values(col_date)
-            existing_do1  = ws.col_values(col_do1)
+            existing_lic      = ws.col_values(col_lic)
+            existing_date     = ws.col_values(col_date)
+            existing_do1      = ws.col_values(col_do1)
+            existing_do2_date = ws.col_values(col_do2_date)
+            existing_do2_reg  = ws.col_values(col_do2_reg)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: col_values failed: %s', e)
             continue
 
-        letter_lic  = _col_letter(col_lic)
-        letter_date = _col_letter(col_date)
-        letter_do1  = _col_letter(col_do1)
+        letter_lic      = _col_letter(col_lic)
+        letter_date     = _col_letter(col_date)
+        letter_do1      = _col_letter(col_do1)
+        letter_do2_date = _col_letter(col_do2_date)
+        letter_do2_reg  = _col_letter(col_do2_reg)
 
         updates = []
         for row_idx in row_indices:
@@ -256,6 +299,10 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
+            cur_do2_date = (existing_do2_date[row_idx - 1]
+                            if row_idx - 1 < len(existing_do2_date) else '').strip()
+            cur_do2_reg = (existing_do2_reg[row_idx - 1]
+                           if row_idx - 1 < len(existing_do2_reg) else '').strip()
             # Пишем даже если значение пустое — нужно чтобы при откате
             # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
             # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
@@ -265,6 +312,10 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
             if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
+            if cur_do2_date != do2_str:
+                updates.append({'range': f'{letter_do2_date}{row_idx}', 'values': [[do2_str]]})
+            if cur_do2_reg != do2_reg:
+                updates.append({'range': f'{letter_do2_reg}{row_idx}', 'values': [[do2_reg]]})
 
         if not updates:
             continue
@@ -342,34 +393,45 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         source = sources[source_id]
         try:
             ws = open_worksheet(source)
-            col_lic  = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_LICENSE_HEADER)
-            col_date = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_DATE_HEADER)
-            col_do1  = _ensure_named_column(ws, source.header_row,
-                                            CARGOTRACK_SVH_DO1_HEADER)
+            col_lic      = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_LICENSE_HEADER)
+            col_date     = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DATE_HEADER)
+            col_do1      = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO1_HEADER)
+            col_do2_date = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO2_DATE_HEADER,
+                                                after_header=CARGOTRACK_RELEASE_DATE_HEADER)
+            col_do2_reg  = _ensure_named_column(ws, source.header_row,
+                                                CARGOTRACK_SVH_DO2_REG_HEADER)
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch svh: open/ensure failed: %s', e)
             continue
 
-        # Читаем три колонки ОДИН РАЗ для всей таблицы
+        # Читаем все нужные колонки ОДИН РАЗ для всей таблицы
         try:
-            existing_lic  = ws.col_values(col_lic)
-            existing_date = ws.col_values(col_date)
-            existing_do1  = ws.col_values(col_do1)
+            existing_lic      = ws.col_values(col_lic)
+            existing_date     = ws.col_values(col_date)
+            existing_do1      = ws.col_values(col_do1)
+            existing_do2_date = ws.col_values(col_do2_date)
+            existing_do2_reg  = ws.col_values(col_do2_reg)
         except gspread.exceptions.APIError as e:
             logger.exception('batch svh: col_values failed: %s', e)
             continue
 
-        letter_lic  = _col_letter(col_lic)
-        letter_date = _col_letter(col_date)
-        letter_do1  = _col_letter(col_do1)
+        letter_lic      = _col_letter(col_lic)
+        letter_date     = _col_letter(col_date)
+        letter_do1      = _col_letter(col_do1)
+        letter_do2_date = _col_letter(col_do2_date)
+        letter_do2_reg  = _col_letter(col_do2_reg)
 
         updates = []
         for row_idx, cargo in items:
             lic = (cargo.warehouse_license or '').strip()
             placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
+            do2_str = _local_date_str(getattr(cargo, 'svh_do2_send_at', None))
+            do2_reg = (getattr(cargo, 'svh_do2_reg_number', '') or '').strip()
 
             cur_lic = (existing_lic[row_idx - 1]
                        if row_idx - 1 < len(existing_lic) else '').strip()
@@ -377,6 +439,10 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
+            cur_do2_date = (existing_do2_date[row_idx - 1]
+                            if row_idx - 1 < len(existing_do2_date) else '').strip()
+            cur_do2_reg = (existing_do2_reg[row_idx - 1]
+                           if row_idx - 1 < len(existing_do2_reg) else '').strip()
 
             # Пишем даже если значение пустое — нужно чтобы при откате
             # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
@@ -387,6 +453,10 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
             if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
+            if cur_do2_date != do2_str:
+                updates.append({'range': f'{letter_do2_date}{row_idx}', 'values': [[do2_str]]})
+            if cur_do2_reg != do2_reg:
+                updates.append({'range': f'{letter_do2_reg}{row_idx}', 'values': [[do2_reg]]})
 
         if not updates:
             continue

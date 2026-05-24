@@ -43,6 +43,10 @@ MSG_KIND_MAP: dict[str, str] = {
     'CMN.13010': 'svh_do1_registered',  # DORegInfo — РЕАЛЬНАЯ регистрация ДО1.
                                         # Дата размещения + рег.номер ДО1. Связь с партией
                                         # через RefDocumentID → CMN.13029.DocumentID → Cargo.
+    'CMN.13014': 'svh_do2_registered',  # WHGoodOut — отчёт о ВЫПУСКЕ груза со СВХ (ДО2).
+                                        # Рег.номер ДО2 + дата+время выпуска (SendDate/Time).
+                                        # Связь с Cargo через MAWB в TransportDoc или ссылку
+                                        # на ДО-1 в Comments.
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -88,11 +92,12 @@ def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
 
     # СВХ-ветка: refine на свою лицензию. Чужие склады отсекаем в info, чтобы
     # не загромождать UI и не пытаться матчить их MAWB к нашим Cargo.
-    if base in ('svh_placed', 'svh_do1_registered'):
+    if base in ('svh_placed', 'svh_do1_registered', 'svh_do2_registered'):
         lic = (parsed_meta.get('svh_warehouse_license') or '').strip()
         if lic and lic != OUR_WAREHOUSE_LICENSE:
             return 'info'
         # ДО2 (FormReport=2) тоже приходит как CMN.13010 — пока не интересует
+        # (полноценный ДО2 у нас отдельным типом CMN.13014).
         if base == 'svh_do1_registered':
             form = (parsed_meta.get('svh_do1_form_report') or '').strip()
             if form and form != '1':
@@ -856,6 +861,89 @@ def apply_svh_do1(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     return None
 
 
+def match_svh_do2(msg: AltaInboxMessage) -> Optional[Cargo]:
+    """Подбирает Cargo для CMN.13014 (ДО2 — выпуск со СВХ).
+
+    В отличие от CMN.13010 здесь явно перечислены MAWB+HAWB в TransportDoc.
+    Стратегия:
+    1. По любому из svh_do2_doc_numbers (PrDocumentNumber из TransportDoc) →
+       Cargo.awb_number_iexact. Точно идентифицирует партию.
+    2. Fallback: по ссылке на ДО-1 из Comments (svh_do2_do1_ref) → Cargo
+       с этим svh_do1_reg_number.
+    """
+    parsed = msg.parsed_meta or {}
+
+    for num in parsed.get('svh_do2_doc_numbers') or []:
+        normalized = (num or '').replace('.', '').replace(' ', '').strip()
+        if not normalized:
+            continue
+        c = Cargo.objects.filter(awb_number__iexact=normalized).first()
+        if c:
+            return c
+
+    do1_ref = (parsed.get('svh_do2_do1_ref') or '').strip()
+    if do1_ref:
+        c = Cargo.objects.filter(svh_do1_reg_number=do1_ref).first()
+        if c:
+            return c
+
+    return None
+
+
+def apply_svh_do2(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
+    """Обработка ДО2 (CMN.13014, WHGoodOut — выпуск груза со СВХ).
+
+    Заполняет Cargo:
+    - svh_do2_reg_number ← рег.номер ДО2 (10001020/240526/5049065)
+    - svh_do2_send_at ← дата+время выпуска (SendDate + SendTime)
+    - warehouse_license ← если ещё пусто
+
+    Перезаписывает предыдущее svh_do2_send_at если оно отличается (например,
+    после повторной обработки сообщения). Триггерит writeback.
+    """
+    from datetime import datetime, time as dt_time
+    from django.utils.dateparse import parse_date
+    from django.utils import timezone as tz
+
+    parsed = msg.parsed_meta or {}
+    license_ = (parsed.get('svh_warehouse_license') or '').strip()
+    do2_date = (parsed.get('svh_do2_send_date') or '').strip()
+    do2_time = (parsed.get('svh_do2_send_time') or '').strip()
+    do2_reg  = (parsed.get('svh_do2_reg_number') or '').strip()
+
+    update_fields = []
+    if license_ and not (cargo.warehouse_license or '').strip():
+        cargo.warehouse_license = license_
+        update_fields.append('warehouse_license')
+
+    if do2_reg and (cargo.svh_do2_reg_number or '').strip() != do2_reg:
+        cargo.svh_do2_reg_number = do2_reg
+        update_fields.append('svh_do2_reg_number')
+
+    if do2_date:
+        d = parse_date(do2_date)
+        if d:
+            t = dt_time(0, 0)
+            if do2_time:
+                try:
+                    h, m, s = do2_time.split(':', 2)
+                    # SendTime может быть с микросекундами '18:30:05.7096954'
+                    sec = int(float(s.split('.')[0]))
+                    t = dt_time(int(h), int(m), sec)
+                except (ValueError, IndexError):
+                    pass
+            new_dt = tz.make_aware(datetime.combine(d, t))
+            if cargo.svh_do2_send_at != new_dt:
+                cargo.svh_do2_send_at = new_dt
+                update_fields.append('svh_do2_send_at')
+
+    if update_fields:
+        cargo.save(update_fields=update_fields)
+
+    _writeback_svh_cargo(cargo)
+    return None
+
+
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
@@ -895,6 +983,24 @@ def dispatch(msg: AltaInboxMessage) -> None:
             # Представление ещё не пришло (race) — оставляем висеть.
             # Когда представление прибудет → _backfill_do1_for_presentation
             # подхватит это сообщение.
+            msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
+                                    'status_applied', 'parsed_meta'])
+        return
+
+    # ── СВХ-ветка: ДО2, выпуск со склада (CMN.13014) ──
+    if msg.msg_kind == 'svh_do2_registered':
+        cargo = match_svh_do2(msg)
+        if cargo:
+            msg.cargo = cargo
+            msg.save(update_fields=['msg_kind', 'cargo', 'parsed_meta'])
+            err = apply_svh_do2(msg, cargo)
+            if err:
+                msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
+                msg.status_applied = False
+            else:
+                msg.status_applied = True
+            msg.save(update_fields=['status_applied', 'parsed_meta'])
+        else:
             msg.save(update_fields=['msg_kind', 'cargo', 'hawb',
                                     'status_applied', 'parsed_meta'])
         return

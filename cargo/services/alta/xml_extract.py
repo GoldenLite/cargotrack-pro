@@ -110,6 +110,13 @@ def parse_raw_xml(xml_text: str) -> dict:
     if 'DORegInfo' in xml_text or 'dori:' in xml_text:
         base.update(parse_svh_do1_reg(xml_text))
 
+    # CMN.13014 (WHGoodOut) — отчёт о выпуске груза со склада СВХ (ДО2).
+    # Содержит рег.номер ДО2 (RegisterNumber), момент выпуска (SendDate+
+    # SendTime), MAWB+HAWB партии (TransportDoc), лицензию СВХ и ссылку
+    # на ДО-1 в свободном тексте Comments.
+    if 'WHGoodOut' in xml_text or 'whgou:' in xml_text:
+        base.update(parse_svh_do2_out(xml_text))
+
     # CMN.11350 (ExpressCargoDeclarationCustomMark) — отметки таможни.
     # Один XML содержит N блоков <Consignment>, каждый со своим DecisionCode
     # (10=выпуск, 70=запрос доков, 90=отказ) применённым к своему списку
@@ -384,5 +391,116 @@ def parse_svh_do1_reg(xml_text: str) -> dict:
                 except ValueError:
                     rd_short = rd
                 out['svh_do1_reg_number'] = f'{cc}/{rd_short}/{gn}'
+
+    return out
+
+
+# ─── CMN.13014 (WHGoodOut — ДО2) ──
+#
+# Структура (реальный пример 2026-05-24):
+#
+#   <whgou:WHGoodOut>
+#     <cat_ru:DocumentID>dec1fd37-...</cat_ru:DocumentID>
+#     <whgou:DocumentKind>GoodOutDecision</whgou:DocumentKind>
+#     <whgou:RegisterNumber>                              ← рег.№ ДО2
+#       <cat_ru:CustomsCode>10001020</cat_ru:CustomsCode>
+#       <cat_ru:RegistrationDate>2026-05-24</cat_ru:RegistrationDate>
+#       <cat_ru:GTDNumber>5049065</cat_ru:GTDNumber>
+#     </whgou:RegisterNumber>
+#     <whgou:SendDate>2026-05-24</whgou:SendDate>          ← дата выпуска
+#     <whgou:SendTime>18:30:05.7096954</whgou:SendTime>    ← время выпуска
+#     <whgou:Comments>1. ДО-1 Рег.№ 10001020/190326/5006404</whgou:Comments>  ← ссылка на ДО-1
+#     <whgou:DeliveryGoods>
+#       <whgou:GoodInfo>
+#         <whgou:TransportDoc>
+#           <cat_ru:PrDocumentNumber>170326-2</cat_ru:PrDocumentNumber>    ← MAWB
+#         </whgou:TransportDoc>
+#         <whgou:TransportDoc>
+#           <cat_ru:PrDocumentNumber>10232984848</cat_ru:PrDocumentNumber> ← HAWB
+#         </whgou:TransportDoc>
+#       </whgou:GoodInfo>
+#     </whgou:DeliveryGoods>
+#     <whgou:SVHLicenceNumber>
+#       <cat_ru:PrDocumentNumber>10001/060324/10009/1</cat_ru:PrDocumentNumber>  ← лицензия
+#     </whgou:SVHLicenceNumber>
+#   </whgou:WHGoodOut>
+
+_TRANSPORT_DOC_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?TransportDoc\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?TransportDoc>',
+    re.S,
+)
+
+_SVH_LICENSE_NUMBER_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?SVHLicenceNumber\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVHLicenceNumber>',
+    re.S,
+)
+
+_REGISTER_NUMBER_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?RegisterNumber\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegisterNumber>',
+    re.S,
+)
+
+# Текст вида "1. ДО-1 Рег.№ 10001020/190326/5006404" в whgou:Comments
+_DO1_REF_RE = re.compile(
+    r'ДО[\s\-–—]*1\s+Рег\.?\s*№?\s*(\d+/\d+/\d+)',
+    re.UNICODE,
+)
+
+
+def parse_svh_do2_out(xml_text: str) -> dict:
+    """Парсит CMN.13014 (WHGoodOut, отчёт о выпуске со СВХ) → parsed_meta.
+
+    Возвращаемые поля (префикс svh_do2_):
+      svh_warehouse_license   — для фильтра «наш склад» в classify (как у CMN.13029/13010)
+      svh_do2_reg_number      — собранный рег.номер ДО2 (10001020/240526/5049065)
+      svh_do2_send_date       — 'YYYY-MM-DD'
+      svh_do2_send_time       — 'HH:MM:SS.fff' (с микросекундами)
+      svh_do2_release_date    — дата выпуска ДТ (информативно)
+      svh_do2_doc_numbers     — список номеров из TransportDoc (MAWB, HAWB, транзитная)
+      svh_do2_do1_ref         — рег.номер ДО-1 из Comments (для матчинга Cargo)
+    """
+    out: dict = {}
+
+    # Лицензия СВХ — внутри SVHLicenceNumber блока (PrDocumentNumber туда же
+    # попадает у TransportDoc, поэтому ищем точечно).
+    lic_block = _SVH_LICENSE_NUMBER_BLOCK_RE.search(xml_text)
+    if lic_block:
+        out['svh_warehouse_license'] = _first(lic_block.group(1), 'PrDocumentNumber').strip()
+
+    # SendDate + SendTime — момент выпуска со склада
+    out['svh_do2_send_date'] = _first(xml_text, 'SendDate').strip()
+    out['svh_do2_send_time'] = _first(xml_text, 'SendTime').strip()
+
+    # ReleaseDate — дата выпуска ДТ (для информации)
+    out['svh_do2_release_date'] = _first(xml_text, 'ReleaseDate').strip()
+
+    # Рег.номер ДО2 = CustomsCode + RegistrationDate + GTDNumber внутри RegisterNumber
+    reg_block = _REGISTER_NUMBER_BLOCK_RE.search(xml_text)
+    if reg_block:
+        rb = reg_block.group(1)
+        cc = _first(rb, 'CustomsCode').strip()
+        rd = _first(rb, 'RegistrationDate').strip()
+        gn = _first(rb, 'GTDNumber').strip()
+        if cc and rd and gn:
+            try:
+                y, m, d = rd.split('-')
+                rd_short = f'{d}{m}{y[2:]}'
+            except ValueError:
+                rd_short = rd
+            out['svh_do2_reg_number'] = f'{cc}/{rd_short}/{gn}'
+
+    # Все номера документов из TransportDoc блоков (MAWB, HAWB, транзитная и т.п.)
+    doc_numbers: list[str] = []
+    for tdoc_m in _TRANSPORT_DOC_BLOCK_RE.finditer(xml_text):
+        body = tdoc_m.group(1)
+        num = _first(body, 'PrDocumentNumber').strip()
+        if num:
+            doc_numbers.append(num)
+    out['svh_do2_doc_numbers'] = doc_numbers
+
+    # Ссылка на ДО-1 из Comments — для альтернативного матчинга Cargo
+    do1_ref_m = _DO1_REF_RE.search(xml_text)
+    if do1_ref_m:
+        out['svh_do2_do1_ref'] = do1_ref_m.group(1).strip()
 
     return out
