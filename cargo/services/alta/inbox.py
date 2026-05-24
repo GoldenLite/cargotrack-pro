@@ -387,22 +387,24 @@ def apply_status(msg: AltaInboxMessage,
         if not targets:
             return f'В партии {cargo.awb_number} нет HAWB в таможне'
 
-    # Multi-waybill release: одна ДТ покрывает несколько HAWB партии.
-    # recompute_declaration выше уже проставил decl_number всем подходящим
-    # HAWB через raw_xml__icontains. Теперь расширяем targets всеми HAWB
-    # партии с этим же decl_number, чтобы release_date проставился по каждой,
-    # а не только по той одной, которую вернул match().
+    # Multi-waybill release: одна ДТ покрывает несколько HAWB партии,
+    # но решения по разным HAWB в рамках ОДНОЙ ECD таможня может выносить
+    # в РАЗНЫЕ моменты разными CMN.11350. Поэтому расширяем targets ТОЛЬКО
+    # теми HAWB партии, которые упомянуты в raw_xml ИМЕННО ЭТОГО сообщения —
+    # их prepared_at = реальный момент решения по ним. HAWB из той же ДТ,
+    # но не упомянутые здесь, обработаются СВОИМ CMN со своим prepared_at.
     if cargo and kind in ('released', 'rejected', 'examination', 'hold'):
         decl = ''
         if targets:
             decl = (targets[0].customs_declaration_number or '').strip()
         if decl:
             existing_ids = {h.pk for h in targets}
-            extra = list(
-                cargo.hawbs
-                .filter(customs_declaration_number=decl)
-                .exclude(pk__in=existing_ids)
-            )
+            raw = (msg.raw_xml or '')
+            candidates = cargo.hawbs.filter(
+                customs_declaration_number=decl,
+            ).exclude(pk__in=existing_ids)
+            extra = [h for h in candidates
+                     if h.hawb_number and h.hawb_number in raw]
             if extra:
                 targets.extend(extra)
 
