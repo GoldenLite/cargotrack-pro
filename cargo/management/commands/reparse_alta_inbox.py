@@ -171,15 +171,14 @@ class Command(BaseCommand):
                     n = batch_write_release_dates_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  release_date: {n} cells ({len(hawbs_touched)} HAWB)')
                 # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number).
-                # Включаем cargos С данными И тех, на чьи HAWB приходило хоть
-                # одно CMN.13010/13029 (даже если потом откатили) — иначе
-                # Sheets-ячейки с прежней некорректной привязкой не очистятся.
-                cargos_svh = list(Cargo.objects.filter(
-                    Q(scan_into_bond__isnull=False)
-                    | Q(svh_do1_reg_number__gt='')
-                    | Q(warehouse_license__gt='')
-                    | Q(hawbs__inbox_messages__msg_type__in=('CMN.13010', 'CMN.13029'))
-                ).distinct())
+                # Берём ВСЕ Cargos с HAWB в Sheets «Общее». batch_write_svh_for_cargos
+                # сравнивает значение с тем что в ячейке и пишет только при
+                # различии — для партий без svh-данных, у которых Sheets-ячейка
+                # пустая, будет no-op. Для откачённых (data=пусто, Sheets=стейл)
+                # будет очистка. Это надёжнее чем пытаться через FK ловить
+                # партии с inbox-привязкой — при откате msg.cargo тоже мог
+                # обнулиться (как у Cargo 141-70338343).
+                cargos_svh = list(Cargo.objects.filter(hawbs__isnull=False).distinct())
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)
                     self.stdout.write(f'  svh: {n} cells ({len(cargos_svh)} cargos)')
