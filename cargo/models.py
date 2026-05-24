@@ -986,6 +986,14 @@ class HouseWaybill(models.Model):
                 self.release_date = event_dt
             elif not self.release_date:
                 self.release_date = timezone.now()
+        elif event_dt and self.release_date:
+            # event_dt = реальный CMN от таможни. Если новый статус не
+            # RELEASED — значит ранее проставленный release_date был
+            # ошибочным (например, мы ранее по ошибке проштамповали HAWB
+            # как released из общего DecisionCode, а на самом деле по этой
+            # накладной был отказ/запрос документов в своём Consignment).
+            # Стираем.
+            self.release_date = None
             # После выпуска на импорте — переводим в следующий лог.статус
             if self.logistics_status == 'IMPORT_CUSTOMS':
                 self.logistics_status = 'READY_DELIVERY'

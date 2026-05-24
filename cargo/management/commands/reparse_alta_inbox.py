@@ -145,16 +145,23 @@ class Command(BaseCommand):
                 if hawbs_decl:
                     n = batch_write_declarations_for_hawbs(hawbs_decl)
                     self.stdout.write(f'  decl: {n} cells ({len(hawbs_decl)} HAWB)')
-                # filed_date
-                hawbs_filed = list(HouseWaybill.objects.filter(filed_date__isnull=False))
-                if hawbs_filed:
-                    n = batch_write_filed_dates_for_hawbs(hawbs_filed)
-                    self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_filed)} HAWB)')
-                # release_date
-                hawbs_rel = list(HouseWaybill.objects.filter(release_date__isnull=False))
-                if hawbs_rel:
-                    n = batch_write_release_dates_for_hawbs(hawbs_rel)
-                    self.stdout.write(f'  release_date: {n} cells ({len(hawbs_rel)} HAWB)')
+                # filed_date / release_date: включаем ВСЕ HAWB у которых
+                # есть привязанное CMN.11350 (или filed/release_date уже
+                # стоят) — нужно чтобы при per-Consignment пересчёте
+                # ОЧИЩАЛИСЬ ячейки HAWB которые ранее были ошибочно
+                # помечены released, а на самом деле получили отказ/запрос
+                # документов (release_date теперь None → пустая ячейка).
+                from django.db.models import Q
+                hawbs_touched = list(HouseWaybill.objects.filter(
+                    Q(filed_date__isnull=False)
+                    | Q(release_date__isnull=False)
+                    | Q(inbox_messages__msg_type='CMN.11350')
+                ).distinct())
+                if hawbs_touched:
+                    n = batch_write_filed_dates_for_hawbs(hawbs_touched)
+                    self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_touched)} HAWB)')
+                    n = batch_write_release_dates_for_hawbs(hawbs_touched)
+                    self.stdout.write(f'  release_date: {n} cells ({len(hawbs_touched)} HAWB)')
                 # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number)
                 cargos_svh = list(Cargo.objects.filter(scan_into_bond__isnull=False)
                                   .exclude(svh_do1_reg_number=''))

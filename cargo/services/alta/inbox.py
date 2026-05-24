@@ -51,10 +51,12 @@ MSG_KIND_MAP: dict[str, str] = {
 OUR_WAREHOUSE_LICENSE = '10001/060324/10009/1'
 
 # DecisionCode → конкретный kind для типов где он есть в теле.
-# 10 — выпуск, 90 — отказ; остальные считаем info до выяснения.
+# 10 — выпуск, 70 — запрос документов, 90 — отказ.
+# (40 — отзыв декларации, обычно в Design а не DecisionCode.)
 DECISION_CODE_KIND: dict[str, str] = {
     '10': 'released',
     '11': 'released',
+    '70': 'hold',         # Запрос дополнительных документов и сведений
     '90': 'rejected',
     '91': 'rejected',
 }
@@ -74,7 +76,7 @@ DESIGN_CODE_KIND: dict[str, str] = {
 def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
     """MessageType (+ опц parsed_meta из тела) → kind.
 
-    Приоритет: Design > DecisionCode > ResolutionDescription > MessageType.
+    Приоритет: consignments (per-HAWB) > Design > DecisionCode > ResolutionDescription > MessageType.
     Разные типы сообщений несут результат таможни в разных полях, поэтому
     проверяем все три семантически-полных индикатора.
 
@@ -96,6 +98,22 @@ def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
             if form and form != '1':
                 return 'info'
         return base
+
+    # CMN.11350 с consignment-блоками per-HAWB. Один XML может содержать
+    # СМЕСЬ решений (часть HAWB — выпуск, часть — отказ). Для msg_kind
+    # (= label в UI/фильтрах + якорь recompute_declaration который ищет
+    # msg_kind__in=('released','withdrawn')) берём ДОМИНАНТНЫЙ kind:
+    # released > withdrawn > rejected > examination > hold > info.
+    # Фактическое per-HAWB решение применяется в apply_consignment_decisions.
+    consignments = parsed_meta.get('consignments') or []
+    if consignments:
+        kinds = {DECISION_CODE_KIND.get((c.get('decision_code') or '').strip(), 'info')
+                 for c in consignments}
+        for priority_kind in ('released', 'withdrawn', 'rejected',
+                              'examination', 'hold'):
+            if priority_kind in kinds:
+                return priority_kind
+        return 'info'
 
     # 1. Design — самый точный код по конкретной ДТ (когда есть)
     dsn = (parsed_meta.get('design_code') or '').strip()
@@ -493,6 +511,99 @@ def apply_status(msg: AltaInboxMessage,
     return None
 
 
+def _parse_iso_dt(s: str):
+    """ISO '2026-05-19T11:26:23+03:00' → aware datetime, None если не парсится."""
+    if not s:
+        return None
+    try:
+        from django.utils.dateparse import parse_datetime
+        dt = parse_datetime(s)
+        if dt is None:
+            return None
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt)
+        return dt
+    except Exception:
+        return None
+
+
+def apply_consignment_decisions(msg: AltaInboxMessage,
+                                cargo: Optional[Cargo]) -> Optional[str]:
+    """CMN.11350: применяем решение ИЗ КАЖДОГО блока Consignment ТОЛЬКО к
+    его собственным HAWB. DecisionDate блока = реальное время решения.
+
+    В одном CMN.11350 может быть N блоков с РАЗНЫМИ решениями (HAWB-A,B —
+    выпуск, HAWB-C — отказ, HAWB-D — запрос документов). Нельзя обобщать
+    msg-level kind на все упомянутые HAWB — мы должны идти per-Consignment
+    и применять конкретное решение к конкретным накладным с конкретной датой.
+
+    Возвращает строку ошибок (если были) или None.
+    """
+    consignments = (msg.parsed_meta or {}).get('consignments') or []
+    if not consignments or not cargo:
+        return None
+
+    from cargo.services.sheets.writeback import (
+        begin_batch_writeback, end_batch_writeback,
+        signals_suppressed,
+    )
+
+    PRE_CUSTOMS = (
+        'CREATED', 'TO_ORIGIN_WH', 'AT_ORIGIN_WH', 'CONSOLIDATED', 'READY_TO_SHIP',
+        'IN_TRANSIT_EXP', 'ARRIVED_DEST', 'AT_SVH',
+    )
+
+    in_bulk = signals_suppressed()
+    if not in_bulk:
+        begin_batch_writeback()
+
+    errors: list[str] = []
+
+    try:
+        for cons in consignments:
+            kind = DECISION_CODE_KIND.get(
+                (cons.get('decision_code') or '').strip(), 'info')
+            event_dt = (_parse_iso_dt(cons.get('decision_date') or '')
+                        or msg.prepared_at)
+
+            for hawb_num in cons.get('waybills') or []:
+                h = cargo.hawbs.filter(hawb_number__iexact=hawb_num).first()
+                if not h:
+                    # HAWB упомянута в CMN но её нет в нашей партии — норм.
+                    # Можно залогировать но не считать ошибкой.
+                    continue
+
+                # decl_number + filed_date: только при released/withdrawn
+                # (recompute_declaration сам решает что взять как «истину»
+                # из всей истории released/withdrawn сообщений по этой HAWB)
+                if kind in ('released', 'withdrawn'):
+                    recompute_declaration(cargo, h)
+
+                new_status = STATUS_FROM_KIND.get(kind)
+                if not new_status:
+                    continue  # info, withdrawn — статус не меняем
+
+                # Авто-бамп pre-customs в IMPORT/EXPORT_CUSTOMS перед выпуском
+                if new_status == 'RELEASED' and h.logistics_status in PRE_CUSTOMS:
+                    is_export = (h.shipment_type or 'IMPORT').upper() == 'EXPORT'
+                    h.logistics_status = 'EXPORT_CUSTOMS' if is_export else 'IMPORT_CUSTOMS'
+                    h.logistics_status_date = timezone.now()
+
+                try:
+                    err = h.change_customs_status(new_status, user=None,
+                                                  event_dt=event_dt)
+                    if err:
+                        errors.append(f'HAWB {h.hawb_number}: {err}')
+                except Exception as e:
+                    logger.exception('change_customs_status failed for HAWB %s', h.pk)
+                    errors.append(f'HAWB {h.hawb_number}: {e}')
+    finally:
+        if not in_bulk:
+            end_batch_writeback()
+
+    return '; '.join(errors) if errors else None
+
+
 def emit_event(msg: AltaInboxMessage,
                cargo: Optional[Cargo],
                hawb: Optional[HouseWaybill]) -> None:
@@ -776,11 +887,18 @@ def dispatch(msg: AltaInboxMessage) -> None:
     if cargo or hawb:
         msg.cargo = cargo
         msg.hawb = hawb
-        # Сохраняем привязки ДО apply_status: recompute_declaration читает
+        # Сохраняем привязки ДО apply_*: recompute_declaration читает
         # AltaInboxMessage.objects.filter(...) и должен увидеть и это сообщение.
         msg.save(update_fields=['msg_kind', 'cargo', 'hawb', 'parsed_meta'])
 
-        err = apply_status(msg, cargo, hawb)
+        # CMN.11350 (ExpressCargoDeclarationCustomMark) — per-HAWB решения
+        # в блоках <Consignment>. Идём блок за блоком, не обобщая на всех
+        # упомянутых siblings одно msg.kind.
+        consignments = (msg.parsed_meta or {}).get('consignments') or []
+        if consignments and cargo:
+            err = apply_consignment_decisions(msg, cargo)
+        else:
+            err = apply_status(msg, cargo, hawb)
         if err:
             msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
             msg.status_applied = False

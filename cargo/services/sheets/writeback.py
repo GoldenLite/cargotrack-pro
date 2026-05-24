@@ -478,9 +478,13 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
     if not hawbs:
         return 0
 
+    # Включаем и HAWB с пустым value_attr — нужно чтобы при reparse
+    # ячейка с ошибочно проставленной датой обнулилась (например,
+    # release_date был выставлен по ошибке, потом таможня дала отказ
+    # → новый статус REJECTED → release_date очищен → надо переписать
+    # Sheets-ячейку пустой строкой).
     by_hawb: dict[str, HouseWaybill] = {
-        h.hawb_number: h for h in hawbs
-        if h.hawb_number and getattr(h, value_attr)
+        h.hawb_number: h for h in hawbs if h.hawb_number
     }
     if not by_hawb:
         return 0

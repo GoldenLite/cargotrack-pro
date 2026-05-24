@@ -110,7 +110,89 @@ def parse_raw_xml(xml_text: str) -> dict:
     if 'DORegInfo' in xml_text or 'dori:' in xml_text:
         base.update(parse_svh_do1_reg(xml_text))
 
+    # CMN.11350 (ExpressCargoDeclarationCustomMark) — отметки таможни.
+    # Один XML содержит N блоков <Consignment>, каждый со своим DecisionCode
+    # (10=выпуск, 70=запрос доков, 90=отказ) применённым к своему списку
+    # IndividualWayBill. Решения per-HAWB → нельзя обобщать DecisionCode на
+    # всё сообщение, нужен per-Consignment apply в inbox.dispatch.
+    if 'ExpressCargoDeclarationCustomMark' in xml_text or 'ecdcm:' in xml_text:
+        cons = parse_consignments(xml_text)
+        if cons:
+            base['consignments'] = cons
+
     return base
+
+
+# ─── CMN.11350 (ExpressCargoDeclarationCustomMark) ──
+#
+# Структура (реальный пример 2026-05-20, 10 HAWB одной ДТ):
+#
+#   <ecdcm:ExpressCargoDeclarationCustomMark>
+#     <cat_ru:DocumentID>46461302-…</cat_ru:DocumentID>
+#     <ecdcm:ApplicationRegNumber>
+#       <cat_ru:CustomsCode>10001020</cat_ru:CustomsCode>
+#       <cat_ru:RegistrationDate>2026-05-19</cat_ru:RegistrationDate>
+#       <cat_ru:GTDNumber>0018015</cat_ru:GTDNumber>
+#     </ecdcm:ApplicationRegNumber>
+#
+#     <ecdcm:Consignment>                                ← один блок = одно решение
+#       <ecdcm:DecisionCode>10</ecdcm:DecisionCode>      ← 10=выпуск, 90=отказ, 70=запрос
+#       <ecdcm:DecisionDate>2026-05-19T11:26:23+03:00</…>
+#       <ecdcm:IndividualWayBill>
+#         <cat_ru:PrDocumentNumber>10262748701</…>       ← HAWB к которой относится решение
+#       </ecdcm:IndividualWayBill>
+#     </ecdcm:Consignment>
+#     <ecdcm:Consignment>                                ← следующий HAWB, может другое решение
+#       <ecdcm:DecisionCode>90</ecdcm:DecisionCode>      ← отказ для конкретно этой накладной
+#       <ecdcm:DecisionDate>2026-05-20T20:40:49+03:00</…>
+#       <ecdcm:IndividualWayBill>
+#         <cat_ru:PrDocumentNumber>10260241143</…>
+#       </ecdcm:IndividualWayBill>
+#     </ecdcm:Consignment>
+#     …
+#
+# Одна ДТ → может содержать смесь решений per-HAWB. Парсим список блоков,
+# inbox.dispatch применяет решение каждого блока ТОЛЬКО к его HAWB.
+
+_CONSIGNMENT_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?Consignment\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Consignment>',
+    re.S,
+)
+
+_PR_DOCUMENT_NUMBER_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?PrDocumentNumber\b[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?PrDocumentNumber>',
+)
+
+
+def parse_consignments(xml_text: str) -> list[dict]:
+    """Список <ecdcm:Consignment> блоков из CMN.11350.
+
+    Каждый элемент:
+      decision_code  '10' | '70' | '90' | …  — решение таможни
+      decision_date  ISO '2026-05-19T11:26:23+03:00' — когда вынесли
+      reason_code    '409' и т.п. (если был отказ/запрос)
+      reason_text    «Не представлены документы и сведения»
+      waybills       ['10262748701', …] — все PrDocumentNumber внутри блока
+                     (как правило одна HAWB, но схема допускает несколько)
+    """
+    out: list[dict] = []
+    for m in _CONSIGNMENT_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        dc = _first(body, 'DecisionCode').strip()
+        dd = _first(body, 'DecisionDate').strip()
+        rc = _first(body, 'ReasonCode').strip()
+        rt = _first(body, 'Reason').strip()
+        waybills = [w.strip() for w in _PR_DOCUMENT_NUMBER_RE.findall(body)
+                    if w.strip()]
+        if dc or waybills:
+            out.append({
+                'decision_code': dc,
+                'decision_date': dd,
+                'reason_code':   rc,
+                'reason_text':   rt,
+                'waybills':      waybills,
+            })
+    return out
 
 
 # ─── СВХ (CMN.13029) ──
