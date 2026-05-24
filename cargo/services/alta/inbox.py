@@ -308,9 +308,8 @@ def recompute_declaration(cargo: Optional[Cargo],
 def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
     """Batch-writeback (decl + filed_date) для списка HAWB.
 
-    Раньше делал по-одному → 49 HAWB × 2 поля × 2-3 API reads = 200+ reads,
-    мгновенно ловили Google quota 429. Теперь — batch-функции делают
-    1 col_values + 1 batch_update на колонку независимо от числа HAWB.
+    Если signals_suppressed() — пропускаем (бэдчевая операция типа reparse
+    отвечает за writeback сама в конце через resync_* команды).
     """
     if not hawbs:
         return
@@ -318,7 +317,10 @@ def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
         from cargo.services.sheets.writeback import (
             batch_write_declarations_for_hawbs,
             batch_write_filed_dates_for_hawbs,
+            signals_suppressed,
         )
+        if signals_suppressed():
+            return
         for h in hawbs:
             h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
         batch_write_declarations_for_hawbs(hawbs)
@@ -421,13 +423,19 @@ def apply_status(msg: AltaInboxMessage,
     # customs_declaration_number) — каждый save() в change_customs_status
     # обычно стартует фоновый поток с 2-3 API reads. На 49 HAWB одной
     # декларации = 100+ reads → 429. После цикла делаем ОДИН batch-writeback.
+    #
+    # Если уже внутри bulk-режима (reparse, import) — caller сам сделает resync,
+    # не запускаем свой batch_write.
     from cargo.services.sheets.writeback import (
         begin_batch_writeback, end_batch_writeback,
+        signals_suppressed,
         batch_write_release_dates_for_hawbs,
         batch_write_filed_dates_for_hawbs,
         batch_write_declarations_for_hawbs,
     )
-    begin_batch_writeback()
+    in_bulk = signals_suppressed()
+    if not in_bulk:
+        begin_batch_writeback()
     try:
         for h in targets:
             # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
@@ -447,11 +455,12 @@ def apply_status(msg: AltaInboxMessage,
                 logger.exception('change_customs_status failed for HAWB %s', h.pk)
                 errors.append(f'HAWB {h.hawb_number}: {e}')
     finally:
-        end_batch_writeback()
+        if not in_bulk:
+            end_batch_writeback()
 
     # Batch-writeback в Sheets для всех успешно изменённых HAWB.
-    # Делаем в фоновом потоке чтобы не блокировать ответ агенту.
-    if applied_hawbs:
+    # Если bulk-режим (reparse) — пропускаем, caller сделает resync в конце.
+    if applied_hawbs and not in_bulk:
         # refresh — change_customs_status делал save() с auto-clear правилами
         # (Rule 4 может стереть decl_number и т.п.), нужны актуальные значения.
         for h in applied_hawbs:

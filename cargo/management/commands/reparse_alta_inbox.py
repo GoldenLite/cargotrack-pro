@@ -59,6 +59,17 @@ class Command(BaseCommand):
         pks = list(qs.values_list('pk', flat=True))
         self.stdout.write(f'Reparse: {len(pks)} messages, dry_run={opts["dry_run"]}')
 
+        # ── Подавляем Sheets writeback на время bulk-обработки ──────────
+        # Без этого 264 сообщения × 3 batch-writeback'а = 800+ API calls →
+        # Google quota 300/min → 429 storm. В конце один раз вызываем resync*
+        # команды которые ОДНИМ проходом записывают финальное состояние всех
+        # затронутых HAWB / Cargo. Если dry-run — никаких записей не нужно.
+        from cargo.services.sheets.writeback import (
+            begin_batch_writeback, end_batch_writeback,
+        )
+        if not opts['dry_run']:
+            begin_batch_writeback()
+
         changed = 0
         gtd_changed = 0
         errors = 0
@@ -114,6 +125,44 @@ class Command(BaseCommand):
             if i % 200 == 0:
                 self.stdout.write(f'  progress: {i}/{len(pks)} changed={changed} '
                                   f'gtd_changed={gtd_changed} errors={errors}')
+
+        # Снимаем подавление, делаем resync Sheets для всех затронутых HAWB/Cargo.
+        if not opts['dry_run']:
+            end_batch_writeback()
+
+            self.stdout.write('')
+            self.stdout.write(self.style.NOTICE('Sheets resync (после bulk-reparse)...'))
+            try:
+                from cargo.models import HouseWaybill, Cargo
+                from cargo.services.sheets.writeback import (
+                    batch_write_declarations_for_hawbs,
+                    batch_write_filed_dates_for_hawbs,
+                    batch_write_release_dates_for_hawbs,
+                    batch_write_svh_for_cargos,
+                )
+                # ДТ-номера
+                hawbs_decl = list(HouseWaybill.objects.exclude(customs_declaration_number=''))
+                if hawbs_decl:
+                    n = batch_write_declarations_for_hawbs(hawbs_decl)
+                    self.stdout.write(f'  decl: {n} cells ({len(hawbs_decl)} HAWB)')
+                # filed_date
+                hawbs_filed = list(HouseWaybill.objects.filter(filed_date__isnull=False))
+                if hawbs_filed:
+                    n = batch_write_filed_dates_for_hawbs(hawbs_filed)
+                    self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_filed)} HAWB)')
+                # release_date
+                hawbs_rel = list(HouseWaybill.objects.filter(release_date__isnull=False))
+                if hawbs_rel:
+                    n = batch_write_release_dates_for_hawbs(hawbs_rel)
+                    self.stdout.write(f'  release_date: {n} cells ({len(hawbs_rel)} HAWB)')
+                # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number)
+                cargos_svh = list(Cargo.objects.filter(scan_into_bond__isnull=False)
+                                  .exclude(svh_do1_reg_number=''))
+                if cargos_svh:
+                    n = batch_write_svh_for_cargos(cargos_svh)
+                    self.stdout.write(f'  svh: {n} cells ({len(cargos_svh)} cargos)')
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 
         self.stdout.write(self.style.SUCCESS(
             f'Done. processed={len(pks)} parsed_meta_changed={changed} '
