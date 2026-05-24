@@ -313,22 +313,17 @@ def recompute_declaration(cargo: Optional[Cargo],
         HouseWaybill.objects.filter(pk=hawb.pk).update(
             customs_declaration_number=target_decl)
 
-        # filed_date: дата подачи декларации = дата регистрации в таможне
-        # (parsed_meta['registration_date'] из CMN-релиза). Ставим ОДИН раз
-        # на пустое поле, через прямой UPDATE (минуя save()-автоочистки).
-        # Writeback в Sheets отдельно — потому что direct UPDATE не дёргает
-        # post_save сигнал.
-        if target_decl:
-            reg_date_str = (latest.parsed_meta or {}).get('registration_date') or ''
-            if reg_date_str:
-                from django.utils.dateparse import parse_date
-                from datetime import datetime as _dt, time as _dt_time
-                d = parse_date(reg_date_str)
-                if d:
-                    filed_dt = timezone.make_aware(_dt.combine(d, _dt_time(0, 0)))
-                    HouseWaybill.objects.filter(
-                        pk=hawb.pk, filed_date__isnull=True
-                    ).update(filed_date=filed_dt)
+        # filed_date: момент регистрации ДТ в таможне. Берём msg.prepared_at
+        # (PreparationDateTime сообщения CMN.11350) — это полный timestamp когда
+        # таможня сформировала релиз, ближайшая разумная аппроксимация. В самом
+        # XML есть RegistrationDate, но это ТОЛЬКО дата без времени — юзер хочет
+        # видеть чч:мм:сс, иначе колонка показывает 00:00:00. Ставим ОДИН раз на
+        # пустое поле через прямой UPDATE (минуя save()-автоочистки). Writeback
+        # в Sheets отдельно — direct UPDATE не дёргает post_save сигнал.
+        if target_decl and latest.prepared_at:
+            HouseWaybill.objects.filter(
+                pk=hawb.pk, filed_date__isnull=True
+            ).update(filed_date=latest.prepared_at)
     return [hawb]
 
 
