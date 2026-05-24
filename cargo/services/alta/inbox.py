@@ -869,14 +869,14 @@ def match_svh_do2(msg: AltaInboxMessage) -> tuple[Optional[Cargo], list[HouseWay
     TransportDoc / ProduceDocuments). НЕЛЬЗЯ растягивать ДО2 на всю партию —
     в одной партии бывает много ДО2 на разные ДТ/HAWB в разное время.
 
-    Стратегия (две независимые linka, объединяем результаты):
-    1. По svh_do2_doc_numbers (PrDocumentNumber из TransportDoc) ищем
-       Cargo по MAWB → потом HAWB по HAWB-номеру из того же списка.
-    2. По svh_do2_declarations (рег.номер ДТ из ProduceDocuments) ищем
-       HAWB с таким customs_declaration_number. ДО2 списывает груз
-       ПО конкретной ДТ — это самый надёжный признак привязки.
-    3. Если ни то ни другое не дало HAWB — fallback по ссылке на ДО-1
-       (Cargo с этим svh_do1_reg_number), но БЕЗ конкретных HAWB.
+    Стратегия — ТОЛЬКО прямой матчинг HAWB-номера из TransportDoc:
+    1. По svh_do2_doc_numbers ищем Cargo (по MAWB) → потом HAWB партии
+       чьи hawb_number есть в этом же списке.
+
+    Намеренно НЕ матчим через customs_declaration_number из ProduceDocuments:
+    при multi-waybill релизе одна ДТ покрывает несколько HAWB партии, но
+    ДО2 относится только к КОНКРЕТНЫМ HAWB перечисленным в TransportDoc.
+    Матчинг по ДТ растянул бы дату ДО2 одной HAWB на всех её siblings.
 
     Возвращает (cargo, [hawbs]). [hawbs] может быть пустым — тогда
     apply_svh_do2 НЕ применяет ничего (не растягиваем на всю партию).
@@ -889,12 +889,6 @@ def match_svh_do2(msg: AltaInboxMessage) -> tuple[Optional[Cargo], list[HouseWay
         for n in doc_numbers_raw
     ]
     doc_numbers = [n for n in doc_numbers if n]
-
-    declarations = [
-        (d or '').strip()
-        for d in (parsed.get('svh_do2_declarations') or [])
-    ]
-    declarations = [d for d in declarations if d]
 
     # Поиск Cargo: по MAWB в TransportDoc → по ДО-1 fallback
     cargo: Optional[Cargo] = None
@@ -910,20 +904,8 @@ def match_svh_do2(msg: AltaInboxMessage) -> tuple[Optional[Cargo], list[HouseWay
     if not cargo:
         return (None, [])
 
-    # Поиск конкретных HAWB: объединяем 2 стратегии
-    hawb_ids: set[int] = set()
-
-    # А) Прямое упоминание HAWB-номера в TransportDoc
-    if doc_numbers:
-        for h in cargo.hawbs.filter(hawb_number__in=doc_numbers):
-            hawb_ids.add(h.pk)
-
-    # Б) По рег.номеру ДТ из ProduceDocuments
-    if declarations:
-        for h in cargo.hawbs.filter(customs_declaration_number__in=declarations):
-            hawb_ids.add(h.pk)
-
-    hawbs = list(HouseWaybill.objects.filter(pk__in=hawb_ids))
+    # Конкретные HAWB — только прямое упоминание hawb_number в TransportDoc
+    hawbs = list(cargo.hawbs.filter(hawb_number__in=doc_numbers)) if doc_numbers else []
     return (cargo, hawbs)
 
 

@@ -150,7 +150,13 @@ class Command(BaseCommand):
                     batch_write_release_dates_for_hawbs,
                     batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
+                    drop_deprecated_columns,
                 )
+                # Одноразовая очистка: убрать колонки которые мы больше не
+                # пишем (юзер их не использует).
+                n_dropped = drop_deprecated_columns()
+                if n_dropped:
+                    self.stdout.write(f'  dropped {n_dropped} deprecated column(s)')
                 # decl/filed_date/release_date: включаем ВСЕ HAWB у которых
                 # есть привязанное CMN.11350 (или эти поля уже стоят) — нужно
                 # чтобы при per-Consignment пересчёте ОЧИЩАЛИСЬ ячейки HAWB

@@ -305,7 +305,13 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
         backoff_steps = [2, 4, 8]
         for attempt in range(len(backoff_steps) + 1):
             try:
-                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
+                # USER_ENTERED парсит дату по locale и применяет существующий
+                # формат ячейки (часто dd.mm.yyyy) → время теряется при
+                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
+                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
+                # RAW=USER_ENTERED.
+                ws.batch_update(updates, value_input_option='RAW')
                 total_writes += len(updates)
                 logger.info('svh writeback Cargo %s: %d cells in %s',
                             cargo.awb_number, len(updates), source.name)
@@ -426,7 +432,13 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         backoff_steps = [2, 4, 8, 16]
         for attempt in range(len(backoff_steps) + 1):
             try:
-                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
+                # USER_ENTERED парсит дату по locale и применяет существующий
+                # формат ячейки (часто dd.mm.yyyy) → время теряется при
+                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
+                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
+                # RAW=USER_ENTERED.
+                ws.batch_update(updates, value_input_option='RAW')
                 total += len(updates)
                 logger.info('batch svh: wrote %d cells in %s',
                             len(updates), source.name)
@@ -591,7 +603,13 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         backoff_steps = [2, 4, 8, 16]
         for attempt in range(len(backoff_steps) + 1):
             try:
-                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
+                # USER_ENTERED парсит дату по locale и применяет существующий
+                # формат ячейки (часто dd.mm.yyyy) → время теряется при
+                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
+                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
+                # RAW=USER_ENTERED.
+                ws.batch_update(updates, value_input_option='RAW')
                 total += len(updates)
                 logger.info('batch %s: wrote %d cells in %s',
                             log_label, len(updates), source.name)
@@ -632,6 +650,63 @@ def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
         CARGOTRACK_SVH_DO2_DATE_HEADER, 'svh_do2_date',
         after_header=CARGOTRACK_RELEASE_DATE_HEADER,
     )
+
+
+# Колонки которые мы когда-то создавали, но больше не используем.
+# Удаляются однократно при reparse через drop_deprecated_columns().
+DEPRECATED_COLUMN_HEADERS = (
+    'CargoTrack: рег. номер ДО2',  # был, юзер не использует
+)
+
+
+def drop_deprecated_columns() -> int:
+    """Удаляет из «Общее» все колонки из DEPRECATED_COLUMN_HEADERS.
+
+    Идемпотентно — если колонки нет, ничего не делает. Возвращает кол-во
+    удалённых колонок (для логирования в reparse).
+    """
+    if not DEPRECATED_COLUMN_HEADERS:
+        return 0
+    sources = SheetSource.objects.filter(kind='general')
+    total_dropped = 0
+    for source in sources:
+        try:
+            ws = open_worksheet(source)
+        except SheetsConfigError as e:
+            logger.warning('drop_deprecated_columns: open failed for %s: %s',
+                           source.name, e)
+            continue
+        except Exception:
+            logger.exception('drop_deprecated_columns: open error for %s',
+                             source.name)
+            continue
+
+        try:
+            header_values = ws.row_values(source.header_row)
+        except Exception:
+            logger.exception('drop_deprecated_columns: row_values failed')
+            continue
+
+        # Идём СПРАВА НАЛЕВО — иначе индексы сдвигаются после удаления
+        to_drop = []
+        for idx, val in enumerate(header_values, start=1):
+            if (val or '').strip() in DEPRECATED_COLUMN_HEADERS:
+                to_drop.append((idx, val.strip()))
+        for idx, name in sorted(to_drop, reverse=True):
+            try:
+                ws.delete_columns(idx)
+                logger.info('Dropped deprecated column "%s" (idx=%d) from %s',
+                            name, idx, source.name)
+                total_dropped += 1
+                # Инвалидируем кеш индексов колонок этого ws
+                ws_key = f'{ws.spreadsheet.id}:{ws.id}'
+                for k in list(_col_index_cache.keys()):
+                    if k[0] == ws_key:
+                        del _col_index_cache[k]
+            except Exception:
+                logger.exception('Failed to drop column "%s" (idx=%d) from %s',
+                                 name, idx, source.name)
+    return total_dropped
 
 
 def batch_write_declarations_for_hawbs(hawbs: list) -> int:
@@ -707,7 +782,13 @@ def batch_write_declarations_for_hawbs(hawbs: list) -> int:
         backoff_steps = [2, 4, 8, 16]
         for attempt in range(len(backoff_steps) + 1):
             try:
-                ws.batch_update(updates, value_input_option='USER_ENTERED')
+                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
+                # USER_ENTERED парсит дату по locale и применяет существующий
+                # формат ячейки (часто dd.mm.yyyy) → время теряется при
+                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
+                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
+                # RAW=USER_ENTERED.
+                ws.batch_update(updates, value_input_option='RAW')
                 total += len(updates)
                 logger.info('batch decl: wrote %d cells in %s',
                             len(updates), source.name)
