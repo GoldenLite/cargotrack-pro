@@ -197,10 +197,6 @@ class Cargo(models.Model):
     scan_out_of_bond = models.DateTimeField('Выезд со склада', null=True, blank=True)
     svh_do1_reg_number = models.CharField('Рег. номер ДО1', max_length=64, blank=True,
                                           help_text='10001020/220526/5005840 — из CMN.13029 (опись СВХ)')
-    svh_do2_reg_number = models.CharField('Рег. номер ДО2', max_length=64, blank=True,
-                                          help_text='10001020/240526/5049065 — из CMN.13014 (выпуск со СВХ)')
-    svh_do2_send_at = models.DateTimeField('Дата ДО2', null=True, blank=True,
-                                           help_text='SendDate+SendTime из CMN.13014 — момент выпуска со СВХ')
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True, db_index=True)
@@ -794,6 +790,10 @@ class HouseWaybill(models.Model):
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True)
     filed_date   = models.DateTimeField('Дата подачи', null=True, blank=True)
     release_date = models.DateTimeField('Дата выпуска', null=True, blank=True)
+    svh_do2_send_at = models.DateTimeField(
+        'Дата ДО2', null=True, blank=True,
+        help_text='SendDate+SendTime из CMN.13014 (выпуск этой накладной со СВХ). '
+                  'Привязка через TransportDoc или ProduceDocuments (рег.номер ДТ).')
 
     # ── Документы для таможенного оформления ──
     doc_invoice      = models.BooleanField('Инвойс', default=False)

@@ -148,6 +148,7 @@ class Command(BaseCommand):
                     batch_write_declarations_for_hawbs,
                     batch_write_filed_dates_for_hawbs,
                     batch_write_release_dates_for_hawbs,
+                    batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
                 )
                 # decl/filed_date/release_date: включаем ВСЕ HAWB у которых
@@ -157,11 +158,17 @@ class Command(BaseCommand):
                 # деле получили отказ/запрос документов (поля теперь пустые
                 # → ячейки тоже должны стать пустыми).
                 from django.db.models import Q
+                # Включаем И HAWB у которых был CMN.13014 (ДО2) — нужно
+                # пройтись и переписать «дата ДО2», для не-затронутых
+                # очистить стейл (после переноса поля Cargo→HouseWaybill
+                # старые ячейки растянулись на всю партию).
                 hawbs_touched = list(HouseWaybill.objects.filter(
                     Q(filed_date__isnull=False)
                     | Q(release_date__isnull=False)
+                    | Q(svh_do2_send_at__isnull=False)
                     | Q(customs_declaration_number__gt='')
-                    | Q(inbox_messages__msg_type='CMN.11350')
+                    | Q(inbox_messages__msg_type__in=('CMN.11350', 'CMN.13014'))
+                    | Q(mawb__hawbs__inbox_messages__msg_type='CMN.13014')
                 ).distinct())
                 if hawbs_touched:
                     n = batch_write_declarations_for_hawbs(hawbs_touched)
@@ -170,6 +177,8 @@ class Command(BaseCommand):
                     self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_release_dates_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  release_date: {n} cells ({len(hawbs_touched)} HAWB)')
+                    n = batch_write_svh_do2_dates_for_hawbs(hawbs_touched)
+                    self.stdout.write(f'  svh_do2: {n} cells ({len(hawbs_touched)} HAWB)')
                 # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number).
                 # Берём ВСЕ Cargos с HAWB в Sheets «Общее». batch_write_svh_for_cargos
                 # сравнивает значение с тем что в ячейке и пишет только при

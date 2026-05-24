@@ -861,45 +861,82 @@ def apply_svh_do1(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     return None
 
 
-def match_svh_do2(msg: AltaInboxMessage) -> Optional[Cargo]:
-    """Подбирает Cargo для CMN.13014 (ДО2 — выпуск со СВХ).
+def match_svh_do2(msg: AltaInboxMessage) -> tuple[Optional[Cargo], list[HouseWaybill]]:
+    """Подбирает Cargo и конкретные HAWB для CMN.13014 (ДО2 — выпуск со СВХ).
 
-    В отличие от CMN.13010 здесь явно перечислены MAWB+HAWB в TransportDoc.
-    Стратегия:
-    1. По любому из svh_do2_doc_numbers (PrDocumentNumber из TransportDoc) →
-       Cargo.awb_number_iexact. Точно идентифицирует партию.
-    2. Fallback: по ссылке на ДО-1 из Comments (svh_do2_do1_ref) → Cargo
-       с этим svh_do1_reg_number.
+    Один CMN.13014 = одно событие выпуска со склада. Может покрывать одну
+    или несколько HAWB партии (зависит от того сколько перечислено в
+    TransportDoc / ProduceDocuments). НЕЛЬЗЯ растягивать ДО2 на всю партию —
+    в одной партии бывает много ДО2 на разные ДТ/HAWB в разное время.
+
+    Стратегия (две независимые linka, объединяем результаты):
+    1. По svh_do2_doc_numbers (PrDocumentNumber из TransportDoc) ищем
+       Cargo по MAWB → потом HAWB по HAWB-номеру из того же списка.
+    2. По svh_do2_declarations (рег.номер ДТ из ProduceDocuments) ищем
+       HAWB с таким customs_declaration_number. ДО2 списывает груз
+       ПО конкретной ДТ — это самый надёжный признак привязки.
+    3. Если ни то ни другое не дало HAWB — fallback по ссылке на ДО-1
+       (Cargo с этим svh_do1_reg_number), но БЕЗ конкретных HAWB.
+
+    Возвращает (cargo, [hawbs]). [hawbs] может быть пустым — тогда
+    apply_svh_do2 НЕ применяет ничего (не растягиваем на всю партию).
     """
     parsed = msg.parsed_meta or {}
 
-    for num in parsed.get('svh_do2_doc_numbers') or []:
-        normalized = (num or '').replace('.', '').replace(' ', '').strip()
-        if not normalized:
-            continue
-        c = Cargo.objects.filter(awb_number__iexact=normalized).first()
-        if c:
-            return c
+    doc_numbers_raw = parsed.get('svh_do2_doc_numbers') or []
+    doc_numbers = [
+        (n or '').replace('.', '').replace(' ', '').strip()
+        for n in doc_numbers_raw
+    ]
+    doc_numbers = [n for n in doc_numbers if n]
 
-    do1_ref = (parsed.get('svh_do2_do1_ref') or '').strip()
-    if do1_ref:
-        c = Cargo.objects.filter(svh_do1_reg_number=do1_ref).first()
-        if c:
-            return c
+    declarations = [
+        (d or '').strip()
+        for d in (parsed.get('svh_do2_declarations') or [])
+    ]
+    declarations = [d for d in declarations if d]
 
-    return None
+    # Поиск Cargo: по MAWB в TransportDoc → по ДО-1 fallback
+    cargo: Optional[Cargo] = None
+    for num in doc_numbers:
+        cargo = Cargo.objects.filter(awb_number__iexact=num).first()
+        if cargo:
+            break
+    if not cargo:
+        do1_ref = (parsed.get('svh_do2_do1_ref') or '').strip()
+        if do1_ref:
+            cargo = Cargo.objects.filter(svh_do1_reg_number=do1_ref).first()
+
+    if not cargo:
+        return (None, [])
+
+    # Поиск конкретных HAWB: объединяем 2 стратегии
+    hawb_ids: set[int] = set()
+
+    # А) Прямое упоминание HAWB-номера в TransportDoc
+    if doc_numbers:
+        for h in cargo.hawbs.filter(hawb_number__in=doc_numbers):
+            hawb_ids.add(h.pk)
+
+    # Б) По рег.номеру ДТ из ProduceDocuments
+    if declarations:
+        for h in cargo.hawbs.filter(customs_declaration_number__in=declarations):
+            hawb_ids.add(h.pk)
+
+    hawbs = list(HouseWaybill.objects.filter(pk__in=hawb_ids))
+    return (cargo, hawbs)
 
 
-def apply_svh_do2(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
+def apply_svh_do2(msg: AltaInboxMessage,
+                  cargo: Cargo,
+                  hawbs: list[HouseWaybill]) -> Optional[str]:
     """Обработка ДО2 (CMN.13014, WHGoodOut — выпуск груза со СВХ).
 
-    Заполняет Cargo:
-    - svh_do2_reg_number ← рег.номер ДО2 (10001020/240526/5049065)
-    - svh_do2_send_at ← дата+время выпуска (SendDate + SendTime)
-    - warehouse_license ← если ещё пусто
+    Заполняет HouseWaybill.svh_do2_send_at у каждой HAWB из hawbs.
+    На уровне Cargo пишем только warehouse_license (если ещё пусто).
 
-    Перезаписывает предыдущее svh_do2_send_at если оно отличается (например,
-    после повторной обработки сообщения). Триггерит writeback.
+    Если hawbs пуст — НЕ применяем ничего, чтобы не растянуть дату на
+    всю партию (см. docstring match_svh_do2).
     """
     from datetime import datetime, time as dt_time
     from django.utils.dateparse import parse_date
@@ -909,17 +946,18 @@ def apply_svh_do2(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     license_ = (parsed.get('svh_warehouse_license') or '').strip()
     do2_date = (parsed.get('svh_do2_send_date') or '').strip()
     do2_time = (parsed.get('svh_do2_send_time') or '').strip()
-    do2_reg  = (parsed.get('svh_do2_reg_number') or '').strip()
 
-    update_fields = []
+    # Лицензия — на Cargo (один раз)
     if license_ and not (cargo.warehouse_license or '').strip():
         cargo.warehouse_license = license_
-        update_fields.append('warehouse_license')
+        cargo.save(update_fields=['warehouse_license'])
 
-    if do2_reg and (cargo.svh_do2_reg_number or '').strip() != do2_reg:
-        cargo.svh_do2_reg_number = do2_reg
-        update_fields.append('svh_do2_reg_number')
+    if not hawbs:
+        # Нет конкретных HAWB — нечего применять.
+        return None
 
+    # Парсим момент выпуска: SendDate + SendTime
+    new_dt = None
     if do2_date:
         d = parse_date(do2_date)
         if d:
@@ -927,21 +965,42 @@ def apply_svh_do2(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
             if do2_time:
                 try:
                     h, m, s = do2_time.split(':', 2)
-                    # SendTime может быть с микросекундами '18:30:05.7096954'
                     sec = int(float(s.split('.')[0]))
                     t = dt_time(int(h), int(m), sec)
                 except (ValueError, IndexError):
                     pass
             new_dt = tz.make_aware(datetime.combine(d, t))
-            if cargo.svh_do2_send_at != new_dt:
-                cargo.svh_do2_send_at = new_dt
-                update_fields.append('svh_do2_send_at')
 
-    if update_fields:
-        cargo.save(update_fields=update_fields)
+    if not new_dt:
+        return None
 
-    _writeback_svh_cargo(cargo)
+    # Записываем svh_do2_send_at у каждой HAWB прямым UPDATE минуя save()
+    # (чтобы не дёргать save()-rules, которые могут стереть decl_number и т.п.)
+    updated_pks = [h.pk for h in hawbs]
+    HouseWaybill.objects.filter(pk__in=updated_pks).update(svh_do2_send_at=new_dt)
+
+    # Триггерим per-HAWB writeback в Sheets
+    refreshed = list(HouseWaybill.objects.filter(pk__in=updated_pks))
+    _writeback_svh_do2_hawbs(refreshed)
     return None
+
+
+def _writeback_svh_do2_hawbs(hawbs: list[HouseWaybill]) -> None:
+    """Per-HAWB writeback дат ДО2 в Sheets. Под suppress — no-op."""
+    if not hawbs:
+        return
+    try:
+        from cargo.services.sheets.writeback import (
+            batch_write_svh_do2_dates_for_hawbs,
+            signals_suppressed,
+        )
+        if signals_suppressed():
+            return
+        batch_write_svh_do2_dates_for_hawbs(hawbs)
+    except ImportError:
+        logger.info('svh ДО2 writeback module not available')
+    except Exception:
+        logger.exception('svh ДО2 writeback failed')
 
 
 def dispatch(msg: AltaInboxMessage) -> None:
@@ -989,11 +1048,15 @@ def dispatch(msg: AltaInboxMessage) -> None:
 
     # ── СВХ-ветка: ДО2, выпуск со склада (CMN.13014) ──
     if msg.msg_kind == 'svh_do2_registered':
-        cargo = match_svh_do2(msg)
+        cargo, do2_hawbs = match_svh_do2(msg)
         if cargo:
             msg.cargo = cargo
-            msg.save(update_fields=['msg_kind', 'cargo', 'parsed_meta'])
-            err = apply_svh_do2(msg, cargo)
+            # Если найдена одна конкретная HAWB — фиксируем её на msg
+            # для удобства фильтрации в админке/UI.
+            if len(do2_hawbs) == 1:
+                msg.hawb = do2_hawbs[0]
+            msg.save(update_fields=['msg_kind', 'cargo', 'hawb', 'parsed_meta'])
+            err = apply_svh_do2(msg, cargo, do2_hawbs)
             if err:
                 msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': err}
                 msg.status_applied = False

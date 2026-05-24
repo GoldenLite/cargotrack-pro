@@ -430,6 +430,11 @@ _TRANSPORT_DOC_BLOCK_RE = re.compile(
     re.S,
 )
 
+_PRODUCE_DOCUMENTS_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?ProduceDocuments\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?ProduceDocuments>',
+    re.S,
+)
+
 _SVH_LICENSE_NUMBER_BLOCK_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?SVHLicenceNumber\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?SVHLicenceNumber>',
     re.S,
@@ -502,5 +507,34 @@ def parse_svh_do2_out(xml_text: str) -> dict:
     do1_ref_m = _DO1_REF_RE.search(xml_text)
     if do1_ref_m:
         out['svh_do2_do1_ref'] = do1_ref_m.group(1).strip()
+
+    # Рег.номера ДТ из ProduceDocuments — ключ к per-HAWB матчингу.
+    # ДО2 выпускает груз ПО конкретной ДТ → ищем HAWB у которых эта ДТ.
+    # Структура:
+    #   <whgou:ProduceDocuments>
+    #     <cat_ru:PrDocumentName>ДТ</cat_ru:PrDocumentName>
+    #     <cat_ru:PrDocumentNumber>5086913</cat_ru:PrDocumentNumber>  ← GTDNumber
+    #     <cat_ru:PrDocumentDate>2026-03-24</cat_ru:PrDocumentDate>
+    #     <catWH_ru:PresentedDocumentModeCode>09035</catWH_ru:PresentedDocumentModeCode>
+    #     <whgou:CustomsCode>10131010</whgou:CustomsCode>
+    #   </whgou:ProduceDocuments>
+    # PresentedDocumentModeCode 09035 = «Декларация на товары».
+    declarations: list[str] = []
+    for pdoc_m in _PRODUCE_DOCUMENTS_BLOCK_RE.finditer(xml_text):
+        body = pdoc_m.group(1)
+        mode = _first(body, 'PresentedDocumentModeCode').strip()
+        if mode != '09035':  # интересует только ДТ
+            continue
+        cc = _first(body, 'CustomsCode').strip()
+        gn = _first(body, 'PrDocumentNumber').strip()
+        pd = _first(body, 'PrDocumentDate').strip()
+        if cc and gn and pd:
+            try:
+                y, m, d = pd.split('-')
+                pd_short = f'{d}{m}{y[2:]}'
+            except ValueError:
+                pd_short = pd
+            declarations.append(f'{cc}/{pd_short}/{gn}')
+    out['svh_do2_declarations'] = declarations
 
     return out

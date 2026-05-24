@@ -59,7 +59,8 @@ CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
 CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
-CARGOTRACK_SVH_DO2_REG_HEADER  = 'CargoTrack: рег. номер ДО2'
+# Юзер не использует рег.номер ДО2 в Sheets, колонку не создаём
+# и не пишем (в БД хранится только дата ДО2 на HAWB).
 CARGOTRACK_FILED_DATE_HEADER   = 'CargoTrack: дата подачи'
 CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
 
@@ -207,15 +208,14 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     lic = (cargo.warehouse_license or '').strip()
     placed_dt = cargo.scan_into_bond
     do1_reg = (cargo.svh_do1_reg_number or '').strip()
-    do2_dt  = getattr(cargo, 'svh_do2_send_at', None)
-    do2_reg = (getattr(cargo, 'svh_do2_reg_number', '') or '').strip()
+    # ДО2 НЕ на Cargo — это per-HAWB поле (HouseWaybill.svh_do2_send_at),
+    # отдельный writeback batch_write_svh_do2_dates_for_hawbs.
     # Не делаем early-return при пустых значениях — функция должна
     # уметь ОЧИЩАТЬ Sheets-ячейки если данные были откачены на стороне БД.
 
     # Дата для Sheets — формат дд.мм.гггг чч:мм:сс по МСК. _local_date_str
     # переводит из UTC если datetime aware.
     placed_str = _local_date_str(placed_dt)
-    do2_str    = _local_date_str(do2_dt)
 
     # Все HAWB партии
     hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
@@ -261,14 +261,6 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                                                 CARGOTRACK_SVH_DATE_HEADER)
             col_do1      = _ensure_named_column(ws, source.header_row,
                                                 CARGOTRACK_SVH_DO1_HEADER)
-            # Дата ДО2 идёт СРАЗУ ПОСЛЕ колонки «дата выпуска» — юзер
-            # явно попросил порядок: подача → выпуск → ДО2 → дальше.
-            col_do2_date = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO2_DATE_HEADER,
-                                                after_header=CARGOTRACK_RELEASE_DATE_HEADER)
-            # Рег.номер ДО2 — рядом с остальными ДО, в конец.
-            col_do2_reg  = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO2_REG_HEADER)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: ensure column failed: %s', e)
             continue
@@ -279,8 +271,6 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
             existing_lic      = ws.col_values(col_lic)
             existing_date     = ws.col_values(col_date)
             existing_do1      = ws.col_values(col_do1)
-            existing_do2_date = ws.col_values(col_do2_date)
-            existing_do2_reg  = ws.col_values(col_do2_reg)
         except gspread.exceptions.APIError as e:
             logger.exception('svh writeback: col_values failed: %s', e)
             continue
@@ -288,8 +278,6 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
         letter_lic      = _col_letter(col_lic)
         letter_date     = _col_letter(col_date)
         letter_do1      = _col_letter(col_do1)
-        letter_do2_date = _col_letter(col_do2_date)
-        letter_do2_reg  = _col_letter(col_do2_reg)
 
         updates = []
         for row_idx in row_indices:
@@ -299,10 +287,6 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
-            cur_do2_date = (existing_do2_date[row_idx - 1]
-                            if row_idx - 1 < len(existing_do2_date) else '').strip()
-            cur_do2_reg = (existing_do2_reg[row_idx - 1]
-                           if row_idx - 1 < len(existing_do2_reg) else '').strip()
             # Пишем даже если значение пустое — нужно чтобы при откате
             # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
             # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
@@ -312,10 +296,6 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
             if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
-            if cur_do2_date != do2_str:
-                updates.append({'range': f'{letter_do2_date}{row_idx}', 'values': [[do2_str]]})
-            if cur_do2_reg != do2_reg:
-                updates.append({'range': f'{letter_do2_reg}{row_idx}', 'values': [[do2_reg]]})
 
         if not updates:
             continue
@@ -399,11 +379,6 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                                                 CARGOTRACK_SVH_DATE_HEADER)
             col_do1      = _ensure_named_column(ws, source.header_row,
                                                 CARGOTRACK_SVH_DO1_HEADER)
-            col_do2_date = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO2_DATE_HEADER,
-                                                after_header=CARGOTRACK_RELEASE_DATE_HEADER)
-            col_do2_reg  = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO2_REG_HEADER)
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch svh: open/ensure failed: %s', e)
             continue
@@ -413,8 +388,6 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
             existing_lic      = ws.col_values(col_lic)
             existing_date     = ws.col_values(col_date)
             existing_do1      = ws.col_values(col_do1)
-            existing_do2_date = ws.col_values(col_do2_date)
-            existing_do2_reg  = ws.col_values(col_do2_reg)
         except gspread.exceptions.APIError as e:
             logger.exception('batch svh: col_values failed: %s', e)
             continue
@@ -422,16 +395,12 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         letter_lic      = _col_letter(col_lic)
         letter_date     = _col_letter(col_date)
         letter_do1      = _col_letter(col_do1)
-        letter_do2_date = _col_letter(col_do2_date)
-        letter_do2_reg  = _col_letter(col_do2_reg)
 
         updates = []
         for row_idx, cargo in items:
             lic = (cargo.warehouse_license or '').strip()
             placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
-            do2_str = _local_date_str(getattr(cargo, 'svh_do2_send_at', None))
-            do2_reg = (getattr(cargo, 'svh_do2_reg_number', '') or '').strip()
 
             cur_lic = (existing_lic[row_idx - 1]
                        if row_idx - 1 < len(existing_lic) else '').strip()
@@ -439,10 +408,6 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
-            cur_do2_date = (existing_do2_date[row_idx - 1]
-                            if row_idx - 1 < len(existing_do2_date) else '').strip()
-            cur_do2_reg = (existing_do2_reg[row_idx - 1]
-                           if row_idx - 1 < len(existing_do2_reg) else '').strip()
 
             # Пишем даже если значение пустое — нужно чтобы при откате
             # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
@@ -453,10 +418,6 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
             if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
-            if cur_do2_date != do2_str:
-                updates.append({'range': f'{letter_do2_date}{row_idx}', 'values': [[do2_str]]})
-            if cur_do2_reg != do2_reg:
-                updates.append({'range': f'{letter_do2_reg}{row_idx}', 'values': [[do2_reg]]})
 
         if not updates:
             continue
@@ -551,12 +512,14 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
 
 
 def _batch_write_hawb_dates(hawbs: list, value_attr: str,
-                            header_name: str, log_label: str) -> int:
+                            header_name: str, log_label: str,
+                            after_header: str = '') -> int:
     """Generic batch writeback per-HAWB даты — 1 col_values + 1 batch_update.
 
-    Используется и для filed_date, и для release_date. value_attr — имя
-    атрибута HAWB-объекта (например 'filed_date'), header_name — колонка в
-    Sheets, log_label — префикс для логов.
+    Используется для filed_date, release_date, svh_do2_send_at. value_attr —
+    имя атрибута HAWB-объекта (например 'filed_date'), header_name — колонка
+    в Sheets, log_label — префикс для логов, after_header — куда вставить
+    колонку при первом создании (пробрасывается в _ensure_named_column).
     """
     if not hawbs:
         return 0
@@ -599,7 +562,8 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         source = sources[source_id]
         try:
             ws = open_worksheet(source)
-            col = _ensure_named_column(ws, source.header_row, header_name)
+            col = _ensure_named_column(ws, source.header_row, header_name,
+                                       after_header=after_header)
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch %s: open/ensure failed: %s', log_label, e)
             continue
@@ -655,6 +619,19 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
     """Batch writeback release_date — для resync_release_dates."""
     return _batch_write_hawb_dates(hawbs, 'release_date',
                                    CARGOTRACK_RELEASE_DATE_HEADER, 'release_date')
+
+
+def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
+    """Batch writeback svh_do2_send_at — для resync ДО2.
+
+    Колонка вставляется СРАЗУ после «дата выпуска» (юзер просил этот порядок).
+    Для HAWB у которых svh_do2_send_at пуст — пишем '' (очищаем стейл).
+    """
+    return _batch_write_hawb_dates(
+        hawbs, 'svh_do2_send_at',
+        CARGOTRACK_SVH_DO2_DATE_HEADER, 'svh_do2_date',
+        after_header=CARGOTRACK_RELEASE_DATE_HEADER,
+    )
 
 
 def batch_write_declarations_for_hawbs(hawbs: list) -> int:
