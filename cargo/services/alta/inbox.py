@@ -280,13 +280,13 @@ def recompute_declaration(cargo: Optional[Cargo],
         # разными партиями (HAWB-номера не уникальны глобально).
         cond = cond | (Q(raw_xml__icontains=hawb.hawb_number) & Q(cargo=hawb.mawb))
 
-    # Берём ВСЕ kinds которые несут факт подачи под ДТ: released/rejected/
-    # hold/examination — HAWB подана под этой ДТ, независимо от решения
-    # таможни. customs_status уже отражает конкретный исход. withdrawn —
-    # отзыв декларации, обнуляет ДТ.
+    # ДТ в Sheets показываем ТОЛЬКО когда есть факт выпуска — release_date
+    # и customs_declaration_number идут в паре. HOLD/REJECTED означают что
+    # выпуска нет, ДТ-номер в таких случаях скрываем (см. clear-logic в
+    # change_customs_status). withdrawn — отзыв декларации, обнуляет ДТ.
     qs = AltaInboxMessage.objects.filter(
         cond,
-        msg_kind__in=('released', 'withdrawn', 'rejected', 'hold', 'examination'),
+        msg_kind__in=('released', 'withdrawn'),
     )
     latest = qs.order_by('-prepared_at', '-received_at').first()
     if not latest:
@@ -294,7 +294,7 @@ def recompute_declaration(cargo: Optional[Cargo],
 
     if latest.msg_kind == 'withdrawn':
         target_decl = ''
-    else:  # released / rejected / hold / examination — ДТ есть, пишем
+    else:  # released
         target_decl = _build_declaration_number(latest.parsed_meta or {})
         if not target_decl:
             return []
@@ -581,18 +581,16 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                     # Можно залогировать но не считать ошибкой.
                     continue
 
-                # decl_number + filed_date: для ЛЮБОГО kind с решением
-                # таможни (released/rejected/hold/examination/withdrawn).
-                # HAWB подана под этой ДТ — пишем номер и дату подачи
-                # независимо от исхода. customs_status (ниже) отражает
-                # конкретный исход. withdrawn — единственный kind который
-                # ОБНУЛЯЕТ ДТ (отзыв декларации).
+                # decl_number + filed_date: только при released/withdrawn.
+                # HOLD/REJECTED/EXAMINATION ДТ не показывают (юзер хочет
+                # видеть ДТ только когда есть выпуск). При переходе со
+                # статуса RELEASED на любой другой change_customs_status
+                # сам очистит decl_number (см. event_dt-логика в моделях).
                 # refresh_from_db: recompute пишет в DB через UPDATE минуя
                 # save() — in-memory h.customs_declaration_number отстаёт,
                 # без refresh последующий h.save() в change_customs_status
                 # перетёр бы новый номер старым значением.
-                if kind in ('released', 'withdrawn', 'rejected',
-                            'hold', 'examination'):
+                if kind in ('released', 'withdrawn'):
                     recompute_declaration(cargo, h)
                     h.refresh_from_db(fields=[
                         'customs_declaration_number', 'filed_date',

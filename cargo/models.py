@@ -986,14 +986,15 @@ class HouseWaybill(models.Model):
                 self.release_date = event_dt
             elif not self.release_date:
                 self.release_date = timezone.now()
-        elif event_dt and self.release_date:
+        elif event_dt:
             # event_dt = реальный CMN от таможни. Если новый статус не
-            # RELEASED — значит ранее проставленный release_date был
-            # ошибочным (например, мы ранее по ошибке проштамповали HAWB
-            # как released из общего DecisionCode, а на самом деле по этой
-            # накладной был отказ/запрос документов в своём Consignment).
-            # Стираем.
-            self.release_date = None
+            # RELEASED — выпуска нет, значит и ДТ-номер с датой выпуска
+            # в Sheets показывать не должны (юзер хочет видеть ДТ только
+            # в паре с фактом выпуска). Стираем оба.
+            if self.release_date:
+                self.release_date = None
+            if self.customs_declaration_number:
+                self.customs_declaration_number = ''
             # После выпуска на импорте — переводим в следующий лог.статус
             if self.logistics_status == 'IMPORT_CUSTOMS':
                 self.logistics_status = 'READY_DELIVERY'
@@ -1060,15 +1061,13 @@ class HouseWaybill(models.Model):
         # (лицензия берётся из MAWB, поэтому просто убеждаемся что scan_into_bond чист)
 
         # Правило 4: неполный чеклист — нет рег. номера ДТ.
-        # Исключение: если таможня уже вынесла решение по этой HAWB
-        # (customs_status ∈ FILED/RELEASED/REJECTED/EXAMINATION/HOLD),
-        # внутренний чеклист уже не релевантен — номер выдан таможней,
-        # и его сохраняем независимо от внутреннего state'а. Правило
-        # защищает только UI-вводимый номер до подачи в таможню.
-        CUSTOMS_DECIDED = ('FILED', 'RELEASED', 'REJECTED', 'EXAMINATION', 'HOLD')
+        # Исключение: customs_status == RELEASED — номер выдан таможней
+        # и факт выпуска есть, внутренний чеклист уже не релевантен.
+        # При HOLD/REJECTED/EXAMINATION/FILED номер тоже не показываем —
+        # юзер хочет видеть ДТ только в паре с выпуском.
         if (self.customs_declaration_number
                 and not self.docs_ready
-                and self.customs_status not in CUSTOMS_DECIDED):
+                and self.customs_status != 'RELEASED'):
             self.customs_declaration_number = ''
 
         # Правило 5: не привязан к партии — нет рег. номера ДТ
