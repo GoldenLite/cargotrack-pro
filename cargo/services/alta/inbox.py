@@ -446,7 +446,12 @@ def apply_status(msg: AltaInboxMessage,
                 h.logistics_status = 'EXPORT_CUSTOMS' if is_export else 'IMPORT_CUSTOMS'
                 h.logistics_status_date = timezone.now()
             try:
-                err = h.change_customs_status(new_status, user=None)
+                # msg.prepared_at = PreparationDateTime реального CMN-ответа.
+                # Передаём как event_dt чтобы release_date/filed_date были
+                # одинаковыми у всех HAWB одной декларации, а не разными
+                # timezone.now() (= момент вызова, не момент выпуска).
+                err = h.change_customs_status(new_status, user=None,
+                                              event_dt=msg.prepared_at)
                 if err:
                     errors.append(f'HAWB {h.hawb_number}: {err}')
                 else:

@@ -945,8 +945,15 @@ class HouseWaybill(models.Model):
         workflow_runner.advance_on_status_change(self, 'hawb', 'logistics_status', new_status)
         return None
 
-    def change_customs_status(self, new_status: str, user=None) -> str | None:
-        """Смена таможенного статуса. Возвращает текст ошибки или None при успехе."""
+    def change_customs_status(self, new_status: str, user=None, event_dt=None) -> str | None:
+        """Смена таможенного статуса. Возвращает текст ошибки или None при успехе.
+
+        event_dt: фактическое время события из CMN-сообщения (PreparationDateTime).
+        Если передано — перетирает release_date/filed_date (CMN — источник истины).
+        Это важно для multi-waybill release: одна ДТ покрывает 49 HAWB, все они
+        должны получить одно и то же время выпуска, а не разные timezone.now()
+        от момента вызова.
+        """
 
         # Правило: вес выпущенного груза не может превышать общий вес партии
         if new_status == 'RELEASED' and self.mawb and self.mawb.weight and self.weight:
@@ -969,10 +976,16 @@ class HouseWaybill(models.Model):
         self.last_status_change = timezone.now()
 
         if new_status == 'FILED':
-            self.filed_date = self.filed_date or timezone.now()
+            if event_dt:
+                self.filed_date = event_dt
+            elif not self.filed_date:
+                self.filed_date = timezone.now()
 
         if new_status == 'RELEASED':
-            self.release_date = self.release_date or timezone.now()
+            if event_dt:
+                self.release_date = event_dt
+            elif not self.release_date:
+                self.release_date = timezone.now()
             # После выпуска на импорте — переводим в следующий лог.статус
             if self.logistics_status == 'IMPORT_CUSTOMS':
                 self.logistics_status = 'READY_DELIVERY'
