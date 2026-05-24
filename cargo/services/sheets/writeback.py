@@ -141,7 +141,14 @@ def _col_letter(col_idx: int) -> str:
 
 
 def _local_date_str(dt) -> str:
-    """Форматирует aware-datetime в дд.мм.гггг по settings.TIME_ZONE.
+    """Форматирует aware-datetime в дд.мм.гггг чч:мм:сс по settings.TIME_ZONE.
+
+    Юзер просит фиксировать конкретное время события. Для событий с источником
+    только-дата (filed_date из CMN.RegistrationDate, scan_into_bond без времени)
+    время показывается как 00:00:00 — это означает «событие в этот день,
+    точное время в CMN не приходит». Для событий с настоящим timestamp
+    (release_date из CMN.DecisionDate, scan_into_bond с DO1RegTime) —
+    реальное время в МСК.
 
     strftime не конвертирует TZ — берёт дату как есть из datetime. Если в БД
     лежит UTC «2026-05-22 21:00:00+00:00» (= 23.05 МСК по факту), прямой
@@ -153,7 +160,7 @@ def _local_date_str(dt) -> str:
     from django.utils import timezone as _tz
     if _tz.is_aware(dt):
         dt = _tz.localtime(dt)
-    return dt.strftime('%d.%m.%Y')
+    return dt.strftime('%d.%m.%Y %H:%M:%S')
 
 
 def write_svh_placement_for_cargo(cargo: Cargo) -> int:
