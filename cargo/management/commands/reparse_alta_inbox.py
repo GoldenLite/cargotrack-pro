@@ -37,6 +37,11 @@ class Command(BaseCommand):
         parser.add_argument('--limit', type=int, default=0)
         parser.add_argument('--dry-run', action='store_true',
                             help='Только показать diff, без сохранения')
+        parser.add_argument('--force-dispatch', action='store_true',
+                            help='Вызывать dispatch() даже если parsed_meta не изменился '
+                                 '(нужно при обновлении логики в inbox.py — multi-waybill, '
+                                 'TZ-fix, любая новая бизнес-логика которая работает поверх '
+                                 'уже сохранённых сообщений)')
 
     def handle(self, *args, **opts):
         if connection.vendor == 'sqlite':
@@ -72,7 +77,7 @@ class Command(BaseCommand):
                     new_gtd = (new_meta.get('gtd_number') or '').strip()
                     diff = new_meta != old
 
-                    if not diff:
+                    if not diff and not opts['force_dispatch']:
                         break
 
                     if old_gtd != new_gtd:
@@ -84,10 +89,14 @@ class Command(BaseCommand):
                     if opts['dry_run']:
                         break
 
-                    m.parsed_meta = new_meta
-                    m.save(update_fields=['parsed_meta'])
-                    changed += 1
-                    # Передиспатчить чтобы classify/match/recompute применили
+                    if diff:
+                        m.parsed_meta = new_meta
+                        m.save(update_fields=['parsed_meta'])
+                        changed += 1
+                    # Передиспатчить чтобы classify/match/recompute применили.
+                    # При --force-dispatch вызываем даже если parsed_meta не менялся —
+                    # нужно при обновлении логики apply_status/match (multi-waybill,
+                    # TZ-fix и пр.).
                     dispatch(m)
                     break
                 except OperationalError as e:
