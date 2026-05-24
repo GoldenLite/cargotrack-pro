@@ -46,7 +46,11 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         if connection.vendor == 'sqlite':
             with connection.cursor() as c:
-                c.execute('PRAGMA busy_timeout=60000;')
+                # 120с busy_timeout — reparse идёт параллельно с агентом
+                # (входящие CMN от него летят через HTTP в waitress) и
+                # фоновыми потоками Sheets writeback. Без длинного timeout
+                # 12k сообщений уверенно бьются о SQLite-локи.
+                c.execute('PRAGMA busy_timeout=120000;')
 
         qs = AltaInboxMessage.objects.all().order_by('prepared_at')
         if opts['msg']:
@@ -73,8 +77,14 @@ class Command(BaseCommand):
         changed = 0
         gtd_changed = 0
         errors = 0
+        # SQLite-локи на параллельной нагрузке (агент + waitress + writeback)
+        # бьют по reparse'у. Экспоненциальный backoff с 6 попытками
+        # (~1+2+4+8+16+32 = 63 сек суммарной паузы на одно сообщение в
+        # худшем случае) — достаточно чтобы пережить даже самые жёсткие
+        # пики записи.
+        BACKOFF = [1, 2, 4, 8, 16, 32]
         for i, pk in enumerate(pks, 1):
-            for attempt in range(3):
+            for attempt in range(len(BACKOFF) + 1):
                 try:
                     m = AltaInboxMessage.objects.get(pk=pk)
                     new_meta_full = parse_raw_xml(m.raw_xml or '')
@@ -111,8 +121,8 @@ class Command(BaseCommand):
                     dispatch(m)
                     break
                 except OperationalError as e:
-                    if 'locked' in str(e).lower() and attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
+                    if 'locked' in str(e).lower() and attempt < len(BACKOFF):
+                        time.sleep(BACKOFF[attempt])
                         continue
                     errors += 1
                     self.stdout.write(f'  ERR #{pk}: {e}')
