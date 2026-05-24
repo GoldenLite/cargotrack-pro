@@ -458,6 +458,10 @@ def apply_status(msg: AltaInboxMessage,
         begin_batch_writeback()
     try:
         for h in targets:
+            # refresh: recompute_declaration выше писал customs_declaration_number
+            # прямым UPDATE минуя save(). Без refresh in-memory отстаёт и
+            # h.change_customs_status → self.save() перетёр бы новый номер старым.
+            h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
             # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
             # в IMPORT_CUSTOMS в нашей БД» — декларация может подаваться через
             # Альту, минуя CargoTrack-workflow.
@@ -575,9 +579,16 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
 
                 # decl_number + filed_date: только при released/withdrawn
                 # (recompute_declaration сам решает что взять как «истину»
-                # из всей истории released/withdrawn сообщений по этой HAWB)
+                # из всей истории released/withdrawn сообщений по этой HAWB).
+                # refresh_from_db: recompute пишет в DB через UPDATE минуя
+                # save() — in-memory h.customs_declaration_number отстаёт,
+                # без refresh последующий h.save() в change_customs_status
+                # перетёр бы новый номер ОЛД-значением.
                 if kind in ('released', 'withdrawn'):
                     recompute_declaration(cargo, h)
+                    h.refresh_from_db(fields=[
+                        'customs_declaration_number', 'filed_date',
+                    ])
 
                 new_status = STATUS_FROM_KIND.get(kind)
                 if not new_status:

@@ -1059,8 +1059,16 @@ class HouseWaybill(models.Model):
         # Правило 3: нет даты СВХ — нет лицензии склада
         # (лицензия берётся из MAWB, поэтому просто убеждаемся что scan_into_bond чист)
 
-        # Правило 4: неполный чеклист — нет рег. номера ДТ
-        if self.customs_declaration_number and not self.docs_ready:
+        # Правило 4: неполный чеклист — нет рег. номера ДТ.
+        # Исключение: если таможня уже вынесла решение по этой HAWB
+        # (customs_status ∈ FILED/RELEASED/REJECTED/EXAMINATION/HOLD),
+        # внутренний чеклист уже не релевантен — номер выдан таможней,
+        # и его сохраняем независимо от внутреннего state'а. Правило
+        # защищает только UI-вводимый номер до подачи в таможню.
+        CUSTOMS_DECIDED = ('FILED', 'RELEASED', 'REJECTED', 'EXAMINATION', 'HOLD')
+        if (self.customs_declaration_number
+                and not self.docs_ready
+                and self.customs_status not in CUSTOMS_DECIDED):
             self.customs_declaration_number = ''
 
         # Правило 5: не привязан к партии — нет рег. номера ДТ
