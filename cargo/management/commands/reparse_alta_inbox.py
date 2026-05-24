@@ -140,24 +140,22 @@ class Command(BaseCommand):
                     batch_write_release_dates_for_hawbs,
                     batch_write_svh_for_cargos,
                 )
-                # ДТ-номера
-                hawbs_decl = list(HouseWaybill.objects.exclude(customs_declaration_number=''))
-                if hawbs_decl:
-                    n = batch_write_declarations_for_hawbs(hawbs_decl)
-                    self.stdout.write(f'  decl: {n} cells ({len(hawbs_decl)} HAWB)')
-                # filed_date / release_date: включаем ВСЕ HAWB у которых
-                # есть привязанное CMN.11350 (или filed/release_date уже
-                # стоят) — нужно чтобы при per-Consignment пересчёте
-                # ОЧИЩАЛИСЬ ячейки HAWB которые ранее были ошибочно
-                # помечены released, а на самом деле получили отказ/запрос
-                # документов (release_date теперь None → пустая ячейка).
+                # decl/filed_date/release_date: включаем ВСЕ HAWB у которых
+                # есть привязанное CMN.11350 (или эти поля уже стоят) — нужно
+                # чтобы при per-Consignment пересчёте ОЧИЩАЛИСЬ ячейки HAWB
+                # которые ранее были ошибочно помечены released, а на самом
+                # деле получили отказ/запрос документов (поля теперь пустые
+                # → ячейки тоже должны стать пустыми).
                 from django.db.models import Q
                 hawbs_touched = list(HouseWaybill.objects.filter(
                     Q(filed_date__isnull=False)
                     | Q(release_date__isnull=False)
+                    | Q(customs_declaration_number__gt='')
                     | Q(inbox_messages__msg_type='CMN.11350')
                 ).distinct())
                 if hawbs_touched:
+                    n = batch_write_declarations_for_hawbs(hawbs_touched)
+                    self.stdout.write(f'  decl: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_filed_dates_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_release_dates_for_hawbs(hawbs_touched)

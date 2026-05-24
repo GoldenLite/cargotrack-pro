@@ -584,11 +584,13 @@ def batch_write_declarations_for_hawbs(hawbs: list) -> int:
     if not hawbs:
         return 0
 
-    by_hawb: dict[str, HouseWaybill] = {}
-    for h in hawbs:
-        decl = (h.customs_declaration_number or '').strip()
-        if h.hawb_number and decl:
-            by_hawb[h.hawb_number] = h
+    # Включаем HAWB с пустым decl — нужно чтобы при переходе со статуса
+    # RELEASED на HOLD/REJECTED ячейка ДТ в Sheets обнулилась (а не висела
+    # со стейл-значением). Логика записи ниже сравнивает с текущим значением
+    # ячейки и пишет '' только если в Sheets было что-то.
+    by_hawb: dict[str, HouseWaybill] = {
+        h.hawb_number: h for h in hawbs if h.hawb_number
+    }
     if not by_hawb:
         return 0
 
