@@ -170,9 +170,16 @@ class Command(BaseCommand):
                     self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_release_dates_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  release_date: {n} cells ({len(hawbs_touched)} HAWB)')
-                # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number)
-                cargos_svh = list(Cargo.objects.filter(scan_into_bond__isnull=False)
-                                  .exclude(svh_do1_reg_number=''))
+                # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number).
+                # Включаем cargos С данными И тех, на чьи HAWB приходило хоть
+                # одно CMN.13010/13029 (даже если потом откатили) — иначе
+                # Sheets-ячейки с прежней некорректной привязкой не очистятся.
+                cargos_svh = list(Cargo.objects.filter(
+                    Q(scan_into_bond__isnull=False)
+                    | Q(svh_do1_reg_number__gt='')
+                    | Q(warehouse_license__gt='')
+                    | Q(hawbs__inbox_messages__msg_type__in=('CMN.13010', 'CMN.13029'))
+                ).distinct())
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)
                     self.stdout.write(f'  svh: {n} cells ({len(cargos_svh)} cargos)')

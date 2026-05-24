@@ -171,8 +171,8 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     lic = (cargo.warehouse_license or '').strip()
     placed_dt = cargo.scan_into_bond
     do1_reg = (cargo.svh_do1_reg_number or '').strip()
-    if not (lic or placed_dt or do1_reg):
-        return 0  # нечего писать
+    # Не делаем early-return при пустых значениях — функция должна
+    # уметь ОЧИЩАТЬ Sheets-ячейки если данные были откачены на стороне БД.
 
     # Дата для Sheets — русский формат дд.мм.гггг по МСК (как у сотрудников
     # в остальных колонках таблицы «Общее»). _local_date_str переводит из
@@ -249,11 +249,14 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
-            if lic and cur_lic != lic:
+            # Пишем даже если значение пустое — нужно чтобы при откате
+            # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
+            # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
+            if cur_lic != lic:
                 updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
-            if placed_str and cur_date != placed_str:
+            if cur_date != placed_str:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
-            if do1_reg and cur_do1 != do1_reg:
+            if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
 
         if not updates:
@@ -368,11 +371,14 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
 
-            if lic and cur_lic != lic:
+            # Пишем даже если значение пустое — нужно чтобы при откате
+            # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
+            # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
+            if cur_lic != lic:
                 updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
-            if placed_str and cur_date != placed_str:
+            if cur_date != placed_str:
                 updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
-            if do1_reg and cur_do1 != do1_reg:
+            if cur_do1 != do1_reg:
                 updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
 
         if not updates:
