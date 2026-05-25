@@ -473,6 +473,31 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
     return total
 
 
+def _read_sheet_hawbs(ws, header_row: int) -> list[str]:
+    """Читает колонку «Накладная СДЭК» (GEN_HAWB_NUMBER) — возвращает список
+    нормализованных HAWB-номеров. Индекс в списке = row_idx - 1.
+
+    Используется как guard в writeback: перед записью сверяем что в Sheets-ряду
+    реально наш HAWB. Если юзер пересортировал/удалил строки без захвата всех
+    колонок — наш `source_row_index` указывает на чужой ряд, надо пропустить.
+
+    Возвращает [] если колонки HAWB нет (тогда guard отключен).
+    """
+    from .mapping import GEN_HAWB_NUMBER, normalize_hawb_number
+    try:
+        header = ws.row_values(header_row)
+    except Exception:
+        return []
+    if GEN_HAWB_NUMBER not in header:
+        return []
+    col = header.index(GEN_HAWB_NUMBER) + 1
+    try:
+        raw = ws.col_values(col)
+    except Exception:
+        return []
+    return [normalize_hawb_number(v) for v in raw]
+
+
 def _filter_inrange_updates(updates: list, ws, source_name: str) -> list:
     """Отбрасывает updates чьи range за пределами текущего размера worksheet.
 
