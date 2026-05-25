@@ -400,15 +400,9 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
             lic = (cargo.warehouse_license or '').strip()
             placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
-
-            # Guard: если в Cargo осталась лицензия ЧУЖОГО склада (legacy от
-            # старых периодов когда classify не фильтровал) — не пишем
-            # ничего, пишем пусто. Юзер не должен видеть данные чужих СВХ.
-            from cargo.services.alta.inbox import OUR_WAREHOUSE_LICENSE
-            if lic and lic != OUR_WAREHOUSE_LICENSE:
-                lic = ''
-                placed_str = ''
-                do1_reg = ''
+            # NB: чужие лицензии (10005/...) — это легитимные данные с
+            # moscow-cargo.com парсера (refresh_moscow_cargo). Не фильтруем —
+            # юзер хочет видеть инфу о партиях которые едут в Москва Карго.
 
             cur_lic = (existing_lic[row_idx - 1]
                        if row_idx - 1 < len(existing_lic) else '').strip()
