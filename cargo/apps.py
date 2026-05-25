@@ -28,7 +28,12 @@ class CargoConfig(AppConfig):
             with connection.cursor() as cur:
                 cur.execute('PRAGMA journal_mode=WAL;')
                 cur.execute('PRAGMA synchronous=NORMAL;')
-                cur.execute('PRAGMA busy_timeout=5000;')
+                # 60 секунд (было 5). При параллельном CRM-importer на
+                # 30k+ строк writer-lock удерживается дольше — endpoint'ы
+                # типа /api/v1/alta/outbox/ падали с 500 не дождавшись.
+                # PRAGMA выполняется ПОСЛЕ sqlite3.connect(timeout=...),
+                # поэтому settings.OPTIONS['timeout'] здесь не помог бы.
+                cur.execute('PRAGMA busy_timeout=60000;')
 
         @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_created_workflow')
         def cargo_created(sender, instance, created, **kwargs):

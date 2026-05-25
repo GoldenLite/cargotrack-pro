@@ -102,18 +102,9 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
-        # SQLite серьёзно конкурирует за write-lock когда параллельно работают:
-        # - waitress endpoints (alta inbox/outbox, web UI)
-        # - Sheets-importer на 30k rows (bulk-update держит lock минутами)
-        # - Sheets writeback threads
-        # - reparse_alta_inbox через 13k сообщений
-        # Без timeout любой busy → OperationalError 500. С timeout=60 Django
-        # ждёт до 60с пока writer освободит lock — на практике хватает даже
-        # когда параллельный CRM-import длится минуты. Эквивалент PRAGMA
-        # busy_timeout, но применяется автоматически для каждого соединения.
-        'OPTIONS': {
-            'timeout': 60,
-        },
+        # SQLite concurrency настраивается через PRAGMA в cargo/apps.py
+        # (connection_created signal: WAL + busy_timeout=60s). Это надёжнее
+        # OPTIONS['timeout'] — PRAGMA повторяется на каждом новом соединении.
     }
 }
 
