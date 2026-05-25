@@ -101,7 +101,11 @@ def load_config() -> dict:
                 'poll_interval': int(ob.get('poll_interval', '5')),
                 'state_db':      Path(__file__).resolve().parent / ob.get('state_db', 'outbox_state.sqlite'),
                 'endpoint':      ob.get('endpoint', '/api/v1/alta/outbox/').lstrip('/'),
-                'name_pattern':  re.compile(ob.get('name_pattern', r'^538134\^')),
+                # `538134^...gz` — основной декларант,
+                # `538134-06^...gz` — суб-декларант (СДЭК-06), кладёт копии
+                # в `IN\sent\` (другая папка!). Поэтому regex и рекурсивный
+                # сканер ниже.
+                'name_pattern':  re.compile(ob.get('name_pattern', r'^538134(-\d+)?\^')),
             }
     cfg['outbox'] = outbox
 
@@ -967,7 +971,13 @@ def outbox_loop(cfg: dict) -> None:
 
     while True:
         try:
-            files = glob.glob(os.path.join(str(oc['watch_dir']), '*.gz'))
+            # Сканируем корень IN\ + IN\sent\ — Альта-ГТД для разных
+            # декларантов кладёт копии в разные места. `538134^...gz`
+            # обычно в корне, `538134-06^...gz` — в sent\.
+            files = (
+                glob.glob(os.path.join(str(oc['watch_dir']), '*.gz')) +
+                glob.glob(os.path.join(str(oc['watch_dir']), 'sent', '*.gz'))
+            )
             picked = [Path(p) for p in files if oc['name_pattern'].search(os.path.basename(p))]
             for p in picked:
                 try:

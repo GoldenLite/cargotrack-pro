@@ -86,6 +86,43 @@ def dispatch(obs: AltaOutboxObservation) -> None:
                         cargo.awb_number, obs.prepared_at)
             _writeback_svh_do1_sent(cargo)
 
+    # CMN.11023 (первичная подача ДТ) / CMN.11349 (корректировка) — содержат
+    # точный момент подачи в таможню. Заполняем HouseWaybill.filed_date с
+    # реальным временем (раньше там стояло 00:00:00 из CMN-RegistrationDate).
+    # Приоритет: 11023 > 11349 (если оба есть, берём первое). Логика:
+    # пишем только если поле пустое ИЛИ новое prepared_at раньше.
+    if obs.msg_type in ('CMN.11023', 'CMN.11349') and hawb and obs.prepared_at:
+        _maybe_update_filed_date(hawb, obs.prepared_at)
+
+
+def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
+    """Обновляет HouseWaybill.filed_date если новое значение раньше или поле пустое.
+
+    Берёт самую раннюю подачу — CMN.11023 (первая) приоритетнее CMN.11349
+    (корректировка), но в БД они могут попадать в любом порядке. Через
+    сравнение prepared_at выбираем именно самое раннее.
+    """
+    hawb.refresh_from_db(fields=['filed_date'])
+    if hawb.filed_date and hawb.filed_date <= prepared_at:
+        return  # уже стоит более раннее значение
+    HouseWaybill.objects.filter(pk=hawb.pk).update(filed_date=prepared_at)
+    logger.info('filed_date: HAWB %s set to %s', hawb.hawb_number, prepared_at)
+    _writeback_filed_date(hawb)
+
+
+def _writeback_filed_date(hawb: HouseWaybill) -> None:
+    """Sync ячейки «дата подачи» в Sheets для одного HAWB."""
+    try:
+        from cargo.services.sheets.writeback import (
+            write_filed_date_for_hawb, signals_suppressed,
+        )
+        if signals_suppressed():
+            return
+        hawb.refresh_from_db(fields=['filed_date'])
+        write_filed_date_for_hawb(hawb)
+    except Exception:
+        logger.exception('filed_date writeback failed')
+
 
 def _writeback_svh_do1_sent(cargo: Cargo) -> None:
     """Sync ячейки «дата подачи ДО1» в Sheets. Skip если signals_suppressed
