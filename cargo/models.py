@@ -800,6 +800,13 @@ class HouseWaybill(models.Model):
         'Дата ДО2', null=True, blank=True,
         help_text='SendDate+SendTime из CMN.13014 (выпуск этой накладной со СВХ). '
                   'Привязка через TransportDoc или ProduceDocuments (рег.номер ДТ).')
+    svh_do1_gross_weight = models.DecimalField(
+        'Вес ДО1', max_digits=12, decimal_places=3, null=True, blank=True,
+        help_text='BruttoVolQuant.GoodsQuantity из <Goods> блока с этим HAWB в '
+                  'исходящем ДО-1 (do1-*.xml в backup_out). Кг.')
+    svh_do1_place_count = models.IntegerField(
+        'Мест ДО1', null=True, blank=True,
+        help_text='CargoPlace.PlaceNumber из <Goods> блока с этим HAWB в ДО-1.')
 
     # ── Документы для таможенного оформления ──
     doc_invoice      = models.BooleanField('Инвойс', default=False)

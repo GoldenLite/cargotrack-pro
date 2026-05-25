@@ -60,6 +60,9 @@ CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DO1_SENT_HEADER = 'CargoTrack: дата подачи ДО1'
 CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата регистрации ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
+# Per-HAWB вес и места из <Goods> блоков ДО-1.
+CARGOTRACK_SVH_DO1_WEIGHT_HEADER = 'CargoTrack: вес ДО1'
+CARGOTRACK_SVH_DO1_PLACES_HEADER = 'CargoTrack: мест ДО1'
 CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
 # Юзер не использует рег.номер ДО2 в Sheets, колонку не создаём
 # и не пишем (в БД хранится только дата ДО2 на HAWB).
@@ -527,14 +530,19 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
 
 def _batch_write_hawb_dates(hawbs: list, value_attr: str,
                             header_name: str, log_label: str,
-                            after_header: str = '') -> int:
-    """Generic batch writeback per-HAWB даты — 1 col_values + 1 batch_update.
+                            after_header: str = '',
+                            formatter=None) -> int:
+    """Generic batch writeback per-HAWB значения — 1 col_values + 1 batch_update.
 
-    Используется для filed_date, release_date, svh_do2_send_at. value_attr —
-    имя атрибута HAWB-объекта (например 'filed_date'), header_name — колонка
-    в Sheets, log_label — префикс для логов, after_header — куда вставить
-    колонку при первом создании (пробрасывается в _ensure_named_column).
+    Используется для filed_date, release_date, svh_do2_send_at, svh_do1_weight,
+    svh_do1_places. value_attr — имя атрибута HAWB-объекта, header_name —
+    колонка в Sheets, log_label — префикс для логов, after_header — куда
+    вставить колонку при первом создании. formatter — функция (value)→str
+    для конвертации значения в строку для Sheets. По умолчанию _local_date_str
+    (для datetime → 'дд.мм.гггг чч:мм:сс').
     """
+    if formatter is None:
+        formatter = _local_date_str
     if not hawbs:
         return 0
 
@@ -592,12 +600,12 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         updates = []
         for row_idx, h in items:
             value = getattr(h, value_attr)
-            date_str = _local_date_str(value)
+            value_str = formatter(value)
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
-            if cur != date_str:
+            if cur != value_str:
                 updates.append({'range': f'{letter}{row_idx}',
-                                'values': [[date_str]]})
+                                'values': [[value_str]]})
 
         if not updates:
             continue
@@ -651,6 +659,47 @@ def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
         hawbs, 'svh_do2_send_at',
         CARGOTRACK_SVH_DO2_DATE_HEADER, 'svh_do2_date',
         after_header=CARGOTRACK_RELEASE_DATE_HEADER,
+    )
+
+
+def _format_weight(value) -> str:
+    """Decimal → '0.062' (без trailing zeros), None → ''."""
+    if value is None:
+        return ''
+    # normalize убирает trailing zeros, str — обычное представление
+    from decimal import Decimal
+    try:
+        d = Decimal(value).normalize()
+        # Decimal('0.062').normalize() = Decimal('0.062'); но Decimal('1.0').normalize() = Decimal('1')
+        return str(d) if d != 0 else '0'
+    except Exception:
+        return str(value)
+
+
+def _format_int(value) -> str:
+    """Integer → '1', None → ''."""
+    if value is None:
+        return ''
+    return str(value)
+
+
+def batch_write_svh_do1_weight_for_hawbs(hawbs: list) -> int:
+    """Batch writeback svh_do1_gross_weight в Sheets «вес ДО1»."""
+    return _batch_write_hawb_dates(
+        hawbs, 'svh_do1_gross_weight',
+        CARGOTRACK_SVH_DO1_WEIGHT_HEADER, 'svh_do1_weight',
+        after_header=CARGOTRACK_SVH_DO1_HEADER,
+        formatter=_format_weight,
+    )
+
+
+def batch_write_svh_do1_places_for_hawbs(hawbs: list) -> int:
+    """Batch writeback svh_do1_place_count в Sheets «мест ДО1»."""
+    return _batch_write_hawb_dates(
+        hawbs, 'svh_do1_place_count',
+        CARGOTRACK_SVH_DO1_PLACES_HEADER, 'svh_do1_places',
+        after_header=CARGOTRACK_SVH_DO1_WEIGHT_HEADER,
+        formatter=_format_int,
     )
 
 

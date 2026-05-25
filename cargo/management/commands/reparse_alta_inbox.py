@@ -165,6 +165,8 @@ class Command(BaseCommand):
                     batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
                     batch_write_svh_do1_sent_for_cargos,
+                    batch_write_svh_do1_weight_for_hawbs,
+                    batch_write_svh_do1_places_for_hawbs,
                     drop_deprecated_columns,
                     rename_legacy_headers,
                 )
@@ -243,6 +245,17 @@ class Command(BaseCommand):
                     # хотим показать момент подачи.
                     n = batch_write_svh_do1_sent_for_cargos(cargos_svh)
                     self.stdout.write(f'  svh_do1_sent: {n} cells ({len(cargos_svh)} cargos)')
+                # Вес/мест из ДО-1 (per-HAWB, из <Goods> блоков). Берём ВСЕ
+                # HAWB в Sheets — для тех у кого svh_do1_gross_weight=None
+                # и ячейка пустая будет no-op.
+                hawbs_for_do1_goods = list(HouseWaybill.objects.filter(
+                    hawb_number__in=list(hawb_nums_in_sheets)
+                ).distinct())
+                if hawbs_for_do1_goods:
+                    n = batch_write_svh_do1_weight_for_hawbs(hawbs_for_do1_goods)
+                    self.stdout.write(f'  svh_do1_weight: {n} cells ({len(hawbs_for_do1_goods)} HAWB)')
+                    n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1_goods)
+                    self.stdout.write(f'  svh_do1_places: {n} cells ({len(hawbs_for_do1_goods)} HAWB)')
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 

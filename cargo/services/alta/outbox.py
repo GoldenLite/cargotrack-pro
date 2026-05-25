@@ -86,6 +86,14 @@ def dispatch(obs: AltaOutboxObservation) -> None:
                         cargo.awb_number, obs.prepared_at)
             _writeback_svh_do1_sent(cargo)
 
+    # ED.DO1: per-HAWB вес и места из <Goods> блоков ДО-1. parsed_meta может
+    # содержать goods{hawb: {weight, places}} (если agent послал raw_xml,
+    # endpoint распарсил через parse_do1_report).
+    if obs.msg_type == 'ED.DO1':
+        goods = (obs.parsed_meta or {}).get('goods') or {}
+        if goods:
+            _apply_do1_goods(goods)
+
     # CMN.11023 (первичная подача ДТ) / CMN.11349 (корректировка) — содержат
     # точный момент подачи в таможню. Заполняем HouseWaybill.filed_date с
     # реальным временем (раньше там стояло 00:00:00 из CMN-RegistrationDate).
@@ -108,6 +116,48 @@ def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
     HouseWaybill.objects.filter(pk=hawb.pk).update(filed_date=prepared_at)
     logger.info('filed_date: HAWB %s set to %s', hawb.hawb_number, prepared_at)
     _writeback_filed_date(hawb)
+
+
+def _apply_do1_goods(goods: dict) -> None:
+    """Записывает per-HAWB вес и места из ДО-1 Goods блоков.
+
+    goods: {'10257142180': {'weight': '0.062', 'places': 1}, ...}
+    Идемпотентно — обновляет только если значение изменилось.
+    """
+    from decimal import Decimal, InvalidOperation
+    affected: list[HouseWaybill] = []
+    for hawb_num, data in goods.items():
+        h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_num).first()
+        if not h:
+            continue
+        try:
+            new_weight = Decimal(str(data.get('weight') or '0'))
+        except (InvalidOperation, ValueError):
+            new_weight = None
+        new_places = data.get('places') or None
+        update_fields = {}
+        if new_weight is not None and h.svh_do1_gross_weight != new_weight:
+            update_fields['svh_do1_gross_weight'] = new_weight
+        if new_places is not None and h.svh_do1_place_count != new_places:
+            update_fields['svh_do1_place_count'] = new_places
+        if update_fields:
+            HouseWaybill.objects.filter(pk=h.pk).update(**update_fields)
+            affected.append(h)
+    if affected:
+        logger.info('ED.DO1 goods: updated %d HAWBs (weight/places)', len(affected))
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_svh_do1_weight_for_hawbs,
+                batch_write_svh_do1_places_for_hawbs,
+                signals_suppressed,
+            )
+            if not signals_suppressed():
+                for h in affected:
+                    h.refresh_from_db(fields=['svh_do1_gross_weight', 'svh_do1_place_count'])
+                batch_write_svh_do1_weight_for_hawbs(affected)
+                batch_write_svh_do1_places_for_hawbs(affected)
+        except Exception:
+            logger.exception('svh_do1 weight/places writeback failed')
 
 
 def _writeback_filed_date(hawb: HouseWaybill) -> None:

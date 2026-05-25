@@ -3258,6 +3258,8 @@ def api_alta_outbox_post(request):
                 parsed_meta['report_number'] = parsed['report_number']
             if parsed.get('certificate_number'):
                 parsed_meta['certificate_number'] = parsed['certificate_number']
+            if parsed.get('goods'):
+                parsed_meta['goods'] = parsed['goods']
         except Exception:
             import logging
             logging.getLogger('cargo.alta.outbox').exception(

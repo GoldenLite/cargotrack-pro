@@ -579,9 +579,24 @@ _TRANSPORT_DOCS_BLOCK_RE = re.compile(
     re.S
 )
 
+# Goods-блоки в DO1Report — содержат вес/места per-HAWB:
+#   <catWH_ru:Goods>
+#     <catWH_ru:CargoPlace>
+#       <catWH_ru:PlaceNumber>1</catWH_ru:PlaceNumber>      ← количество мест
+#     </catWH_ru:CargoPlace>
+#     <catWH_ru:BruttoVolQuant>
+#       <catWH_ru:GoodsQuantity>0.062000</catWH_ru:GoodsQuantity>  ← вес кг
+#     </catWH_ru:BruttoVolQuant>
+#     <catWH_ru:GoodsWHNumber>10257142180</catWH_ru:GoodsWHNumber> ← HAWB
+#   </catWH_ru:Goods>
+_GOODS_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?Goods\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?Goods>',
+    re.S
+)
+
 
 def parse_do1_report(xml_text: str) -> dict:
-    """Парсит DO1Report.xml из backup_out: ReportNumber + MAWB + список HAWB.
+    """Парсит DO1Report.xml из backup_out: ReportNumber + MAWB + HAWB + per-HAWB Goods.
 
     Возвращает:
       {
@@ -589,7 +604,11 @@ def parse_do1_report(xml_text: str) -> dict:
         'report_date':   '2026-05-25',
         'certificate_number': '10001/060324/10009/1',
         'mawb':          '141-70382023',
-        'hawbs':         ['10251976678', '10251978745', ...],
+        'hawbs':         ['10251976678', ...],
+        'goods':         {  # per-HAWB вес + места (суммируются если >1 Goods на HAWB)
+            '10257142180': {'weight': '0.062', 'places': 1},
+            ...
+        },
       }
     """
     out: dict = {
@@ -598,6 +617,7 @@ def parse_do1_report(xml_text: str) -> dict:
         'certificate_number': _first(xml_text, 'CertificateNumber'),
         'mawb':          '',
         'hawbs':         [],
+        'goods':         {},
     }
     # MAWB — отдельный блок <MasterAirWayBill> без code
     m_awb = _MASTER_AWB_BLOCK_RE.search(xml_text)
@@ -610,6 +630,47 @@ def parse_do1_report(xml_text: str) -> dict:
         num  = _first(body, 'PrDocumentNumber').strip()
         if num and mode == '02021':
             out['hawbs'].append(num)
+    # Goods — per-HAWB вес и места. Если на одну HAWB несколько Goods —
+    # суммируем (бывает при разных товарах в одной накладной).
+    from decimal import Decimal, InvalidOperation
+    for m in _GOODS_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        hawb = _first(body, 'GoodsWHNumber').strip()
+        if not hawb:
+            continue
+        # Вес: GoodsQuantity внутри BruttoVolQuant
+        weight_str = ''
+        bvq = re.search(
+            r'<(?:[a-zA-Z][\w-]*:)?BruttoVolQuant\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?BruttoVolQuant>',
+            body, re.S
+        )
+        if bvq:
+            weight_str = _first(bvq.group(1), 'GoodsQuantity').strip()
+        # Места: PlaceNumber внутри CargoPlace
+        places_str = ''
+        cp = re.search(
+            r'<(?:[a-zA-Z][\w-]*:)?CargoPlace\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?CargoPlace>',
+            body, re.S
+        )
+        if cp:
+            places_str = _first(cp.group(1), 'PlaceNumber').strip()
+
+        entry = out['goods'].setdefault(hawb, {'weight': Decimal('0'), 'places': 0})
+        if weight_str:
+            try:
+                entry['weight'] += Decimal(weight_str)
+            except (InvalidOperation, ValueError):
+                pass
+        if places_str:
+            try:
+                entry['places'] += int(places_str)
+            except (TypeError, ValueError):
+                pass
+    # Decimal → str для JSON-сериализации
+    out['goods'] = {
+        hn: {'weight': str(v['weight']), 'places': v['places']}
+        for hn, v in out['goods'].items()
+    }
     return out
 
     return out
