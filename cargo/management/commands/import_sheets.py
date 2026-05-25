@@ -30,8 +30,11 @@ class Command(BaseCommand):
         parser.add_argument('--rematch', action='store_true',
                             help='Не читать Sheets, только заново прогнать matcher по существующим строкам')
         parser.add_argument('--verbose', action='store_true', help='Логировать каждую строку')
-        parser.add_argument('--auto-promote', action='store_true',
-                            help='Для kind=general: orphan-ряды сразу → HAWB + Cargo (+ Alta relink)')
+        # Авто-промоут включён по умолчанию. Чтобы отключить (например для
+        # dry-run отладки матчера) — флаг --no-auto-promote.
+        parser.add_argument('--no-auto-promote', action='store_false',
+                            dest='auto_promote', default=True,
+                            help='Отключить авто-promote orphan-рядов в HAWB+Cargo')
 
     def handle(self, *args, **opts):
         qs = SheetSource.objects.filter(is_active=True)

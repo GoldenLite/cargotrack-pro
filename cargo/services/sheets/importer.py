@@ -48,13 +48,16 @@ class SheetImporter:
 
     def __init__(self, source: SheetSource, *, dry_run: bool = False,
                  user: Optional[User] = None, verbose: bool = False,
-                 auto_promote: bool = False):
+                 auto_promote: bool = True):
         self.source  = source
         self.dry_run = dry_run
         self.user    = user
         self.verbose = verbose
         # auto_promote: для kind='general' каждый свежесозданный orphan
         # сразу прогоняется через promote_row → HAWB + Cargo + relink.
+        # Default=True: юзеру не нужно ничего делать руками, импорт сам
+        # создаёт HAWB/Cargo. CLI `import_sheets` имеет флаг
+        # `--no-auto-promote` чтобы отключить (например для dry-run отладки).
         self.auto_promote = auto_promote
         self.run: Optional[SheetImportRun] = None
 
