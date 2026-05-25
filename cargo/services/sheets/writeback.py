@@ -313,32 +313,9 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
         if not updates:
             continue
 
-        # Один batch_update на партию (типично ≤ 80 HAWB × 2 = 160 ячеек).
-        # При больших партиях разбить можно, но Google допускает до 10к ячеек.
-        backoff_steps = [2, 4, 8]
-        for attempt in range(len(backoff_steps) + 1):
-            try:
-                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
-                # USER_ENTERED парсит дату по locale и применяет существующий
-                # формат ячейки (часто dd.mm.yyyy) → время теряется при
-                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
-                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
-                # RAW=USER_ENTERED.
-                ws.batch_update(updates, value_input_option='RAW')
-                total_writes += len(updates)
-                logger.info('svh writeback Cargo %s: %d cells in %s',
-                            cargo.awb_number, len(updates), source.name)
-                break
-            except gspread.exceptions.APIError as e:
-                status = getattr(e.response, 'status_code', None)
-                if status == 429 and attempt < len(backoff_steps):
-                    wait = backoff_steps[attempt]
-                    logger.warning('svh writeback 429, retry in %ds (attempt %d)',
-                                   wait, attempt + 1)
-                    time.sleep(wait)
-                    continue
-                logger.exception('svh writeback batch failed: %s', e)
-                break
+        # Bьём на чанки + retry на 503/429 (см. _chunked_batch_update).
+        total_writes += _chunked_batch_update(
+            ws, updates, f'svh Cargo {cargo.awb_number}', source.name)
 
     return total_writes
 
@@ -448,30 +425,9 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         if not updates:
             continue
 
-        # Один batch на всю выборку (Google допускает ~10k ячеек за раз)
-        backoff_steps = [2, 4, 8, 16]
-        for attempt in range(len(backoff_steps) + 1):
-            try:
-                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
-                # USER_ENTERED парсит дату по locale и применяет существующий
-                # формат ячейки (часто dd.mm.yyyy) → время теряется при
-                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
-                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
-                # RAW=USER_ENTERED.
-                ws.batch_update(updates, value_input_option='RAW')
-                total += len(updates)
-                logger.info('batch svh: wrote %d cells in %s',
-                            len(updates), source.name)
-                break
-            except gspread.exceptions.APIError as e:
-                status = getattr(e.response, 'status_code', None)
-                if status == 429 and attempt < len(backoff_steps):
-                    wait = backoff_steps[attempt]
-                    logger.warning('batch svh 429, retry in %ds', wait)
-                    time.sleep(wait)
-                    continue
-                logger.exception('batch svh: batch_update failed: %s', e)
-                break
+        # Bьём на чанки + retry на 503 — _chunked_batch_update определён
+        # ниже, но Python резолвит при вызове, не при импорте функции.
+        total += _chunked_batch_update(ws, updates, 'svh', source.name)
 
     return total
 
@@ -696,31 +652,57 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         if not updates:
             continue
 
-        backoff_steps = [2, 4, 8, 16]
+        wrote = _chunked_batch_update(ws, updates, log_label, source.name)
+        total += wrote
+
+    return total
+
+
+# Размер чанка для batch_update. Google официально допускает до 10к ячеек,
+# но на больших запросах (>2000) часто отдаёт 503 — особенно при нагрузке.
+# 500 — безопасный compromise между throughput и стабильностью.
+_BATCH_CHUNK_SIZE = 500
+
+
+def _chunked_batch_update(ws, updates: list, log_label: str,
+                          source_name: str) -> int:
+    """Бьёт updates на чанки по _BATCH_CHUNK_SIZE и шлёт каждый отдельно.
+
+    Возвращает суммарное число успешно записанных ячеек. На 503 — retry
+    с backoff. На 429 тоже. Прочие APIError → log + skip этого чанка.
+
+    Зачем chunking: Google нестабильно обрабатывает batch >2000 ячеек,
+    регулярно отдаёт 503. Маленькие батчи проходят надёжно.
+    """
+    wrote = 0
+    backoff_steps = [2, 4, 8, 16, 32]
+    for i in range(0, len(updates), _BATCH_CHUNK_SIZE):
+        chunk = updates[i:i + _BATCH_CHUNK_SIZE]
         for attempt in range(len(backoff_steps) + 1):
             try:
-                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
-                # USER_ENTERED парсит дату по locale и применяет существующий
-                # формат ячейки (часто dd.mm.yyyy) → время теряется при
-                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
-                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
-                # RAW=USER_ENTERED.
-                ws.batch_update(updates, value_input_option='RAW')
-                total += len(updates)
-                logger.info('batch %s: wrote %d cells in %s',
-                            log_label, len(updates), source.name)
+                # RAW — Sheets хранит наши строки буквально (см. комментарий
+                # выше про USER_ENTERED и формат даты).
+                ws.batch_update(chunk, value_input_option='RAW')
+                wrote += len(chunk)
+                logger.info('batch %s: wrote %d cells in %s (chunk %d/%d)',
+                            log_label, len(chunk), source_name,
+                            i // _BATCH_CHUNK_SIZE + 1,
+                            (len(updates) - 1) // _BATCH_CHUNK_SIZE + 1)
                 break
             except gspread.exceptions.APIError as e:
                 status = getattr(e.response, 'status_code', None)
-                if status == 429 and attempt < len(backoff_steps):
+                if status in (429, 500, 502, 503, 504) and attempt < len(backoff_steps):
                     wait = backoff_steps[attempt]
-                    logger.warning('batch %s 429, retry in %ds', log_label, wait)
+                    logger.warning('batch %s %s, retry in %ds (chunk %d/%d)',
+                                   log_label, status, wait,
+                                   i // _BATCH_CHUNK_SIZE + 1,
+                                   (len(updates) - 1) // _BATCH_CHUNK_SIZE + 1)
                     time.sleep(wait)
                     continue
-                logger.exception('batch %s: batch_update failed', log_label)
+                logger.exception('batch %s: chunk %d failed (status=%s)',
+                                 log_label, i // _BATCH_CHUNK_SIZE + 1, status)
                 break
-
-    return total
+    return wrote
 
 
 def batch_write_filed_dates_for_hawbs(hawbs: list) -> int:
@@ -1013,29 +995,7 @@ def batch_write_declarations_for_hawbs(hawbs: list) -> int:
         if not updates:
             continue
 
-        backoff_steps = [2, 4, 8, 16]
-        for attempt in range(len(backoff_steps) + 1):
-            try:
-                # RAW (не USER_ENTERED) — Sheets хранит наши строки буквально.
-                # USER_ENTERED парсит дату по locale и применяет существующий
-                # формат ячейки (часто dd.mm.yyyy) → время теряется при
-                # отображении. Юзер хочет видеть дд.мм.гггг чч:мм:сс ровно
-                # как в БД. Для текстовых полей (ДТ, лицензия) поведение
-                # RAW=USER_ENTERED.
-                ws.batch_update(updates, value_input_option='RAW')
-                total += len(updates)
-                logger.info('batch decl: wrote %d cells in %s',
-                            len(updates), source.name)
-                break
-            except gspread.exceptions.APIError as e:
-                status = getattr(e.response, 'status_code', None)
-                if status == 429 and attempt < len(backoff_steps):
-                    wait = backoff_steps[attempt]
-                    logger.warning('batch decl 429, retry in %ds', wait)
-                    time.sleep(wait)
-                    continue
-                logger.exception('batch decl: batch_update failed')
-                break
+        total += _chunked_batch_update(ws, updates, 'decl', source.name)
 
     return total
 
