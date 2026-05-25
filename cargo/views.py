@@ -3273,10 +3273,12 @@ def api_alta_outbox_post(request):
             'parsed_meta': parsed_meta,
         },
     )
-    # Для ED.DO1 dispatch идемпотентен (только update fields + writeback) —
-    # вызываем всегда, чтобы после fix агента re-POST уже существующих
-    # наблюдений всё-же зафиксировал Cargo.svh_do1_sent_at.
-    if created or msg_type == 'ED.DO1':
+    # Для типов которые мы обрабатываем post-link (ED.DO1 → svh_do1_sent_at,
+    # CMN.11023/CMN.11349 → filed_date) dispatch идемпотентен (только
+    # update_fields + writeback diff) — вызываем всегда, чтобы после
+    # обновления логики/парсера re-POST уже существующих наблюдений
+    # зафиксировал поля в БД.
+    if created or msg_type in ('ED.DO1', 'CMN.11023', 'CMN.11349'):
         outbox_dispatch(obs)
     return Response({
         'id': obs.pk,
