@@ -804,11 +804,19 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
 # ca-*.xml (Коммерческий акт о расхождении) пропускаем — юзеру не нужен.
 
 
-_PR_DOC_NUMBER_RE = re.compile(
-    r'<cat_ru:PrDocumentNumber>([^<]+)</cat_ru:PrDocumentNumber>\s*'
-    r'(?:<cat_ru:PrDocumentDate>[^<]+</cat_ru:PrDocumentDate>\s*)?'
-    r'<catWH_ru:PresentedDocumentModeCode>(\d+)</catWH_ru:PresentedDocumentModeCode>',
+# Блочный подход: ищем <TransportDocs>...</TransportDocs>, внутри блока
+# независимо находим PrDocumentNumber и PresentedDocumentModeCode. Это
+# устойчиво к посторонним тегам между ними (catWH_ru:Avia, FlightNumber
+# в MAWB-блоке ломали плоский regex).
+_TRANSPORT_DOCS_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?TransportDocs\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?TransportDocs>',
     re.S
+)
+_PR_DOC_NUMBER_INNER_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?PrDocumentNumber>([^<]+)</(?:[a-zA-Z][\w-]*:)?PrDocumentNumber>'
+)
+_MODE_CODE_INNER_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?PresentedDocumentModeCode>(\d+)</(?:[a-zA-Z][\w-]*:)?PresentedDocumentModeCode>'
 )
 
 
@@ -824,8 +832,14 @@ def _parse_svh_outbox_xml(xml_text: str) -> dict:
         'mawb':  '',
         'hawbs': [],
     }
-    for m in _PR_DOC_NUMBER_RE.finditer(xml_text):
-        num, mode = m.group(1).strip(), m.group(2).strip()
+    for m in _TRANSPORT_DOCS_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        num_m = _PR_DOC_NUMBER_INNER_RE.search(body)
+        mode_m = _MODE_CODE_INNER_RE.search(body)
+        if not num_m or not mode_m:
+            continue
+        num = num_m.group(1).strip()
+        mode = mode_m.group(1).strip()
         if not num:
             continue
         if mode == '02020' and not out['mawb']:
