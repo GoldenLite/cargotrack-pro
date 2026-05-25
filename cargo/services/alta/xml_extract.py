@@ -537,6 +537,8 @@ def parse_svh_do2_out(xml_text: str) -> dict:
             declarations.append(f'{cc}/{pd_short}/{gn}')
     out['svh_do2_declarations'] = declarations
 
+    return out
+
 
 # ── DO1Report (исходящее уведомление о приёме на СВХ) ──────────────────────
 #

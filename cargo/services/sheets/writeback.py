@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
@@ -305,6 +306,10 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
         if not updates:
             continue
 
+        updates = _filter_inrange_updates(updates, ws, source.name)
+        if not updates:
+            continue
+
         # Один batch_update на партию (типично ≤ 80 HAWB × 2 = 160 ячеек).
         # При больших партиях разбить можно, но Google допускает до 10к ячеек.
         backoff_steps = [2, 4, 8]
@@ -433,6 +438,13 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         if not updates:
             continue
 
+        # Если ImportedSheetRow ссылается на строки за пределами текущего
+        # размера Sheet (юзер удалил строки в Sheets после импорта) —
+        # отфильтровываем такие записи, иначе ВЕСЬ batch падает с 400.
+        updates = _filter_inrange_updates(updates, ws, source.name)
+        if not updates:
+            continue
+
         # Один batch на всю выборку (Google допускает ~10k ячеек за раз)
         backoff_steps = [2, 4, 8, 16]
         for attempt in range(len(backoff_steps) + 1):
@@ -459,6 +471,41 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                 break
 
     return total
+
+
+def _filter_inrange_updates(updates: list, ws, source_name: str) -> list:
+    """Отбрасывает updates чьи range за пределами текущего размера worksheet.
+
+    ImportedSheetRow.source_row_index фиксируется на момент импорта. Если юзер
+    удалил строки в Sheets — наши индексы становятся стейлом, и batch_update
+    падает на первом out-of-bounds range, отменяя ВСЕ запросы.
+    Лучше пропустить такие записи (с warning'ом) чем потерять весь батч.
+    """
+    max_row = ws.row_count
+    max_col = ws.col_count
+    out = []
+    skipped = 0
+    for u in updates:
+        rng = u.get('range', '')
+        # 'Z13073' или 'AC1234' → отделить буквенный префикс и число
+        m = re.match(r'^([A-Z]+)(\d+)$', rng)
+        if not m:
+            out.append(u)
+            continue
+        col_letters, row_str = m.group(1), m.group(2)
+        row_num = int(row_str)
+        col_num = 0
+        for ch in col_letters:
+            col_num = col_num * 26 + (ord(ch) - ord('A') + 1)
+        if row_num > max_row or col_num > max_col:
+            skipped += 1
+            continue
+        out.append(u)
+    if skipped:
+        logger.warning('Skipped %d out-of-grid updates in %s '
+                       '(max_row=%d, max_col=%d) — Sheet shrunk after import?',
+                       skipped, source_name, max_row, max_col)
+    return out
 
 
 def _write_hawb_date(hawb: HouseWaybill, value, header_name: str,
@@ -607,6 +654,10 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
                 updates.append({'range': f'{letter}{row_idx}',
                                 'values': [[value_str]]})
 
+        if not updates:
+            continue
+
+        updates = _filter_inrange_updates(updates, ws, source.name)
         if not updates:
             continue
 
@@ -893,6 +944,10 @@ def batch_write_declarations_for_hawbs(hawbs: list) -> int:
                 updates.append({'range': f'{letter}{row_idx}',
                                 'values': [[decl]]})
 
+        if not updates:
+            continue
+
+        updates = _filter_inrange_updates(updates, ws, source.name)
         if not updates:
             continue
 
