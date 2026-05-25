@@ -3237,17 +3237,46 @@ def api_alta_outbox_post(request):
         except (ValueError, TypeError):
             prepared_at = None
 
+    msg_type = (data.get('msg_type') or '').strip()[:32]
+    common_wb = (data.get('common_waybill_number') or '').strip()[:64]
+    parsed_meta = data.get('parsed_meta') or {}
+
+    # ED.DO1: серверный re-парсинг raw_xml через xml_extract.parse_do1_report.
+    # Регекс агента не справляется с MAWB-блоком (там доп.теги Avia/FlightNumber
+    # ломают плоский regex). На стороне VPS у нас block-based parser устойчив
+    # к этому. Перезаписываем common_wb/hawbs из серверного парсинга если оно
+    # дало значения.
+    if msg_type == 'ED.DO1' and parsed_meta.get('raw_xml'):
+        try:
+            from .services.alta.xml_extract import parse_do1_report
+            parsed = parse_do1_report(parsed_meta['raw_xml'])
+            if parsed.get('mawb'):
+                common_wb = parsed['mawb'][:64]
+            if parsed.get('hawbs'):
+                parsed_meta['hawbs'] = parsed['hawbs']
+            if parsed.get('report_number'):
+                parsed_meta['report_number'] = parsed['report_number']
+            if parsed.get('certificate_number'):
+                parsed_meta['certificate_number'] = parsed['certificate_number']
+        except Exception:
+            import logging
+            logging.getLogger('cargo.alta.outbox').exception(
+                'parse_do1_report failed for %s', envelope_id)
+
     obs, created = AltaOutboxObservation.objects.update_or_create(
         envelope_id=envelope_id,
         defaults={
-            'msg_type': (data.get('msg_type') or '').strip()[:32],
+            'msg_type': msg_type,
             'prepared_at': prepared_at,
-            'common_waybill_number': (data.get('common_waybill_number') or '').strip()[:64],
+            'common_waybill_number': common_wb,
             'waybill_number': (data.get('waybill_number') or '').strip()[:64],
-            'parsed_meta': data.get('parsed_meta') or {},
+            'parsed_meta': parsed_meta,
         },
     )
-    if created:
+    # Для ED.DO1 dispatch идемпотентен (только update fields + writeback) —
+    # вызываем всегда, чтобы после fix агента re-POST уже существующих
+    # наблюдений всё-же зафиксировал Cargo.svh_do1_sent_at.
+    if created or msg_type == 'ED.DO1':
         outbox_dispatch(obs)
     return Response({
         'id': obs.pk,

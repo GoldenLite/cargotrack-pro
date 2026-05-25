@@ -873,6 +873,9 @@ def _svh_outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) ->
     from datetime import datetime, timezone
     mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
+    # raw_xml шлём для серверного re-парсинга через xml_extract.parse_do1_report
+    # (block-based, устойчив к дополнительным тегам в MAWB-блоке типа
+    # catWH_ru:Avia/FlightNumber которые ломают плоский regex агента).
     payload = {
         'envelope_id':           envelope_id,
         'msg_type':              'ED.DO1',
@@ -885,6 +888,7 @@ def _svh_outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) ->
             'report_date':        parsed['report_date'],
             'certificate_number': parsed['certificate_number'],
             'hawbs':              parsed['hawbs'],
+            'raw_xml':            xml_text,
         },
     }
     status, body = _post_outbox(cfg, payload)
