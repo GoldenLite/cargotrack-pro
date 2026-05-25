@@ -562,6 +562,18 @@ def parse_svh_do2_out(xml_text: str) -> dict:
 #           <catWH_ru:PresentedDocumentModeCode>02021</catWH_ru:PresentedDocumentModeCode>
 #         </do1r:TransportDocs>
 #         ...
+# MAWB в DO1Report лежит в отдельном блоке <do1r:MasterAirWayBill>
+# (без PresentedDocumentModeCode):
+#   <do1r:MasterAirWayBill>
+#     <cat_ru:PrDocumentName>Авианакладная (AWB)</cat_ru:PrDocumentName>
+#     <cat_ru:PrDocumentNumber>141-70382023</cat_ru:PrDocumentNumber>
+#     <cat_ru:PrDocumentDate>2026-05-22</cat_ru:PrDocumentDate>
+#   </do1r:MasterAirWayBill>
+# А HAWB-ы — в <do1r:TransportDocs> с PresentedDocumentModeCode=02021.
+_MASTER_AWB_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?MasterAirWayBill\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?MasterAirWayBill>',
+    re.S
+)
 _TRANSPORT_DOCS_BLOCK_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?TransportDocs\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?TransportDocs>',
     re.S
@@ -587,15 +599,16 @@ def parse_do1_report(xml_text: str) -> dict:
         'mawb':          '',
         'hawbs':         [],
     }
+    # MAWB — отдельный блок <MasterAirWayBill> без code
+    m_awb = _MASTER_AWB_BLOCK_RE.search(xml_text)
+    if m_awb:
+        out['mawb'] = _first(m_awb.group(1), 'PrDocumentNumber').strip()
+    # HAWB-ы — TransportDocs с PresentedDocumentModeCode=02021
     for m in _TRANSPORT_DOCS_BLOCK_RE.finditer(xml_text):
         body = m.group(1)
         mode = _first(body, 'PresentedDocumentModeCode').strip()
         num  = _first(body, 'PrDocumentNumber').strip()
-        if not num:
-            continue
-        if mode == '02020' and not out['mawb']:
-            out['mawb'] = num
-        elif mode == '02021':
+        if num and mode == '02021':
             out['hawbs'].append(num)
     return out
 

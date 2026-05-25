@@ -804,10 +804,13 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
 # ca-*.xml (Коммерческий акт о расхождении) пропускаем — юзеру не нужен.
 
 
-# Блочный подход: ищем <TransportDocs>...</TransportDocs>, внутри блока
-# независимо находим PrDocumentNumber и PresentedDocumentModeCode. Это
-# устойчиво к посторонним тегам между ними (catWH_ru:Avia, FlightNumber
-# в MAWB-блоке ломали плоский regex).
+# MAWB лежит в отдельном блоке <do1r:MasterAirWayBill> (БЕЗ PresentedDocumentModeCode),
+# а HAWB-ы — в <do1r:TransportDocs> с PresentedDocumentModeCode=02021. Два разных
+# источника, не один.
+_MASTER_AWB_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?MasterAirWayBill\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?MasterAirWayBill>',
+    re.S
+)
 _TRANSPORT_DOCS_BLOCK_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?TransportDocs\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?TransportDocs>',
     re.S
@@ -832,6 +835,13 @@ def _parse_svh_outbox_xml(xml_text: str) -> dict:
         'mawb':  '',
         'hawbs': [],
     }
+    # MAWB — отдельный блок <MasterAirWayBill> без code
+    m_awb = _MASTER_AWB_BLOCK_RE.search(xml_text)
+    if m_awb:
+        num_m = _PR_DOC_NUMBER_INNER_RE.search(m_awb.group(1))
+        if num_m:
+            out['mawb'] = num_m.group(1).strip()
+    # HAWB-ы — TransportDocs с PresentedDocumentModeCode=02021
     for m in _TRANSPORT_DOCS_BLOCK_RE.finditer(xml_text):
         body = m.group(1)
         num_m = _PR_DOC_NUMBER_INNER_RE.search(body)
@@ -840,11 +850,7 @@ def _parse_svh_outbox_xml(xml_text: str) -> dict:
             continue
         num = num_m.group(1).strip()
         mode = mode_m.group(1).strip()
-        if not num:
-            continue
-        if mode == '02020' and not out['mawb']:
-            out['mawb'] = num
-        elif mode == '02021':
+        if num and mode == '02021':
             out['hawbs'].append(num)
     return out
 
