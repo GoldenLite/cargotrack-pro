@@ -104,6 +104,25 @@ def load_config() -> dict:
                 'name_pattern':  re.compile(ob.get('name_pattern', r'^538134\^')),
             }
     cfg['outbox'] = outbox
+
+    # Опциональная svh_outbox-секция (наблюдение за исходящими СВХ
+    # копиями ed2svh.exe: do1-*.xml в C:\ALTA\SvhPro\ED2SVH\backup_out).
+    # Формат отличается — это plain XML без .gz и без Envelope-обёртки.
+    # Mtime файла = момент когда ed2svh.exe отправил ДО-1 в таможню.
+    svh_outbox = None
+    if 'svh_outbox' in cp:
+        sob = cp['svh_outbox']
+        watch_dir = Path(sob.get('watch_dir', '')) if sob.get('watch_dir') else None
+        token = sob.get('token', '').strip() or (inbox['token'] if inbox else '')
+        if watch_dir and token:
+            svh_outbox = {
+                'watch_dir':     watch_dir,
+                'token':         token,
+                'poll_interval': int(sob.get('poll_interval', '30')),
+                'state_db':      Path(__file__).resolve().parent / sob.get('state_db', 'svh_outbox_state.sqlite'),
+                'endpoint':      sob.get('endpoint', '/api/v1/alta/outbox/').lstrip('/'),
+            }
+    cfg['svh_outbox'] = svh_outbox
     return cfg
 
 
@@ -768,6 +787,147 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
         logging.error(f'outbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# SVH outbound: ed2svh.exe backup_out — do1-*.xml plain XML без Envelope
+# ─────────────────────────────────────────────────────────────────────────
+# `ed2svh.exe` копирует исходящие сообщения в backup_out при включённом
+# чекбоксе «Резервная копия» в настройках. Файлы не удаляются.
+#
+# Формат имени: `do1-<CustomsCode>-<YYYYMMDD>-<Seq7>-<Hash8>.xml`
+# Пример:       `do1-10001020-20260524-0000873-EA8C8DC8.xml`
+#
+# Внутри — `<edcnt:ED_Container>` без Envelope-обёртки, EnvelopeID и
+# MessageType отсутствуют. Эти поля проставим сами: envelope_id из имени
+# файла (это уникальный sequence от Альты), msg_type='ED.DO1'.
+# prepared_at = mtime файла (= момент отправки в таможню).
+#
+# ca-*.xml (Коммерческий акт о расхождении) пропускаем — юзеру не нужен.
+
+
+_PR_DOC_NUMBER_RE = re.compile(
+    r'<cat_ru:PrDocumentNumber>([^<]+)</cat_ru:PrDocumentNumber>\s*'
+    r'(?:<cat_ru:PrDocumentDate>[^<]+</cat_ru:PrDocumentDate>\s*)?'
+    r'<catWH_ru:PresentedDocumentModeCode>(\d+)</catWH_ru:PresentedDocumentModeCode>',
+    re.S
+)
+
+
+def _parse_svh_outbox_xml(xml_text: str) -> dict:
+    """Парсит do1-*.xml: ReportNumber + MAWB + список HAWB.
+
+    Возвращает dict с полями для отправки в API /api/v1/alta/outbox/.
+    """
+    out = {
+        'report_number': _xml_field(xml_text, 'ReportNumber'),
+        'report_date':   _xml_field(xml_text, 'ReportDate'),
+        'certificate_number': _xml_field(xml_text, 'CertificateNumber'),
+        'mawb':  '',
+        'hawbs': [],
+    }
+    for m in _PR_DOC_NUMBER_RE.finditer(xml_text):
+        num, mode = m.group(1).strip(), m.group(2).strip()
+        if not num:
+            continue
+        if mode == '02020' and not out['mawb']:
+            out['mawb'] = num
+        elif mode == '02021':
+            out['hawbs'].append(num)
+    return out
+
+
+def _svh_outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None:
+    """Обрабатывает один do1-*.xml. Не удаляет/не модифицирует файл."""
+    # envelope_id = имя файла без расширения (уникально, sequence+hash от Альты).
+    envelope_id = path.stem
+    if _state_seen(conn, envelope_id):
+        return
+
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logging.warning(f'svh_outbox: read {path.name}: {e}')
+        return
+
+    for enc in ('utf-8', 'cp1251'):
+        try:
+            xml_text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        logging.warning(f'svh_outbox: {path.name}: undecodable')
+        return
+
+    parsed = _parse_svh_outbox_xml(xml_text)
+    if not parsed['hawbs'] and not parsed['mawb']:
+        # Это не DO1Report (видимо ca-*.xml или что-то ещё) — пропускаем.
+        # Помечаем как seen чтобы не разбирать заново.
+        _state_mark(conn, envelope_id)
+        return
+
+    # prepared_at = mtime файла (= момент когда ed2svh.exe записал backup =
+    # момент отправки в таможню). Делаем aware datetime в UTC ISO формате.
+    from datetime import datetime, timezone
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+    payload = {
+        'envelope_id':           envelope_id,
+        'msg_type':              'ED.DO1',
+        'prepared_at':           mtime,
+        'common_waybill_number': parsed['mawb'],
+        'waybill_number':        '',  # do1 = партия, не одна HAWB
+        'parsed_meta': {
+            'source_file':        path.name,
+            'report_number':      parsed['report_number'],
+            'report_date':        parsed['report_date'],
+            'certificate_number': parsed['certificate_number'],
+            'hawbs':              parsed['hawbs'],
+        },
+    }
+    status, body = _post_outbox(cfg, payload)
+    if status in (200, 409):
+        _state_mark(conn, envelope_id)
+        logging.info(
+            f'svh_outbox: {path.name} report={parsed["report_number"]} '
+            f'mawb={parsed["mawb"]} hawbs={len(parsed["hawbs"])} → HTTP {status}'
+        )
+    else:
+        logging.error(f'svh_outbox: {path.name}: POST HTTP {status} body={body[:200]!r}')
+
+
+def svh_outbox_loop(cfg: dict) -> None:
+    """Бесконечный поток: сканит backup_out на do1-*.xml, POST'ит на VPS."""
+    sc = cfg['svh_outbox']
+    logging.info(
+        f'svh_outbox: started, watching {sc["watch_dir"]} poll={sc["poll_interval"]}s'
+    )
+    try:
+        conn = _state_db_open(sc['state_db'])
+    except Exception as e:
+        logging.error(f'svh_outbox: cannot open state db {sc["state_db"]}: {e}')
+        return
+
+    # Лезем в общий _post_outbox — у него ключ 'outbox' жёстко прошит. Подменим
+    # ссылку через локальное переименование секции на время этого потока.
+    cfg_local = dict(cfg)
+    cfg_local['outbox'] = sc  # _post_outbox читает cfg['outbox']['endpoint']/['token']
+
+    while True:
+        try:
+            files = glob.glob(os.path.join(str(sc['watch_dir']), 'do1-*.xml'))
+            for p in (Path(f) for f in files):
+                try:
+                    _svh_outbox_process_file(cfg_local, conn, p)
+                except Exception:
+                    logging.error(f'svh_outbox: process {p.name}: {traceback.format_exc()}')
+        except Exception:
+            logging.error(f'svh_outbox: scan crash: {traceback.format_exc()}')
+        time.sleep(sc['poll_interval'])
+
+
 def outbox_loop(cfg: dict) -> None:
     """Бесконечный поток: сканит watch_dir на 538134^*, POST'ит наблюдения."""
     oc = cfg['outbox']
@@ -809,6 +969,11 @@ def main() -> None:
         threading.Thread(target=outbox_loop, args=(cfg,), daemon=True, name='outbox-loop').start()
     else:
         logging.info('outbox: section not configured in alta_agent.ini → outbox loop disabled')
+
+    if cfg.get('svh_outbox'):
+        threading.Thread(target=svh_outbox_loop, args=(cfg,), daemon=True, name='svh-outbox-loop').start()
+    else:
+        logging.info('svh_outbox: section not configured in alta_agent.ini → SVH outbox loop disabled')
 
     # Outer guard: a crash inside the loop must not kill the agent silently.
     while True:
