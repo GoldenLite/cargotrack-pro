@@ -57,6 +57,7 @@ def signals_suppressed() -> bool:
 CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
+CARGOTRACK_SVH_DO1_SENT_HEADER = 'CargoTrack: дата подачи ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
 CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
 # Юзер не использует рег.номер ДО2 в Sheets, колонку не создаём
@@ -650,6 +651,105 @@ def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
         CARGOTRACK_SVH_DO2_DATE_HEADER, 'svh_do2_date',
         after_header=CARGOTRACK_RELEASE_DATE_HEADER,
     )
+
+
+def batch_write_svh_do1_sent_for_cargos(cargos: list) -> int:
+    """Batch writeback Cargo.svh_do1_sent_at в Sheets «дата подачи ДО1».
+
+    Cargo-level (одна дата на партию), но строки в Sheets индексированы по
+    HAWB → пишем одну и ту же дату во все HAWB-строки партии. По образцу
+    batch_write_svh_for_cargos.
+
+    Колонка вставляется СРАЗУ после «дата ДО1» (CARGOTRACK_SVH_DATE_HEADER):
+    хронологически после регистрации идёт ничего, до — момент нашей подачи,
+    но пользователь предпочёл логический порядок: «дата ДО1» (от таможни,
+    ключевая) → «дата подачи ДО1» (наша, доп. инфа).
+    """
+    if not cargos:
+        return 0
+
+    hawb_to_cargo: dict[str, Cargo] = {}
+    for c in cargos:
+        for hn in c.hawbs.values_list('hawb_number', flat=True):
+            hawb_to_cargo[hn] = c
+    if not hawb_to_cargo:
+        return 0
+
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(hawb_to_cargo.keys()))
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    if not rows.exists():
+        logger.info('batch svh_do1_sent: no Sheets rows for %d cargos',
+                    len(cargos))
+        return 0
+
+    sources: dict[int, SheetSource] = {}
+    rows_by_source: dict[int, list[tuple[int, Cargo]]] = defaultdict(list)
+    seen: set[str] = set()
+    for r in rows:
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        cargo = hawb_to_cargo.get(r.hawb_number_norm)
+        if not cargo:
+            continue
+        sources[r.source_id] = r.source
+        rows_by_source[r.source_id].append((r.source_row_index, cargo))
+
+    total = 0
+    for source_id, items in rows_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = open_worksheet(source)
+            col = _ensure_named_column(
+                ws, source.header_row,
+                CARGOTRACK_SVH_DO1_SENT_HEADER,
+                after_header=CARGOTRACK_SVH_DATE_HEADER,
+            )
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('batch svh_do1_sent: open/ensure failed: %s', e)
+            continue
+
+        try:
+            existing = ws.col_values(col)
+        except gspread.exceptions.APIError as e:
+            logger.exception('batch svh_do1_sent: col_values failed: %s', e)
+            continue
+
+        letter = _col_letter(col)
+        updates = []
+        for row_idx, cargo in items:
+            sent_str = _local_date_str(cargo.svh_do1_sent_at)
+            cur = (existing[row_idx - 1]
+                   if row_idx - 1 < len(existing) else '').strip()
+            if cur != sent_str:
+                updates.append({'range': f'{letter}{row_idx}',
+                                'values': [[sent_str]]})
+
+        if not updates:
+            continue
+
+        backoff_steps = [2, 4, 8, 16]
+        for attempt in range(len(backoff_steps) + 1):
+            try:
+                ws.batch_update(updates, value_input_option='RAW')
+                total += len(updates)
+                logger.info('batch svh_do1_sent: wrote %d cells in %s',
+                            len(updates), source.name)
+                break
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, 'status_code', None)
+                if status == 429 and attempt < len(backoff_steps):
+                    wait = backoff_steps[attempt]
+                    logger.warning('batch svh_do1_sent 429, retry in %ds', wait)
+                    time.sleep(wait)
+                    continue
+                logger.exception('batch svh_do1_sent: batch_update failed')
+                break
+
+    return total
 
 
 # Колонки которые мы когда-то создавали, но больше не используем.

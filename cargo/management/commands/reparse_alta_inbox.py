@@ -164,6 +164,7 @@ class Command(BaseCommand):
                     batch_write_release_dates_for_hawbs,
                     batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
+                    batch_write_svh_do1_sent_for_cargos,
                     drop_deprecated_columns,
                 )
                 # Одноразовая очистка: убрать колонки которые мы больше не
@@ -229,6 +230,12 @@ class Command(BaseCommand):
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)
                     self.stdout.write(f'  svh: {n} cells ({len(cargos_svh)} cargos)')
+                    # Дата подачи ДО-1 — отдельная колонка, тот же набор
+                    # cargos. ED.DO1 outbound может прийти и без CMN.13010
+                    # (если таможня ещё не зарегистрировала) — мы всё равно
+                    # хотим показать момент подачи.
+                    n = batch_write_svh_do1_sent_for_cargos(cargos_svh)
+                    self.stdout.write(f'  svh_do1_sent: {n} cells ({len(cargos_svh)} cargos)')
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 

@@ -37,17 +37,33 @@ def _find_hawb(wb: str) -> Optional[HouseWaybill]:
 
 
 def link(obs: AltaOutboxObservation) -> Tuple[Optional[Cargo], Optional[HouseWaybill]]:
-    """Привязывает наблюдение к Cargo и/или HAWB по вытащенным номерам."""
+    """Привязывает наблюдение к Cargo и/или HAWB по вытащенным номерам.
+
+    Для msg_type='ED.DO1' (DO1Report от Альты-СВХ) есть fallback: если MAWB
+    в common_waybill_number не нашли Cargo — ищем по любому HAWB-номеру
+    из parsed_meta['hawbs'] и берём его mawb.
+    """
     cargo = _find_cargo(obs.common_waybill_number)
     hawb  = _find_hawb(obs.waybill_number)
     # Если HAWB найдена, а её mawb совпадает — заодно подтянем cargo.
     if hawb and not cargo and hawb.mawb_id:
         cargo = hawb.mawb
+    # ED.DO1: fallback через список HAWB партии (parsed_meta['hawbs'])
+    if not cargo and obs.msg_type == 'ED.DO1':
+        for hawb_num in (obs.parsed_meta or {}).get('hawbs') or []:
+            h = _find_hawb(hawb_num)
+            if h and h.mawb_id:
+                cargo = h.mawb
+                break
     return cargo, hawb
 
 
 def dispatch(obs: AltaOutboxObservation) -> None:
-    """Линкует obs к Cargo/HAWB. Сохраняет только если хоть что-то нашли."""
+    """Линкует obs к Cargo/HAWB. Сохраняет только если хоть что-то нашли.
+
+    Для msg_type='ED.DO1' дополнительно проставляет Cargo.svh_do1_sent_at =
+    obs.prepared_at (момент когда Альта-СВХ отправила ДО-1 в таможню).
+    """
     cargo, hawb = link(obs)
     update_fields = []
     if cargo and obs.cargo_id != cargo.pk:
@@ -60,6 +76,31 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         obs.save(update_fields=update_fields)
         logger.info('outbox %s linked: cargo=%s hawb=%s', obs.envelope_id,
                     obs.cargo_id, obs.hawb_id)
+
+    # ED.DO1: записать дату подачи ДО-1 в Cargo + триггерить Sheets writeback.
+    if obs.msg_type == 'ED.DO1' and cargo and obs.prepared_at:
+        if cargo.svh_do1_sent_at != obs.prepared_at:
+            Cargo.objects.filter(pk=cargo.pk).update(
+                svh_do1_sent_at=obs.prepared_at)
+            logger.info('ED.DO1: Cargo %s svh_do1_sent_at = %s',
+                        cargo.awb_number, obs.prepared_at)
+            _writeback_svh_do1_sent(cargo)
+
+
+def _writeback_svh_do1_sent(cargo: Cargo) -> None:
+    """Sync ячейки «дата подачи ДО1» в Sheets. Skip если signals_suppressed
+    (bulk-операция типа reparse сама делает resync в конце).
+    """
+    try:
+        from cargo.services.sheets.writeback import (
+            batch_write_svh_do1_sent_for_cargos, signals_suppressed,
+        )
+        if signals_suppressed():
+            return
+        cargo.refresh_from_db(fields=['svh_do1_sent_at'])
+        batch_write_svh_do1_sent_for_cargos([cargo])
+    except Exception:
+        logger.exception('svh_do1_sent writeback failed')
 
 
 def relink_for_cargo(cargo: Cargo) -> int:

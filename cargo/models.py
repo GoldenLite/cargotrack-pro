@@ -197,6 +197,12 @@ class Cargo(models.Model):
     scan_out_of_bond = models.DateTimeField('Выезд со склада', null=True, blank=True)
     svh_do1_reg_number = models.CharField('Рег. номер ДО1', max_length=64, blank=True,
                                           help_text='10001020/220526/5005840 — из CMN.13029 (опись СВХ)')
+    svh_do1_sent_at = models.DateTimeField(
+        'Дата подачи ДО1', null=True, blank=True,
+        help_text='Момент когда Альта-СВХ отправила ДО-1 в таможню. '
+                  'Берётся из mtime файла do1-*.xml в backup_out (наблюдается '
+                  'agent-ом). Отличается от scan_into_bond — там момент '
+                  'регистрации от таможни, тут момент нашей подачи.')
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True, db_index=True)

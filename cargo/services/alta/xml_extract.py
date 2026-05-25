@@ -537,4 +537,66 @@ def parse_svh_do2_out(xml_text: str) -> dict:
             declarations.append(f'{cc}/{pd_short}/{gn}')
     out['svh_do2_declarations'] = declarations
 
+
+# ── DO1Report (исходящее уведомление о приёме на СВХ) ──────────────────────
+#
+# Файлы лежат в C:\ALTA\SvhPro\ED2SVH\backup_out\do1-*.xml на рабочей
+# виртуалке (резервная копия исходящих от ed2svh.exe). Содержимое — сырое
+# тело документа без Envelope-обёртки.
+#
+# Структура:
+#   <edcnt:ED_Container>
+#     <edcnt:ContainerDoc><edcnt:DocBody>
+#       <do1r:DO1Report>
+#         <catWH_ru:ReportNumber>0000873</catWH_ru:ReportNumber>
+#         <catWH_ru:ReportDate>2026-05-25</catWH_ru:ReportDate>
+#         <catWH_ru:CertificateNumber>10001/060324/10009/1</catWH_ru:CertificateNumber>
+#         ...
+#         <do1r:TransportDocs>     ← MAWB-блок (02020)
+#           <cat_ru:PrDocumentName>Авианакладная (AWB)</cat_ru:PrDocumentName>
+#           <cat_ru:PrDocumentNumber>141-70382023</cat_ru:PrDocumentNumber>
+#           <catWH_ru:PresentedDocumentModeCode>02020</catWH_ru:PresentedDocumentModeCode>
+#         </do1r:TransportDocs>
+#         <do1r:TransportDocs>     ← HAWB-блок (02021), повторяется
+#           <cat_ru:PrDocumentNumber>10251976678</cat_ru:PrDocumentNumber>
+#           <catWH_ru:PresentedDocumentModeCode>02021</catWH_ru:PresentedDocumentModeCode>
+#         </do1r:TransportDocs>
+#         ...
+_TRANSPORT_DOCS_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?TransportDocs\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?TransportDocs>',
+    re.S
+)
+
+
+def parse_do1_report(xml_text: str) -> dict:
+    """Парсит DO1Report.xml из backup_out: ReportNumber + MAWB + список HAWB.
+
+    Возвращает:
+      {
+        'report_number': '0000873',
+        'report_date':   '2026-05-25',
+        'certificate_number': '10001/060324/10009/1',
+        'mawb':          '141-70382023',
+        'hawbs':         ['10251976678', '10251978745', ...],
+      }
+    """
+    out: dict = {
+        'report_number': _first(xml_text, 'ReportNumber'),
+        'report_date':   _first(xml_text, 'ReportDate'),
+        'certificate_number': _first(xml_text, 'CertificateNumber'),
+        'mawb':          '',
+        'hawbs':         [],
+    }
+    for m in _TRANSPORT_DOCS_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        mode = _first(body, 'PresentedDocumentModeCode').strip()
+        num  = _first(body, 'PrDocumentNumber').strip()
+        if not num:
+            continue
+        if mode == '02020' and not out['mawb']:
+            out['mawb'] = num
+        elif mode == '02021':
+            out['hawbs'].append(num)
+    return out
+
     return out
