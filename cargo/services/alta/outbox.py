@@ -77,19 +77,26 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         logger.info('outbox %s linked: cargo=%s hawb=%s', obs.envelope_id,
                     obs.cargo_id, obs.hawb_id)
 
-    # ED.DO1: записать дату подачи ДО-1 в Cargo + триггерить Sheets writeback.
-    if obs.msg_type == 'ED.DO1' and cargo and obs.prepared_at:
-        if cargo.svh_do1_sent_at != obs.prepared_at:
-            Cargo.objects.filter(pk=cargo.pk).update(
-                svh_do1_sent_at=obs.prepared_at)
-            logger.info('ED.DO1: Cargo %s svh_do1_sent_at = %s',
-                        cargo.awb_number, obs.prepared_at)
-            _writeback_svh_do1_sent(cargo)
-
-    # ED.DO1: per-HAWB вес и места из <Goods> блоков ДО-1. parsed_meta может
-    # содержать goods{hawb: {weight, places}} (если agent послал raw_xml,
-    # endpoint распарсил через parse_do1_report).
+    # ED.DO1: per-HAWB дата подачи ДО-1 + per-Cargo лицензия СВХ + per-HAWB
+    # вес/места. Один ДО-1 может содержать только часть HAWB партии (если
+    # подача разбита на несколько ДО-1 — например 222 + 186 = 408 на одну
+    # MAWB). Поэтому svh_do1_sent_at пишется ТОЛЬКО в HAWB перечисленные
+    # в parsed_meta['hawbs'], не во все HAWB cargo.
     if obs.msg_type == 'ED.DO1':
+        # Лицензия СВХ — общий атрибут партии. Заполняем только если ещё
+        # не пришла из CMN.13010 (там сначала ставится через scan_into_bond).
+        if cargo:
+            cert = ((obs.parsed_meta or {}).get('certificate_number') or '').strip()
+            if cert and not (cargo.warehouse_license or '').strip():
+                Cargo.objects.filter(pk=cargo.pk).update(warehouse_license=cert[:50])
+                logger.info('ED.DO1: Cargo %s warehouse_license=%s',
+                            cargo.awb_number, cert)
+                _writeback_svh_for_cargo(cargo)
+        # Per-HAWB дата подачи: ставим только тем что в hawbs списке.
+        hawb_nums = (obs.parsed_meta or {}).get('hawbs') or []
+        if obs.prepared_at and hawb_nums:
+            _apply_do1_sent_at(hawb_nums, obs.prepared_at)
+        # Per-HAWB вес/места из <Goods> блоков.
         goods = (obs.parsed_meta or {}).get('goods') or {}
         if goods:
             _apply_do1_goods(goods)
@@ -106,16 +113,33 @@ def dispatch(obs: AltaOutboxObservation) -> None:
 def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
     """Обновляет HouseWaybill.filed_date если новое значение раньше или поле пустое.
 
-    Берёт самую раннюю подачу — CMN.11023 (первая) приоритетнее CMN.11349
-    (корректировка), но в БД они могут попадать в любом порядке. Через
-    сравнение prepared_at выбираем именно самое раннее.
+    Дополнительно распространяет дату на ВСЕ HAWB с тем же
+    customs_declaration_number (одна ДТ → одна дата подачи для всех её
+    накладных). CMN.11023/11349 обычно приходит per-HAWB, но фактически
+    все накладные одной ДТ подаются одновременно.
     """
-    hawb.refresh_from_db(fields=['filed_date'])
-    if hawb.filed_date and hawb.filed_date <= prepared_at:
-        return  # уже стоит более раннее значение
-    HouseWaybill.objects.filter(pk=hawb.pk).update(filed_date=prepared_at)
-    logger.info('filed_date: HAWB %s set to %s', hawb.hawb_number, prepared_at)
-    _writeback_filed_date(hawb)
+    hawb.refresh_from_db(fields=['filed_date', 'customs_declaration_number'])
+    if not (hawb.filed_date and hawb.filed_date <= prepared_at):
+        HouseWaybill.objects.filter(pk=hawb.pk).update(filed_date=prepared_at)
+        logger.info('filed_date: HAWB %s set to %s', hawb.hawb_number, prepared_at)
+        _writeback_filed_date(hawb)
+    # Propagate to siblings with same ДТ
+    decl = (hawb.customs_declaration_number or '').strip()
+    if decl:
+        siblings = HouseWaybill.objects.filter(
+            customs_declaration_number=decl
+        ).exclude(pk=hawb.pk)
+        affected = []
+        for sib in siblings:
+            if sib.filed_date and sib.filed_date <= prepared_at:
+                continue
+            HouseWaybill.objects.filter(pk=sib.pk).update(filed_date=prepared_at)
+            affected.append(sib)
+        if affected:
+            logger.info('filed_date propagation: %d siblings of ДТ %s set to %s',
+                        len(affected), decl, prepared_at)
+            for sib in affected:
+                _writeback_filed_date(sib)
 
 
 def _apply_do1_goods(goods: dict) -> None:
@@ -174,20 +198,51 @@ def _writeback_filed_date(hawb: HouseWaybill) -> None:
         logger.exception('filed_date writeback failed')
 
 
-def _writeback_svh_do1_sent(cargo: Cargo) -> None:
-    """Sync ячейки «дата подачи ДО1» в Sheets. Skip если signals_suppressed
-    (bulk-операция типа reparse сама делает resync в конце).
+def _apply_do1_sent_at(hawb_nums: list, prepared_at) -> None:
+    """Per-HAWB svh_do1_sent_at — только для HAWB-номеров из ДО-1.
+
+    Если у HAWB уже стоит более раннее значение (от предыдущего ДО-1 на эту
+    же накладную) — оставляем; иначе перезаписываем. Юзер: «дата подачи
+    ДО-1» = когда МЫ отправили.
     """
+    affected: list[HouseWaybill] = []
+    for hawb_num in hawb_nums:
+        h = HouseWaybill.objects.filter(hawb_number__iexact=str(hawb_num).strip()).first()
+        if not h:
+            continue
+        if h.svh_do1_sent_at and h.svh_do1_sent_at <= prepared_at:
+            continue  # уже стоит более ранний ДО-1
+        HouseWaybill.objects.filter(pk=h.pk).update(svh_do1_sent_at=prepared_at)
+        affected.append(h)
+    if affected:
+        logger.info('ED.DO1 sent_at: updated %d HAWBs to %s',
+                    len(affected), prepared_at)
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_svh_do1_sent_for_hawbs, signals_suppressed,
+            )
+            if not signals_suppressed():
+                for h in affected:
+                    h.refresh_from_db(fields=['svh_do1_sent_at'])
+                batch_write_svh_do1_sent_for_hawbs(affected)
+        except Exception:
+            logger.exception('svh_do1_sent_at writeback failed')
+
+
+def _writeback_svh_for_cargo(cargo: Cargo) -> None:
+    """Sync лицензии/даты ДО1/рег.номера ДО1 в Sheets для одной партии."""
     try:
         from cargo.services.sheets.writeback import (
-            batch_write_svh_do1_sent_for_cargos, signals_suppressed,
+            batch_write_svh_for_cargos, signals_suppressed,
         )
         if signals_suppressed():
             return
-        cargo.refresh_from_db(fields=['svh_do1_sent_at'])
-        batch_write_svh_do1_sent_for_cargos([cargo])
+        cargo.refresh_from_db(fields=['warehouse_license', 'scan_into_bond',
+                                       'svh_do1_reg_number'])
+        batch_write_svh_for_cargos([cargo])
     except Exception:
-        logger.exception('svh_do1_sent writeback failed')
+        logger.exception('svh writeback failed for cargo %s', cargo.awb_number)
+
 
 
 def relink_for_cargo(cargo: Cargo) -> int:

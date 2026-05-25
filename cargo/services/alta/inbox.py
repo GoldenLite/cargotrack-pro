@@ -332,7 +332,48 @@ def recompute_declaration(cargo: Optional[Cargo],
                     HouseWaybill.objects.filter(
                         pk=hawb.pk, filed_date__isnull=True
                     ).update(filed_date=filed_dt)
+            # Sync filed_date по всем HAWB с этой ДТ — берём минимум.
+            # Полезно когда CMN.11023/11349 пришла для одного HAWB партии
+            # (поле filed_date там было выставлено по реальному prepared_at),
+            # а потом CMN.11350 проставила customs_declaration_number у других
+            # HAWB этой же ДТ → нужно скопировать filed_date соседям.
+            _sync_filed_date_by_declaration(target_decl)
     return [hawb]
+
+
+def _sync_filed_date_by_declaration(decl_number: str) -> None:
+    """Для всех HAWB с этой ДТ — установить filed_date = min(filed_date по группе).
+
+    Идемпотентно: если у всех уже одинаковый минимум — no-op.
+    """
+    decl = (decl_number or '').strip()
+    if not decl:
+        return
+    hawbs = list(HouseWaybill.objects.filter(
+        customs_declaration_number=decl
+    ).only('pk', 'filed_date', 'hawb_number'))
+    if len(hawbs) < 2:
+        return
+    dates = [h.filed_date for h in hawbs if h.filed_date]
+    if not dates:
+        return
+    min_date = min(dates)
+    affected = [h for h in hawbs if h.filed_date != min_date]
+    for h in affected:
+        HouseWaybill.objects.filter(pk=h.pk).update(filed_date=min_date)
+    if affected:
+        logger.info('filed_date sync by ДТ %s: %d HAWB → %s',
+                    decl, len(affected), min_date)
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_filed_dates_for_hawbs, signals_suppressed,
+            )
+            if not signals_suppressed():
+                for h in affected:
+                    h.refresh_from_db(fields=['filed_date'])
+                batch_write_filed_dates_for_hawbs(affected)
+        except Exception:
+            logger.exception('filed_date sync writeback failed')
 
 
 def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:

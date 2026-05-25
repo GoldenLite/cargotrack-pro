@@ -164,7 +164,7 @@ class Command(BaseCommand):
                     batch_write_release_dates_for_hawbs,
                     batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
-                    batch_write_svh_do1_sent_for_cargos,
+                    batch_write_svh_do1_sent_for_hawbs,
                     batch_write_svh_do1_weight_for_hawbs,
                     batch_write_svh_do1_places_for_hawbs,
                     drop_deprecated_columns,
@@ -239,23 +239,20 @@ class Command(BaseCommand):
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)
                     self.stdout.write(f'  svh: {n} cells ({len(cargos_svh)} cargos)')
-                    # Дата подачи ДО-1 — отдельная колонка, тот же набор
-                    # cargos. ED.DO1 outbound может прийти и без CMN.13010
-                    # (если таможня ещё не зарегистрировала) — мы всё равно
-                    # хотим показать момент подачи.
-                    n = batch_write_svh_do1_sent_for_cargos(cargos_svh)
-                    self.stdout.write(f'  svh_do1_sent: {n} cells ({len(cargos_svh)} cargos)')
-                # Вес/мест из ДО-1 (per-HAWB, из <Goods> блоков). Берём ВСЕ
-                # HAWB в Sheets — для тех у кого svh_do1_gross_weight=None
-                # и ячейка пустая будет no-op.
-                hawbs_for_do1_goods = list(HouseWaybill.objects.filter(
+                # Per-HAWB поля из ED.DO1 (svh_do1_sent_at, вес, места).
+                # Берём ВСЕ HAWB в Sheets — для тех у кого поле пустое и
+                # ячейка пустая будет no-op. Для тех у кого пустое поле в БД
+                # но ячейка с данными (стейл от cargo-level логики) — очистка.
+                hawbs_for_do1 = list(HouseWaybill.objects.filter(
                     hawb_number__in=list(hawb_nums_in_sheets)
                 ).distinct())
-                if hawbs_for_do1_goods:
-                    n = batch_write_svh_do1_weight_for_hawbs(hawbs_for_do1_goods)
-                    self.stdout.write(f'  svh_do1_weight: {n} cells ({len(hawbs_for_do1_goods)} HAWB)')
-                    n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1_goods)
-                    self.stdout.write(f'  svh_do1_places: {n} cells ({len(hawbs_for_do1_goods)} HAWB)')
+                if hawbs_for_do1:
+                    n = batch_write_svh_do1_sent_for_hawbs(hawbs_for_do1)
+                    self.stdout.write(f'  svh_do1_sent: {n} cells ({len(hawbs_for_do1)} HAWB)')
+                    n = batch_write_svh_do1_weight_for_hawbs(hawbs_for_do1)
+                    self.stdout.write(f'  svh_do1_weight: {n} cells ({len(hawbs_for_do1)} HAWB)')
+                    n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1)
+                    self.stdout.write(f'  svh_do1_places: {n} cells ({len(hawbs_for_do1)} HAWB)')
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 
