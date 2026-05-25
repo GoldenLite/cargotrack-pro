@@ -177,6 +177,7 @@ class Command(BaseCommand):
                     batch_write_svh_do1_sent_for_hawbs,
                     batch_write_svh_do1_weight_for_hawbs,
                     batch_write_svh_do1_places_for_hawbs,
+                    batch_write_cargo_mawb_for_hawbs,
                 )
                 hawb_nums_in_sheets = list(
                     ImportedSheetRow.objects.filter(source__kind='general')
@@ -192,6 +193,8 @@ class Command(BaseCommand):
                     self.stdout.write(f'  svh_do1_weight: {n} cells')
                     n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_places: {n} cells')
+                    n = batch_write_cargo_mawb_for_hawbs(hawbs_for_do1)
+                    self.stdout.write(f'  cargo_mawb: {n} cells')
                 cargos_svh = list(Cargo.objects.filter(hawbs__isnull=False).distinct())
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)

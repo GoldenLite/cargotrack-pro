@@ -170,6 +170,7 @@ class Command(BaseCommand):
                     batch_write_svh_do1_sent_for_hawbs,
                     batch_write_svh_do1_weight_for_hawbs,
                     batch_write_svh_do1_places_for_hawbs,
+                    batch_write_cargo_mawb_for_hawbs,
                     drop_deprecated_columns,
                     rename_legacy_headers,
                 )
@@ -256,6 +257,8 @@ class Command(BaseCommand):
                     self.stdout.write(f'  svh_do1_weight: {n} cells ({len(hawbs_for_do1)} HAWB)')
                     n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_places: {n} cells ({len(hawbs_for_do1)} HAWB)')
+                    n = batch_write_cargo_mawb_for_hawbs(hawbs_for_do1)
+                    self.stdout.write(f'  cargo_mawb: {n} cells ({len(hawbs_for_do1)} HAWB)')
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 

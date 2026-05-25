@@ -83,6 +83,15 @@ def dispatch(obs: AltaOutboxObservation) -> None:
     # MAWB). Поэтому svh_do1_sent_at пишется ТОЛЬКО в HAWB перечисленные
     # в parsed_meta['hawbs'], не во все HAWB cargo.
     if obs.msg_type == 'ED.DO1':
+        # Auto-create Cargo если его нет в БД. В Sheets «Общее» MAWB-колонки
+        # нет — auto-promote создаёт HAWB без mawb. ED.DO1 — единственный
+        # достоверный источник MAWB↔HAWB связи (Альта-СВХ сама строит подачу).
+        # Создаём минимальный Cargo (stage=DRAFT) и привязываем HAWB.
+        if not cargo and obs.common_waybill_number:
+            cargo = _ensure_cargo_from_do1(obs)
+            if cargo:
+                obs.cargo = cargo
+                obs.save(update_fields=['cargo'])
         # Лицензия СВХ — общий атрибут партии. Заполняем только если ещё
         # не пришла из CMN.13010 (там сначала ставится через scan_into_bond).
         if cargo:
@@ -96,6 +105,9 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         hawb_nums = (obs.parsed_meta or {}).get('hawbs') or []
         if obs.prepared_at and hawb_nums:
             _apply_do1_sent_at(hawb_nums, obs.prepared_at)
+        # Per-HAWB привязка к Cargo + writeback MAWB в Sheets.
+        if cargo and hawb_nums:
+            _link_hawbs_to_cargo(hawb_nums, cargo)
         # Per-HAWB вес/места из <Goods> блоков.
         goods = (obs.parsed_meta or {}).get('goods') or {}
         if goods:
@@ -227,6 +239,68 @@ def _apply_do1_sent_at(hawb_nums: list, prepared_at) -> None:
                 batch_write_svh_do1_sent_for_hawbs(affected)
         except Exception:
             logger.exception('svh_do1_sent_at writeback failed')
+
+
+def _ensure_cargo_from_do1(obs: AltaOutboxObservation) -> Optional[Cargo]:
+    """Auto-create минимальный Cargo для ED.DO1 если его ещё нет в БД.
+
+    В Sheets «Общее» MAWB-колонки нет — auto-promote создаёт HAWB без
+    привязки к партии. ED.DO1 от нашего Альта-СВХ — единственный достоверный
+    источник связи MAWB↔HAWB-список (мы сами строим этот документ).
+
+    Создаётся минимальная партия (stage='DRAFT'), остальные поля юзер
+    заполняет вручную при необходимости.
+    """
+    mawb = (obs.common_waybill_number or '').strip()
+    if not mawb:
+        return None
+    try:
+        cargo = Cargo.objects.create(awb_number=mawb, stage='DRAFT')
+        logger.info('ED.DO1: auto-created Cargo %s (stage=DRAFT)', mawb)
+        return cargo
+    except Exception:
+        logger.exception('failed to auto-create Cargo %s', mawb)
+        return Cargo.objects.filter(awb_number__iexact=mawb).first()
+
+
+def _link_hawbs_to_cargo(hawb_nums: list, cargo: Cargo) -> None:
+    """Привязывает HAWB из ED.DO1 к Cargo (если они в БД и без mawb).
+
+    Использует прямой UPDATE минуя save() — иначе HouseWaybill.save()
+    делает валидацию `logistics_status == JOINABLE_STATUS` (AT_ORIGIN_WH).
+    HAWB-ы которые юзер видит из ED.DO1 уже физически на нашем СВХ,
+    их logistics_status может быть любым.
+
+    После привязки — пишет MAWB в новую CargoTrack-колонку «номер партии»
+    в Sheets (если writeback не подавлен bulk-режимом).
+    """
+    affected: list[HouseWaybill] = []
+    for hawb_num in hawb_nums:
+        h = HouseWaybill.objects.filter(
+            hawb_number__iexact=str(hawb_num).strip()
+        ).first()
+        if not h or h.mawb_id == cargo.pk:
+            continue
+        if h.mawb_id and h.mawb_id != cargo.pk:
+            logger.warning(
+                'ED.DO1: HAWB %s уже в партии %s, не перепривязываю к %s',
+                h.hawb_number, h.mawb.awb_number, cargo.awb_number)
+            continue
+        HouseWaybill.objects.filter(pk=h.pk).update(mawb_id=cargo.pk)
+        affected.append(h)
+    if affected:
+        logger.info('ED.DO1: linked %d HAWBs to Cargo %s',
+                    len(affected), cargo.awb_number)
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_cargo_mawb_for_hawbs, signals_suppressed,
+            )
+            if not signals_suppressed():
+                for h in affected:
+                    h.refresh_from_db(fields=['mawb_id'])
+                batch_write_cargo_mawb_for_hawbs(affected)
+        except Exception:
+            logger.exception('cargo_mawb writeback failed')
 
 
 def _writeback_svh_for_cargo(cargo: Cargo) -> None:

@@ -56,6 +56,9 @@ def signals_suppressed() -> bool:
 # Имена наших колонок в шапке таблицы «Общее».
 # Порядок здесь = порядок добавления справа от существующих.
 CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
+# MAWB-привязка для HAWB — из ED.DO1 outbox observation (в Sheets «Общее»
+# самой колонки MAWB у юзера нет, эту мы заполняем сами).
+CARGOTRACK_CARGO_MAWB_HEADER   = 'CargoTrack: номер партии'
 CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
 # Хронологический порядок: МЫ подали → таможня зарегистрировала.
 CARGOTRACK_SVH_DO1_SENT_HEADER = 'CargoTrack: дата подачи ДО1'
@@ -603,7 +606,8 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
 def _batch_write_hawb_dates(hawbs: list, value_attr: str,
                             header_name: str, log_label: str,
                             after_header: str = '',
-                            formatter=None) -> int:
+                            formatter=None,
+                            value_provider=None) -> int:
     """Generic batch writeback per-HAWB значения — 1 col_values + 1 batch_update.
 
     Используется для filed_date, release_date, svh_do2_send_at, svh_do1_weight,
@@ -612,6 +616,9 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
     вставить колонку при первом создании. formatter — функция (value)→str
     для конвертации значения в строку для Sheets. По умолчанию _local_date_str
     (для datetime → 'дд.мм.гггг чч:мм:сс').
+    value_provider — необязательная функция (HAWB)→value, переопределяет
+    getattr(h, value_attr). Нужно для случаев когда значение собирается из
+    нескольких полей (например MAWB → cargo.awb_number через mawb_id FK).
     """
     if formatter is None:
         formatter = _local_date_str
@@ -671,7 +678,10 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
         letter = _col_letter(col)
         updates = []
         for row_idx, h in items:
-            value = getattr(h, value_attr)
+            if value_provider is not None:
+                value = value_provider(h)
+            else:
+                value = getattr(h, value_attr)
             value_str = formatter(value)
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
@@ -791,6 +801,33 @@ def batch_write_svh_do1_sent_for_hawbs(hawbs: list) -> int:
         hawbs, 'svh_do1_sent_at',
         CARGOTRACK_SVH_DO1_SENT_HEADER, 'svh_do1_sent',
         after_header=CARGOTRACK_SVH_LICENSE_HEADER,
+    )
+
+
+def _mawb_value_provider(h) -> str:
+    """Достаёт MAWB-номер из HouseWaybill через mawb FK. '' если без партии."""
+    if not h.mawb_id:
+        return ''
+    return (h.mawb.awb_number or '') if h.mawb else ''
+
+
+def _identity_str(v) -> str:
+    """Formatter: пропускает строку как есть."""
+    return v or ''
+
+
+def batch_write_cargo_mawb_for_hawbs(hawbs: list) -> int:
+    """Batch writeback HouseWaybill.mawb.awb_number в «номер партии».
+
+    В Sheets «Общее» MAWB-колонки у юзера нет — мы вынесли её отдельно
+    как CargoTrack-колонку. Заполняется автоматически из ED.DO1 outbox
+    observations (см. outbox._link_hawbs_to_cargo).
+    """
+    return _batch_write_hawb_dates(
+        hawbs, 'mawb_id',
+        CARGOTRACK_CARGO_MAWB_HEADER, 'cargo_mawb',
+        formatter=_identity_str,
+        value_provider=_mawb_value_provider,
     )
 
 
