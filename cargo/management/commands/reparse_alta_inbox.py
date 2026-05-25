@@ -166,9 +166,16 @@ class Command(BaseCommand):
                     batch_write_svh_for_cargos,
                     batch_write_svh_do1_sent_for_cargos,
                     drop_deprecated_columns,
+                    rename_legacy_headers,
                 )
+                # Одноразовое переименование заголовков — сохраняет данные
+                # в столбце при смене имени (LEGACY_HEADER_RENAMES).
+                n_renamed = rename_legacy_headers()
+                if n_renamed:
+                    self.stdout.write(f'  renamed {n_renamed} header(s)')
                 # Одноразовая очистка: убрать колонки которые мы больше не
-                # пишем (юзер их не использует).
+                # пишем (юзер их не использует), или которые нужно пересоздать
+                # в новом месте — drop тут, новые создаются ниже writeback'ом.
                 n_dropped = drop_deprecated_columns()
                 if n_dropped:
                     self.stdout.write(f'  dropped {n_dropped} deprecated column(s)')

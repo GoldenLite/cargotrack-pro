@@ -56,8 +56,9 @@ def signals_suppressed() -> bool:
 # Порядок здесь = порядок добавления справа от существующих.
 CARGOTRACK_COL_HEADER          = 'CargoTrack: ДТ'
 CARGOTRACK_SVH_LICENSE_HEADER  = 'CargoTrack: лицензия СВХ'
-CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата ДО1'
+# Хронологический порядок: МЫ подали → таможня зарегистрировала.
 CARGOTRACK_SVH_DO1_SENT_HEADER = 'CargoTrack: дата подачи ДО1'
+CARGOTRACK_SVH_DATE_HEADER     = 'CargoTrack: дата регистрации ДО1'
 CARGOTRACK_SVH_DO1_HEADER      = 'CargoTrack: рег. номер ДО1'
 CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
 # Юзер не использует рег.номер ДО2 в Sheets, колонку не создаём
@@ -706,7 +707,7 @@ def batch_write_svh_do1_sent_for_cargos(cargos: list) -> int:
             col = _ensure_named_column(
                 ws, source.header_row,
                 CARGOTRACK_SVH_DO1_SENT_HEADER,
-                after_header=CARGOTRACK_SVH_DATE_HEADER,
+                after_header=CARGOTRACK_SVH_LICENSE_HEADER,
             )
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch svh_do1_sent: open/ensure failed: %s', e)
@@ -752,10 +753,61 @@ def batch_write_svh_do1_sent_for_cargos(cargos: list) -> int:
     return total
 
 
+# Одноразовое переименование заголовков — для сохранения данных в существующих
+# колонках при смене семантики имени. Ключ = старое имя, значение = новое.
+# Применяется на reparse в начале resync (rename_legacy_headers).
+LEGACY_HEADER_RENAMES = {
+    # «дата ДО1» теперь = «дата регистрации ДО1» (момент когда таможня
+    # зарегистрировала ДО-1 = scan_into_bond из CMN.13010). А «дата подачи ДО1»
+    # стала отдельной колонкой (момент когда МЫ отправили ДО-1).
+    'CargoTrack: дата ДО1': 'CargoTrack: дата регистрации ДО1',
+}
+
+
+def rename_legacy_headers() -> int:
+    """Переименовывает заголовки на месте — сохраняет данные в столбце."""
+    if not LEGACY_HEADER_RENAMES:
+        return 0
+    total = 0
+    for source in SheetSource.objects.filter(kind='general'):
+        try:
+            ws = open_worksheet(source)
+        except Exception:
+            logger.exception('rename_legacy_headers: open failed for %s', source.name)
+            continue
+        try:
+            header_values = ws.row_values(source.header_row)
+        except Exception:
+            logger.exception('rename_legacy_headers: row_values failed')
+            continue
+        for idx, val in enumerate(header_values, start=1):
+            old = (val or '').strip()
+            new = LEGACY_HEADER_RENAMES.get(old)
+            if not new:
+                continue
+            try:
+                ws.update_cell(source.header_row, idx, new)
+                logger.info('Renamed header "%s" → "%s" (col=%d) in %s',
+                            old, new, idx, source.name)
+                total += 1
+                ws_key = f'{ws.spreadsheet.id}:{ws.id}'
+                for k in list(_col_index_cache.keys()):
+                    if k[0] == ws_key:
+                        del _col_index_cache[k]
+            except Exception:
+                logger.exception('Failed to rename header "%s" in %s',
+                                 old, source.name)
+    return total
+
+
 # Колонки которые мы когда-то создавали, но больше не используем.
 # Удаляются однократно при reparse через drop_deprecated_columns().
 DEPRECATED_COLUMN_HEADERS = (
     'CargoTrack: рег. номер ДО2',  # был, юзер не использует
+    # «дата подачи ДО1» — пустая колонка которую мы создали в неправильном
+    # месте (после «дата ДО1»). На этом reparse удаляется и пересоздаётся
+    # после «лицензия СВХ» — хронологический порядок подача → регистрация.
+    'CargoTrack: дата подачи ДО1',
 )
 
 
