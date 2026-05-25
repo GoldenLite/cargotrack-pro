@@ -368,22 +368,25 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
     for source_id, items in rows_by_source.items():
         source = sources[source_id]
         try:
-            ws = open_worksheet(source)
-            col_lic      = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_LICENSE_HEADER)
-            col_date     = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DATE_HEADER)
-            col_do1      = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO1_HEADER)
+            ws = _retry_api(open_worksheet, source, label='batch svh open')
+            col_lic = _retry_api(_ensure_named_column, ws, source.header_row,
+                                 CARGOTRACK_SVH_LICENSE_HEADER,
+                                 label='batch svh col_lic')
+            col_date = _retry_api(_ensure_named_column, ws, source.header_row,
+                                  CARGOTRACK_SVH_DATE_HEADER,
+                                  label='batch svh col_date')
+            col_do1 = _retry_api(_ensure_named_column, ws, source.header_row,
+                                 CARGOTRACK_SVH_DO1_HEADER,
+                                 label='batch svh col_do1')
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch svh: open/ensure failed: %s', e)
             continue
 
         # Читаем все нужные колонки ОДИН РАЗ для всей таблицы
         try:
-            existing_lic      = ws.col_values(col_lic)
-            existing_date     = ws.col_values(col_date)
-            existing_do1      = ws.col_values(col_do1)
+            existing_lic = _retry_api(ws.col_values, col_lic, label='batch svh read_lic')
+            existing_date = _retry_api(ws.col_values, col_date, label='batch svh read_date')
+            existing_do1 = _retry_api(ws.col_values, col_do1, label='batch svh read_do1')
         except gspread.exceptions.APIError as e:
             logger.exception('batch svh: col_values failed: %s', e)
             continue
@@ -618,15 +621,18 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
     for source_id, items in items_by_source.items():
         source = sources[source_id]
         try:
-            ws = open_worksheet(source)
-            col = _ensure_named_column(ws, source.header_row, header_name,
-                                       after_header=after_header)
+            ws = _retry_api(open_worksheet, source,
+                            label=f'batch {log_label} open')
+            col = _retry_api(_ensure_named_column, ws, source.header_row,
+                             header_name, after_header=after_header,
+                             label=f'batch {log_label} ensure_col')
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch %s: open/ensure failed: %s', log_label, e)
             continue
 
         try:
-            existing = ws.col_values(col)
+            existing = _retry_api(ws.col_values, col,
+                                  label=f'batch {log_label} read')
         except gspread.exceptions.APIError as e:
             logger.exception('batch %s: col_values failed: %s', log_label, e)
             continue
@@ -662,6 +668,29 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
 # но на больших запросах (>2000) часто отдаёт 503 — особенно при нагрузке.
 # 500 — безопасный compromise между throughput и стабильностью.
 _BATCH_CHUNK_SIZE = 500
+
+
+def _retry_api(fn, *args, retries=5, label='', **kwargs):
+    """Вызывает gspread-функцию с retry на 429/500/502/503/504.
+
+    Нужно для устойчивости к временным сбоям Google Sheets API — без
+    этого даже простой row_values/col_values/open_worksheet может упасть
+    в нестабильное время и сорвать всю операцию resync. backoff
+    экспоненциальный: 2,4,8,16,32 секунды.
+    """
+    backoff = [2, 4, 8, 16, 32]
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, 'status_code', None)
+            if status in (429, 500, 502, 503, 504) and attempt < retries:
+                wait = backoff[min(attempt, len(backoff) - 1)]
+                logger.warning('%s API %s, retry in %ds (attempt %d/%d)',
+                               label, status, wait, attempt + 1, retries)
+                time.sleep(wait)
+                continue
+            raise
 
 
 def _chunked_batch_update(ws, updates: list, log_label: str,
