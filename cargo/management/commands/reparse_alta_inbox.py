@@ -197,8 +197,26 @@ class Command(BaseCommand):
                     self.stdout.write(f'  filed_date: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_release_dates_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  release_date: {n} cells ({len(hawbs_touched)} HAWB)')
-                    n = batch_write_svh_do2_dates_for_hawbs(hawbs_touched)
-                    self.stdout.write(f'  svh_do2: {n} cells ({len(hawbs_touched)} HAWB)')
+                # ДО2: берём ВСЕ HAWB которые есть в Sheets «Общее».
+                # hawbs_touched НЕ ловит случай 10264316942 — у HAWB нет
+                # привязки к CMN.13014 (она была через ДТ-matching, который
+                # удалили в 30c4c36), но в ячейке Sheets осталась стейл-дата
+                # от старой логики. batch_write сравнивает значение с
+                # ячейкой и пишет только при diff — для HAWB где
+                # svh_do2_send_at=None и ячейка пустая будет no-op. Для
+                # стейл (БД=None, Sheets=дата) — очистка. Подход аналогичен
+                # SVH-cargos resync ниже.
+                from cargo.models import ImportedSheetRow
+                hawb_nums_in_sheets = (
+                    ImportedSheetRow.objects.filter(source__kind='general')
+                    .values_list('hawb_number_norm', flat=True).distinct()
+                )
+                hawbs_for_do2 = list(HouseWaybill.objects.filter(
+                    hawb_number__in=list(hawb_nums_in_sheets)
+                ).distinct())
+                if hawbs_for_do2:
+                    n = batch_write_svh_do2_dates_for_hawbs(hawbs_for_do2)
+                    self.stdout.write(f'  svh_do2: {n} cells ({len(hawbs_for_do2)} HAWB)')
                 # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number).
                 # Берём ВСЕ Cargos с HAWB в Sheets «Общее». batch_write_svh_for_cargos
                 # сравнивает значение с тем что в ячейке и пишет только при
