@@ -144,7 +144,10 @@ class Command(BaseCommand):
                 except Exception as e:
                     errors += 1
                     if errors < 10:
-                        self.stdout.write(f'  ERR #{pk}: {e}')
+                        import traceback
+                        tb = traceback.format_exc()
+                        self.stdout.write(f'  ERR #{pk} ({m.msg_type if m else "?"}): {e}')
+                        self.stdout.write(tb)
                     break
             if i % 200 == 0:
                 self.stdout.write(f'  progress: {i}/{len(pks)} changed={changed} '
