@@ -91,11 +91,16 @@ class Command(BaseCommand):
                 ('import_sheets', {'source': 'general'}),
                 ('relink_hawbs_from_tsd', {'all': True}),
                 ('refresh_moscow_cargo', {}),
+                # sync_filed_dates — выравнивает filed_date по siblings ДТ.
+                # Закрывает гонку: CMN.11023 (filed_date) пришёл ДО CMN.11350
+                # (ДТ), propagation на siblings не сработал → у одной HAWB
+                # filed_date есть, у остальных пусто.
+                ('sync_filed_dates', {}),
                 ('audit_sheets_vs_db', {'fix': True}),
             ]
             if opts['full']:
-                # reparse — между relink и audit, чтобы audit увидел свежие данные
-                steps.insert(3, ('reparse_alta_inbox', {'force_dispatch': True}))
+                # reparse — между sync и audit, чтобы audit увидел свежие данные
+                steps.insert(4, ('reparse_alta_inbox', {'force_dispatch': True}))
 
             for cmd, kwargs in steps:
                 step_started = datetime.datetime.now()
