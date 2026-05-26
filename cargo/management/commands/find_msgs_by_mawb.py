@@ -31,11 +31,13 @@ class Command(BaseCommand):
             f'\n{"="*60}\n  MAWB: {mawb}\n{"="*60}'))
 
         c = Cargo.objects.filter(awb_number=mawb).first()
-        self.stdout.write(f'Cargo: {c}')
         if c:
+            self.stdout.write(f'Cargo: pk={c.pk} awb={c.awb_number!r}')
             self.stdout.write(f'  svh_do1_reg_number: {c.svh_do1_reg_number!r}')
             self.stdout.write(f'  scan_into_bond:     {c.scan_into_bond}')
             self.stdout.write(f'  warehouse_license:  {c.warehouse_license!r}')
+        else:
+            self.stdout.write('Cargo: None')
 
         # CMN.13029 — представление (svh_placed)
         placed = list(AltaInboxMessage.objects.filter(

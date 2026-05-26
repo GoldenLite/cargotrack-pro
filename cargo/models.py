@@ -238,7 +238,7 @@ class Cargo(models.Model):
         ordering = ['-created_at']
 
     def __str__(self) -> str:
-        return f'AWB {self.awb_number} [{self.get_status_display()}]'
+        return f'AWB {self.awb_number} [{self.get_stage_display()}]'
 
     @property
     def stage_display(self) -> str:
