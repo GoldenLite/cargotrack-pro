@@ -202,6 +202,26 @@ class Command(BaseCommand):
                     | Q(mawb__hawbs__inbox_messages__msg_type='CMN.13014')
                 ).distinct())
                 if hawbs_touched:
+                    # Sync filed_date по всем уникальным ДТ перед writeback.
+                    # Это закрывает кейс: CMN.11023 пришёл ДО CMN.11350,
+                    # тогда propagation в _maybe_update_filed_date не нашёл
+                    # siblings (т.к. customs_declaration_number ещё пустой
+                    # был). После reparse CMN.11350 проставляет ДТ всем,
+                    # но filed_date так и остаётся у одной HAWB. Здесь —
+                    # за один проход разносим filed_date на siblings ВСЕХ ДТ.
+                    from cargo.services.alta.inbox import _sync_filed_date_by_declaration
+                    unique_decls = set(
+                        h.customs_declaration_number for h in hawbs_touched
+                        if h.customs_declaration_number
+                    )
+                    for decl in unique_decls:
+                        _sync_filed_date_by_declaration(decl)
+                    self.stdout.write(
+                        f'  filed_date sync: {len(unique_decls)} уникальных ДТ'
+                    )
+                    # Refresh обновлённых hawbs_touched для writeback
+                    pks = [h.pk for h in hawbs_touched]
+                    hawbs_touched = list(HouseWaybill.objects.filter(pk__in=pks))
                     n = batch_write_declarations_for_hawbs(hawbs_touched)
                     self.stdout.write(f'  decl: {n} cells ({len(hawbs_touched)} HAWB)')
                     n = batch_write_filed_dates_for_hawbs(hawbs_touched)
