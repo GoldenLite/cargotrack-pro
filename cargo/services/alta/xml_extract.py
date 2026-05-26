@@ -346,6 +346,13 @@ _REGISTER_NUMBER_REPORT_RE = re.compile(
     r'<(?:[a-zA-Z][\w-]*:)?RegisterNumberReport\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?RegisterNumberReport>',
     re.S
 )
+# DO1ReportLinkData — внутри DO1KeepLimits в том же CMN.13010. ReportNumber
+# (вида "0000875") совпадает с report_number нашего исходящего ED.DO1
+# (do1-<customs>-<date>-<NNNN>-<uuid8>). Точный якорь связки ДО1 → Cargo.
+_DO1_REPORT_LINK_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?DO1ReportLinkData\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?DO1ReportLinkData>',
+    re.S
+)
 
 
 def parse_svh_do1_reg(xml_text: str) -> dict:
@@ -391,6 +398,13 @@ def parse_svh_do1_reg(xml_text: str) -> dict:
                 except ValueError:
                     rd_short = rd
                 out['svh_do1_reg_number'] = f'{cc}/{rd_short}/{gn}'
+
+    # DO1ReportLinkData — связка с нашим ED.DO1 через report_number
+    link = _DO1_REPORT_LINK_BLOCK_RE.search(xml_text)
+    if link:
+        body = link.group(1)
+        out['do1_link_report_number'] = _first(body, 'ReportNumber')
+        out['do1_link_report_date']   = _first(body, 'ReportDate')
 
     return out
 

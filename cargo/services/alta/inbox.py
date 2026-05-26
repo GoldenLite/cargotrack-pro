@@ -726,31 +726,46 @@ def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
 
 
 def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[AltaInboxMessage]]:
-    """Match CMN.13010 (регистрация ДО1) → Cargo по времени и лицензии.
+    """Match CMN.13010 (регистрация ДО1) → Cargo.
 
-    UUID-связи нет: RefDocumentID в ДО1 указывает на локальный документ
-    Альта-СВХ («регистрация груза»), который мы не наблюдаем — этот
-    промежуточный документ существует только внутри их софта.
-    InitialEnvelopeID в обеих ED-цепочках — это наши собственные outbound
-    envelope (CMN.13009 vs CMN.13029), разные UUID, тоже не помогают.
+    Жёсткий якорь (с 2026-05-26): CMN.13010 содержит вложенный DO1KeepLimits
+    с DO1ReportLinkData/ReportNumber — это номер нашего исходящего ED.DO1
+    (envelope_id=do1-<customs>-<date>-<NNNN>-<uuid8>, где NNNN=report_number).
+    Наш ED.DO1 уже привязан к Cargo через common_waybill_number (MAWB), и
+    отсюда выходим на нужный Cargo.
 
-    Эвристика: для нашей лицензии в одной операции цепочка
+    Fallback (time-эвристика, для старых сообщений до 2026-05-26 или если в
+    XML нет DO1ReportLinkData): для нашей лицензии цепочка
         представление (CMN.13029)
             ↓ часы / иногда сутки
         регистрация груза (внутри Альта-СВХ)
             ↓
         ДО1 (CMN.13010)
-    Представление всегда строго раньше ДО1. Окно — `LOOKBACK` (7 дней,
-    с запасом под выходные между подачей представления и ДО1).
+    Представление всегда строго раньше ДО1. Берём ближайшее представление
+    в окне `LOOKBACK` (7 дней) у которого Cargo ещё без svh_do1_reg_number.
 
-    Чтобы не привязать ОДНО представление к двум ДО1 — исключаем
-    представления, у которых cargo уже имеет svh_do1_reg_number.
-    «Ближайшее по времени» из оставшихся — наш кандидат.
-
-    Возвращает (cargo, представление-сообщение).
+    Возвращает (cargo, опционально-представление).
     """
     from datetime import timedelta
 
+    pm = msg.parsed_meta or {}
+    link_report = (pm.get('do1_link_report_number') or '').strip()
+    if link_report:
+        # Точный якорь: ED.DO1 с этим report_number → его Cargo.
+        from cargo.models import AltaOutboxObservation
+        outbox = (
+            AltaOutboxObservation.objects
+            .filter(msg_type='ED.DO1')
+            .filter(parsed_meta__report_number=link_report)
+            .exclude(cargo=None)
+            .select_related('cargo')
+            .order_by('-prepared_at')
+            .first()
+        )
+        if outbox and outbox.cargo:
+            return (outbox.cargo, None)
+
+    # Fallback на time-эвристику
     if not msg.prepared_at:
         return (None, None)
 
@@ -761,14 +776,14 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
         AltaInboxMessage.objects
         .filter(
             msg_type='CMN.13029',
-            msg_kind='svh_placed',  # уже отфильтровано по нашей лицензии в classify
+            msg_kind='svh_placed',
             prepared_at__gte=window_start,
             prepared_at__lte=msg.prepared_at,
         )
         .exclude(cargo=None)
-        .exclude(cargo__svh_do1_reg_number__gt='')  # уже привязан к другому ДО1
+        .exclude(cargo__svh_do1_reg_number__gt='')
         .select_related('cargo')
-        .order_by('-prepared_at')  # ближайшее раньше = первое
+        .order_by('-prepared_at')
     )
     nearest = presentations.first()
     if nearest:
