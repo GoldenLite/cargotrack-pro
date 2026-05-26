@@ -694,6 +694,41 @@ def inbox_loop(cfg: dict) -> None:
 
 # ── OUTBOX (наблюдение за исходящими копиями Альты) ───────────────────────
 
+_ALL_WAYBILL_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?WayBillNumber\b[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?WayBillNumber>'
+)
+_ALL_PRDOCNUM_PAIR_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?PrDocumentName[^>]*>([^<]*)</(?:[a-zA-Z][\w-]*:)?PrDocumentName>\s*'
+    r'<(?:[a-zA-Z][\w-]*:)?PrDocumentNumber[^>]*>([^<]+)</(?:[a-zA-Z][\w-]*:)?PrDocumentNumber>',
+    re.S,
+)
+
+
+def _all_waybill_numbers(xml_text: str) -> list:
+    """Все HAWB-номера в XML — для CMN.11023/11349 (одна декларация = N HAWB).
+
+    Ищет в двух местах:
+    1. Все <WayBillNumber> теги (могут быть в каждом GoodsShipment/HouseShipment).
+    2. Все <PrDocumentNumber> рядом с <PrDocumentName>Индивидуальная накладная.
+
+    Возвращает дедуплицированный список с сохранением порядка появления.
+    """
+    seen: set = set()
+    out: list = []
+    for m in _ALL_WAYBILL_RE.finditer(xml_text):
+        v = m.group(1).strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    for name, number in _ALL_PRDOCNUM_PAIR_RE.findall(xml_text):
+        if 'индивидуальная накладная' in name.lower():
+            v = number.strip()
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
 def _parse_outbox_xml(xml_text: str) -> dict:
     """Парсит ключевые поля из исходящей копии (538134^*.gz).
 
@@ -701,6 +736,9 @@ def _parse_outbox_xml(xml_text: str) -> dict:
     ответов через InitialEnvelopeID) и человеко-читаемые номера накладных
     (CommonWayBillNumber = MAWB, WayBillNumber = HAWB) — чтобы линковать
     к нашим Cargo/HAWB.
+
+    Для CMN.11023/11349 (одна декларация на партию) дополнительно
+    выкусываем ВЕСЬ список HAWB этой декларации → hawbs.
     """
     return {
         'envelope_id':           _xml_field(xml_text, 'EnvelopeID'),
@@ -711,6 +749,7 @@ def _parse_outbox_xml(xml_text: str) -> dict:
             _xml_field(xml_text, 'WayBillNumber')
             or _pr_document_number_for(xml_text, 'Индивидуальная накладная')
         ),
+        'hawbs':                 _all_waybill_numbers(xml_text),
         'document_number':       _xml_field(xml_text, 'DocumentNumber'),
         'mcd_id':                _xml_field(xml_text, 'MCDId'),
         'arch_id':                _xml_field(xml_text, 'ArchID'),
@@ -778,6 +817,9 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
             'mcd_id':          parsed.get('mcd_id', ''),
             'arch_id':         parsed.get('arch_id', ''),
             'arch_decl_id':    parsed.get('arch_decl_id', ''),
+            # Полный список HAWB этой декларации — для CMN.11023/11349
+            # сервер итерирует и проставит filed_date КАЖДОЙ накладной.
+            'hawbs':           parsed.get('hawbs', []),
         },
     }
     status, body = _post_outbox(cfg, payload)

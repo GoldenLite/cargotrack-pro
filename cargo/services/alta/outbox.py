@@ -116,10 +116,19 @@ def dispatch(obs: AltaOutboxObservation) -> None:
     # CMN.11023 (первичная подача ДТ) / CMN.11349 (корректировка) — содержат
     # точный момент подачи в таможню. Заполняем HouseWaybill.filed_date с
     # реальным временем (раньше там стояло 00:00:00 из CMN-RegistrationDate).
-    # Приоритет: 11023 > 11349 (если оба есть, берём первое). Логика:
-    # пишем только если поле пустое ИЛИ новое prepared_at раньше.
-    if obs.msg_type in ('CMN.11023', 'CMN.11349') and hawb and obs.prepared_at:
-        _maybe_update_filed_date(hawb, obs.prepared_at)
+    # Приоритет: 11023 > 11349. Логика: пишем только если поле пустое ИЛИ
+    # новое prepared_at раньше.
+    #
+    # Одна декларация на партию = N HAWB. Агент парсит весь список HAWB из
+    # XML и передаёт в parsed_meta.hawbs. Если список есть — итерируемся
+    # по каждой и проставляем filed_date. Fallback на старую логику (одна
+    # waybill_number) — для observations созданных старым агентом.
+    if obs.msg_type in ('CMN.11023', 'CMN.11349') and obs.prepared_at:
+        hawb_list = (obs.parsed_meta or {}).get('hawbs') or []
+        if hawb_list:
+            _apply_filed_date_to_hawbs(hawb_list, obs.prepared_at)
+        elif hawb:
+            _maybe_update_filed_date(hawb, obs.prepared_at)
 
 
 def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
@@ -232,6 +241,39 @@ def _apply_do1_sent_at(hawb_nums: list, prepared_at) -> None:
         # Колонка «CargoTrack: дата подачи ДО1» удалена 2026-05-26 (юзер не
         # использует). Поле svh_do1_sent_at в БД остаётся для внутренней
         # логики, но в Sheets больше не пишем.
+
+
+def _apply_filed_date_to_hawbs(hawb_nums: list, prepared_at) -> None:
+    """Per-HAWB filed_date — для каждой накладной из CMN.11023/11349 hawbs списка.
+
+    Одна декларация на партию = N HAWB. Агент парсит весь список из XML
+    и передаёт в parsed_meta.hawbs. Здесь итерируемся и для каждой HAWB
+    проставляем filed_date (если ещё не стоит или новое время раньше).
+    """
+    from cargo.services.sheets.writeback import (
+        batch_write_filed_dates_for_hawbs, signals_suppressed,
+    )
+    affected: list[HouseWaybill] = []
+    for hn in hawb_nums:
+        h = HouseWaybill.objects.filter(
+            hawb_number__iexact=str(hn).strip()
+        ).first()
+        if not h:
+            continue
+        if h.filed_date and h.filed_date <= prepared_at:
+            continue
+        HouseWaybill.objects.filter(pk=h.pk).update(filed_date=prepared_at)
+        affected.append(h)
+    if affected:
+        logger.info('CMN.11023/11349 filed_date: updated %d HAWBs to %s',
+                    len(affected), prepared_at)
+        if not signals_suppressed():
+            try:
+                for h in affected:
+                    h.refresh_from_db(fields=['filed_date'])
+                batch_write_filed_dates_for_hawbs(affected)
+            except Exception:
+                logger.exception('filed_date writeback failed')
 
 
 def _ensure_cargo_from_do1(obs: AltaOutboxObservation) -> Optional[Cargo]:
