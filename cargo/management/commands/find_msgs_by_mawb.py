@@ -67,13 +67,13 @@ class Command(BaseCommand):
                 f'  {m.prepared_at} | env={m.envelope_id} | '
                 f'reg={(m.parsed_meta or {}).get("svh_do1_reg_number")!r}')
 
-        # Кандидаты CMN.13010 — те у которых ещё нет cargo и которые могли бы
-        # подойти по времени (within 7 дней после представления) и лицензии.
+        # Кандидаты CMN.13010 — form='1' (РЕАЛЬНАЯ регистрация ДО1) нашей
+        # лицензии без cargo, в окне после представления.
         if placed:
             from datetime import timedelta
             from cargo.services.alta.inbox import OUR_WAREHOUSE_LICENSE
-            self.stdout.write(f'\nКандидаты CMN.13010 (cargo=None, lic={OUR_WAREHOUSE_LICENSE}, '
-                              f'в окне ±7 дней от представлений):')
+            self.stdout.write(f'\nКандидаты CMN.13010 form=1 (cargo=None) '
+                              f'в окне +7 дней от представлений:')
             for p in placed:
                 if not p.prepared_at:
                     continue
@@ -81,21 +81,19 @@ class Command(BaseCommand):
                 end   = p.prepared_at + timedelta(days=7)
                 cands = AltaInboxMessage.objects.filter(
                     msg_type='CMN.13010',
+                    msg_kind='svh_do1_registered',
                     cargo__isnull=True,
                     prepared_at__gte=start,
                     prepared_at__lte=end,
                 ).order_by('prepared_at')
-                cands = list(cands[:20])
+                cands = list(cands)
                 self.stdout.write(f'  для CMN.13029 от {p.prepared_at} '
-                                  f'env={p.envelope_id} — {len(cands)} CMN.13010 без cargo')
+                                  f'env={p.envelope_id} — {len(cands)} form=1 кандидатов')
                 for m in cands:
                     pm = m.parsed_meta or {}
                     self.stdout.write(
                         f'    {m.prepared_at} | env={m.envelope_id} | '
-                        f'reg={pm.get("svh_do1_reg_number")!r} | '
-                        f'lic={pm.get("svh_warehouse_license")!r} | '
-                        f'form={pm.get("svh_do1_form_report")!r} | '
-                        f'kind={m.msg_kind}')
+                        f'reg={pm.get("svh_do1_reg_number")!r}')
 
         # На всякий случай — все 13010 с этим MAWB в raw_xml
         raw = list(AltaInboxMessage.objects.filter(
