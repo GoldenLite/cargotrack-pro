@@ -78,4 +78,64 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(
                     f'  ДТ {decl}: {e}'))
         self.stdout.write(self.style.SUCCESS(
-            f'Прошло sync: {synced} ДТ'))
+            f'Прошло sync по ДТ: {synced}'))
+
+        # Дополнительно — propagate по Cargo для HAWB у которых filed_date
+        # стоит, а customs_declaration_number пустой (CMN.11350 от таможни
+        # ещё не пришло). Логически: одна декларация на партию = filed_date
+        # для всех HAWB партии. Когда придёт CMN.11350 и присвоит ДТ —
+        # обычный sync по ДТ перепишет даты на min по группе ДТ.
+        cargo_synced = self._sync_filed_dates_by_cargo()
+        self.stdout.write(self.style.SUCCESS(
+            f'Прошло sync по Cargo (для HAWB без ДТ): {cargo_synced}'))
+
+    def _sync_filed_dates_by_cargo(self) -> int:
+        """Для Cargo у которых хотя бы 1 HAWB имеет filed_date но customs_decl
+        пустой — разнести filed_date на siblings без filed_date.
+        """
+        from cargo.models import Cargo
+        from cargo.services.sheets.writeback import (
+            batch_write_filed_dates_for_hawbs, signals_suppressed,
+        )
+
+        # Cargo у которых хотя бы один HAWB c filed_date + customs_decl='' —
+        # кандидаты на propagate.
+        cargo_ids = (
+            HouseWaybill.objects
+            .filter(filed_date__isnull=False, customs_declaration_number='')
+            .values_list('mawb_id', flat=True).distinct()
+        )
+        cargo_ids = [pk for pk in cargo_ids if pk]
+        count = 0
+        all_affected: list = []
+        for cid in cargo_ids:
+            hawbs = list(HouseWaybill.objects.filter(mawb_id=cid).only(
+                'pk', 'filed_date', 'customs_declaration_number'))
+            # Минимальный filed_date по партии (только тех у кого нет ДТ —
+            # т.е. мы ещё не получили CMN.11350; для тех у кого ДТ есть,
+            # сработает sync_by_declaration)
+            dates_no_decl = [h.filed_date for h in hawbs
+                             if h.filed_date and not h.customs_declaration_number]
+            if not dates_no_decl:
+                continue
+            min_date = min(dates_no_decl)
+            # Affected: HAWB без filed_date и без ДТ
+            affected = [h for h in hawbs
+                        if h.filed_date is None and not h.customs_declaration_number]
+            if not affected:
+                continue
+            pks = [h.pk for h in affected]
+            HouseWaybill.objects.filter(pk__in=pks).update(filed_date=min_date)
+            all_affected.extend(affected)
+            count += 1
+
+        # Writeback в Sheets единым batch'ом
+        if all_affected and not signals_suppressed():
+            for h in all_affected:
+                h.refresh_from_db(fields=['filed_date'])
+            try:
+                batch_write_filed_dates_for_hawbs(all_affected)
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(
+                    f'Sheets writeback failed: {e}'))
+        return count
