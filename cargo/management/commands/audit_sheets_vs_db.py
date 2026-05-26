@@ -135,8 +135,10 @@ class Command(BaseCommand):
     help = 'Сравнить CargoTrack-колонки в Sheets с ожидаемыми из БД'
 
     def add_arguments(self, parser):
-        parser.add_argument('--verbose', '-v', action='count', default=0,
-                            help='-v: первые 5 примеров каждой категории; -vv: 20')
+        # NB: --verbose/-v зарезервированы Django, не использовать.
+        parser.add_argument('--examples', type=int, default=0,
+                            help='Сколько примеров каждой категории показать '
+                                 '(0 = только сводка)')
         parser.add_argument('--csv', default='',
                             help='Сохранить полный отчёт в CSV')
         parser.add_argument('--fix', action='store_true',
@@ -243,9 +245,8 @@ class Command(BaseCommand):
             self.stdout.write(f'    {kind}: {len(mismatches[kind])}')
 
         # Примеры
-        v = opts['verbose']
-        if v:
-            n_examples = 20 if v >= 2 else 5
+        n_examples = opts.get('examples', 0)
+        if n_examples:
             self.stdout.write('')
             for kind in sorted(mismatches.keys()):
                 self.stdout.write(f'  {kind} (первые {n_examples}):')
