@@ -342,9 +342,17 @@ def recompute_declaration(cargo: Optional[Cargo],
 
 
 def _sync_filed_date_by_declaration(decl_number: str) -> None:
-    """Для всех HAWB с этой ДТ — установить filed_date = min(filed_date по группе).
+    """Для всех HAWB с этой ДТ — установить filed_date наиболее точный.
 
-    Идемпотентно: если у всех уже одинаковый минимум — no-op.
+    Стратегия: если в группе есть хоть одно значение с НЕнулевым временем
+    суток (например 13:50:40, источник = CMN.11023/11349.prepared_at) — берём
+    его минимум среди таких. Только если ВСЕ значения = 00:00:00 (приходят
+    из CMN.11350.registration_date — только дата) — берём min из них.
+
+    Это устраняет «кражу точности»: раньше min([00:00, 13:50]) = 00:00
+    распространялся на всю ДТ, теряя реальное время подачи.
+
+    Идемпотентно: если у всех уже наилучший выбор — no-op.
     """
     decl = (decl_number or '').strip()
     if not decl:
@@ -357,7 +365,8 @@ def _sync_filed_date_by_declaration(decl_number: str) -> None:
     dates = [h.filed_date for h in hawbs if h.filed_date]
     if not dates:
         return
-    min_date = min(dates)
+    precise = [d for d in dates if d.hour or d.minute or d.second or d.microsecond]
+    min_date = min(precise) if precise else min(dates)
     affected = [h for h in hawbs if h.filed_date != min_date]
     for h in affected:
         HouseWaybill.objects.filter(pk=h.pk).update(filed_date=min_date)

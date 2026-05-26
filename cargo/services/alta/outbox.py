@@ -131,6 +131,35 @@ def dispatch(obs: AltaOutboxObservation) -> None:
             _maybe_update_filed_date(hawb, obs.prepared_at)
 
 
+def _filed_date_should_replace(current, new) -> bool:
+    """Решает, нужно ли заменить current на new для HouseWaybill.filed_date.
+
+    Логика:
+    - current пуст → да, всегда пишем.
+    - new пуст или совпадает → нет.
+    - current с time=00:00:00 (значит дата без часов — пришла из
+      CMN.11350.registration_date), а new — с реальным временем суток
+      (CMN.11023/11349.prepared_at) → да, перезаписываем, т.к. это
+      более точный источник.
+    - оба точные (time != 00:00) → берём более ранний.
+    - оба ровно по дате — оставляем текущий.
+    """
+    if not current:
+        return bool(new)
+    if not new or current == new:
+        return False
+    current_precise = bool(current.hour or current.minute or current.second
+                           or current.microsecond)
+    new_precise     = bool(new.hour or new.minute or new.second
+                           or new.microsecond)
+    if not current_precise and new_precise:
+        return True
+    if current_precise and not new_precise:
+        return False
+    # одинаковая точность → берём более ранний
+    return new < current
+
+
 def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
     """Обновляет HouseWaybill.filed_date если новое значение раньше или поле пустое.
 
@@ -140,7 +169,7 @@ def _maybe_update_filed_date(hawb: HouseWaybill, prepared_at) -> None:
     все накладные одной ДТ подаются одновременно.
     """
     hawb.refresh_from_db(fields=['filed_date', 'customs_declaration_number'])
-    if not (hawb.filed_date and hawb.filed_date <= prepared_at):
+    if _filed_date_should_replace(hawb.filed_date, prepared_at):
         HouseWaybill.objects.filter(pk=hawb.pk).update(filed_date=prepared_at)
         logger.info('filed_date: HAWB %s set to %s', hawb.hawb_number, prepared_at)
         _writeback_filed_date(hawb)
@@ -260,7 +289,7 @@ def _apply_filed_date_to_hawbs(hawb_nums: list, prepared_at) -> None:
         ).first()
         if not h:
             continue
-        if h.filed_date and h.filed_date <= prepared_at:
+        if not _filed_date_should_replace(h.filed_date, prepared_at):
             continue
         HouseWaybill.objects.filter(pk=h.pk).update(filed_date=prepared_at)
         affected.append(h)
