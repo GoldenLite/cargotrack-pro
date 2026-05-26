@@ -155,11 +155,14 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f'Updated {len(affected_cargos)} Cargo.warehouse_license'))
 
-        # Writeback в Sheets
+        # Writeback в Sheets:
+        # - ДТ пишем батчем (1 запрос на все)
+        # - Лицензия СВХ — НЕ дёргаем per-cargo writeback (he 469x open вылетает
+        #   в 429 quota). Полагаемся на audit_sheets_vs_db --fix из auto_sync —
+        #   он делает 1 read + 1 batch_update со всеми изменениями.
         try:
             from cargo.services.sheets.writeback import (
                 batch_write_declarations_for_hawbs,
-                write_svh_placement_for_cargo,
             )
             if hawb_decl_updates:
                 hawbs = [h for h, _ in hawb_decl_updates]
@@ -168,9 +171,10 @@ class Command(BaseCommand):
                 n = batch_write_declarations_for_hawbs(hawbs)
                 self.stdout.write(f'Sheets: ДТ-cells обновлено {n}')
             if cargo_to_write:
-                total_n = 0
-                for c, _, _ in cargo_to_write:
-                    total_n += write_svh_placement_for_cargo(c) or 0
-                self.stdout.write(f'Sheets: СВХ-cells обновлено {total_n}')
+                self.stdout.write(
+                    'Sheets: СВХ-лицензии будут протянуты ближайшим '
+                    'audit_sheets_vs_db --fix (auto_sync через ~30 мин). '
+                    'Можно дёрнуть вручную: '
+                    'manage.py audit_sheets_vs_db --fix')
         except Exception as e:
             self.stdout.write(self.style.ERROR(f'writeback failed: {e}'))
