@@ -174,10 +174,8 @@ class Command(BaseCommand):
                 from cargo.models import HouseWaybill, Cargo, ImportedSheetRow
                 from cargo.services.sheets.writeback import (
                     batch_write_svh_for_cargos,
-                    batch_write_svh_do1_sent_for_hawbs,
                     batch_write_svh_do1_weight_for_hawbs,
                     batch_write_svh_do1_places_for_hawbs,
-                    batch_write_cargo_mawb_for_hawbs,
                 )
                 hawb_nums_in_sheets = list(
                     ImportedSheetRow.objects.filter(source__kind='general')
@@ -187,14 +185,12 @@ class Command(BaseCommand):
                     hawb_number__in=hawb_nums_in_sheets
                 ).distinct())
                 if hawbs_for_do1:
-                    n = batch_write_svh_do1_sent_for_hawbs(hawbs_for_do1)
-                    self.stdout.write(f'  svh_do1_sent: {n} cells ({len(hawbs_for_do1)} HAWB)')
+                    # svh_do1_sent / cargo_mawb — колонки удалены 2026-05-26,
+                    # не пишем (поля в БД остаются для внутренней логики).
                     n = batch_write_svh_do1_weight_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_weight: {n} cells')
                     n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_places: {n} cells')
-                    n = batch_write_cargo_mawb_for_hawbs(hawbs_for_do1)
-                    self.stdout.write(f'  cargo_mawb: {n} cells')
                 cargos_svh = list(Cargo.objects.filter(hawbs__isnull=False).distinct())
                 if cargos_svh:
                     n = batch_write_svh_for_cargos(cargos_svh)

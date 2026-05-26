@@ -93,16 +93,15 @@ def _release(h):
 
 CHECKS = [
     (CARGOTRACK_COL_HEADER,            _decl,             'declaration'),
-    (CARGOTRACK_CARGO_MAWB_HEADER,     _mawb,             'cargo_mawb'),
     (CARGOTRACK_SVH_LICENSE_HEADER,    _lic,              'svh_license'),
     (CARGOTRACK_SVH_DATE_HEADER,       _scan_into_bond,   'svh_do1_reg_date'),
     (CARGOTRACK_SVH_DO1_HEADER,        _svh_do1_reg,      'svh_do1_reg_number'),
-    (CARGOTRACK_SVH_DO1_SENT_HEADER,   _svh_do1_sent,     'svh_do1_sent_at'),
     (CARGOTRACK_SVH_DO1_WEIGHT_HEADER, _svh_do1_weight,   'svh_do1_weight'),
     (CARGOTRACK_SVH_DO1_PLACES_HEADER, _svh_do1_places,   'svh_do1_places'),
-    (CARGOTRACK_SVH_DO2_DATE_HEADER,   _svh_do2,          'svh_do2_send_at'),
     (CARGOTRACK_FILED_DATE_HEADER,     _filed,            'filed_date'),
     (CARGOTRACK_RELEASE_DATE_HEADER,   _release,          'release_date'),
+    # Удалены 2026-05-26: cargo_mawb, svh_do1_sent_at, svh_do2_send_at —
+    # юзер не использует. Поля в БД остаются для внутренней логики.
 ]
 
 

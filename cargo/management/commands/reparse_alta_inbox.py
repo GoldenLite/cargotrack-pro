@@ -165,12 +165,9 @@ class Command(BaseCommand):
                     batch_write_declarations_for_hawbs,
                     batch_write_filed_dates_for_hawbs,
                     batch_write_release_dates_for_hawbs,
-                    batch_write_svh_do2_dates_for_hawbs,
                     batch_write_svh_for_cargos,
-                    batch_write_svh_do1_sent_for_hawbs,
                     batch_write_svh_do1_weight_for_hawbs,
                     batch_write_svh_do1_places_for_hawbs,
-                    batch_write_cargo_mawb_for_hawbs,
                     drop_deprecated_columns,
                     rename_legacy_headers,
                 )
@@ -225,12 +222,7 @@ class Command(BaseCommand):
                     ImportedSheetRow.objects.filter(source__kind='general')
                     .values_list('hawb_number_norm', flat=True).distinct()
                 )
-                hawbs_for_do2 = list(HouseWaybill.objects.filter(
-                    hawb_number__in=list(hawb_nums_in_sheets)
-                ).distinct())
-                if hawbs_for_do2:
-                    n = batch_write_svh_do2_dates_for_hawbs(hawbs_for_do2)
-                    self.stdout.write(f'  svh_do2: {n} cells ({len(hawbs_for_do2)} HAWB)')
+                # «дата ДО2» — колонка удалена 2026-05-26, не пишем.
                 # SVH (cargo-level: license/scan_into_bond/svh_do1_reg_number).
                 # Берём ВСЕ Cargos с HAWB в Sheets «Общее». batch_write_svh_for_cargos
                 # сравнивает значение с тем что в ячейке и пишет только при
@@ -251,14 +243,13 @@ class Command(BaseCommand):
                     hawb_number__in=list(hawb_nums_in_sheets)
                 ).distinct())
                 if hawbs_for_do1:
-                    n = batch_write_svh_do1_sent_for_hawbs(hawbs_for_do1)
-                    self.stdout.write(f'  svh_do1_sent: {n} cells ({len(hawbs_for_do1)} HAWB)')
+                    # svh_do1_sent_at, svh_do2_send_at, cargo_mawb — колонки
+                    # удалены 2026-05-26 (юзер не использует). Эти поля
+                    # остаются в БД для внутренней логики, но в Sheets не пишем.
                     n = batch_write_svh_do1_weight_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_weight: {n} cells ({len(hawbs_for_do1)} HAWB)')
                     n = batch_write_svh_do1_places_for_hawbs(hawbs_for_do1)
                     self.stdout.write(f'  svh_do1_places: {n} cells ({len(hawbs_for_do1)} HAWB)')
-                    n = batch_write_cargo_mawb_for_hawbs(hawbs_for_do1)
-                    self.stdout.write(f'  cargo_mawb: {n} cells ({len(hawbs_for_do1)} HAWB)')
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Sheets resync failed: {e}'))
 
