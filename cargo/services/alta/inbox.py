@@ -728,11 +728,21 @@ def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
 def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[AltaInboxMessage]]:
     """Match CMN.13010 (регистрация ДО1) → Cargo.
 
-    Жёсткий якорь (с 2026-05-26): CMN.13010 содержит вложенный DO1KeepLimits
-    с DO1ReportLinkData/ReportNumber — это номер нашего исходящего ED.DO1
-    (envelope_id=do1-<customs>-<date>-<NNNN>-<uuid8>, где NNNN=report_number).
-    Наш ED.DO1 уже привязан к Cargo через common_waybill_number (MAWB), и
-    отсюда выходим на нужный Cargo.
+    Полная цепочка операции (по описанию пользователя 2026-05-26):
+      1. В Альта-ГТД формируем представление с MAWB →
+      2. CMN.13029 уходит в таможню → таможня регистрирует, возвращает
+         регистрационный номер →
+      3. В Альта-СВХ оператор регистрирует груз отдельной операцией,
+         вписывает этот рег.номер CMN.13029 →
+      4. Из регистрации груза формируется ED.DO1 (наше исходящее в
+         Альта-СВХ) с MAWB в CommonWayBillNumber и нашим report_number →
+      5. Альта-СВХ отправляет ED.DO1 в таможню, таможня регистрирует ДО1
+         и присылает ответ CMN.13010, где в DO1KeepLimits/DO1ReportLinkData
+         лежит ReportNumber — это наш report_number из ED.DO1.
+
+    Жёсткий якорь (с 2026-05-26): CMN.13010.DO1ReportLinkData.ReportNumber ==
+    AltaOutboxObservation(msg_type=ED.DO1).parsed_meta['report_number'].
+    Наш ED.DO1 уже привязан к Cargo через common_waybill_number (MAWB).
 
     Fallback (time-эвристика, для старых сообщений до 2026-05-26 или если в
     XML нет DO1ReportLinkData): для нашей лицензии цепочка
