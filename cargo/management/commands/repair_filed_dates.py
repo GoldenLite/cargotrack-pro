@@ -43,14 +43,17 @@ class Command(BaseCommand):
         if opts['force_resync']:
             return self._force_resync(with_date, dry_run=opts['dry_run'])
 
+        from django.utils import timezone as _tz
+        def _is_midnight_msk(dt):
+            local = _tz.localtime(dt) if _tz.is_aware(dt) else dt
+            return not (local.hour or local.minute or local.second or local.microsecond)
         midnight_total = 0
         precise_total  = 0
         for h in with_date:
-            if (h.filed_date.hour or h.filed_date.minute
-                    or h.filed_date.second or h.filed_date.microsecond):
-                precise_total += 1
-            else:
+            if _is_midnight_msk(h.filed_date):
                 midnight_total += 1
+            else:
+                precise_total += 1
         self.stdout.write(f'HouseWaybill с filed_date: {with_date.count()}')
         self.stdout.write(f'  с точным временем (>0): {precise_total}')
         self.stdout.write(f'  с 00:00:00 (требуют ремонта): {midnight_total}')
@@ -120,9 +123,11 @@ class Command(BaseCommand):
         Полезно когда в БД time != 00:00, а в Sheets ячейка стейл (=00:00)
         потому что в момент первой записи в БД ещё было только date.
         """
-        precise = [h for h in with_date
-                   if (h.filed_date.hour or h.filed_date.minute
-                       or h.filed_date.second or h.filed_date.microsecond)]
+        from django.utils import timezone as _tz
+        def _precise(dt):
+            local = _tz.localtime(dt) if _tz.is_aware(dt) else dt
+            return bool(local.hour or local.minute or local.second or local.microsecond)
+        precise = [h for h in with_date if _precise(h.filed_date)]
         self.stdout.write(self.style.NOTICE(
             f'Force-resync filed_date в Sheets для {len(precise)} HAWB '
             f'(с точным временем в БД)'))

@@ -365,7 +365,11 @@ def _sync_filed_date_by_declaration(decl_number: str) -> None:
     dates = [h.filed_date for h in hawbs if h.filed_date]
     if not dates:
         return
-    precise = [d for d in dates if d.hour or d.minute or d.second or d.microsecond]
+    from django.utils import timezone as _tz
+    def _precise(d):
+        local = _tz.localtime(d) if _tz.is_aware(d) else d
+        return bool(local.hour or local.minute or local.second or local.microsecond)
+    precise = [d for d in dates if _precise(d)]
     min_date = min(precise) if precise else min(dates)
     affected = [h for h in hawbs if h.filed_date != min_date]
     for h in affected:

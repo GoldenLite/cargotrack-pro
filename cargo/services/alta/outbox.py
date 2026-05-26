@@ -137,21 +137,27 @@ def _filed_date_should_replace(current, new) -> bool:
     Логика:
     - current пуст → да, всегда пишем.
     - new пуст или совпадает → нет.
-    - current с time=00:00:00 (значит дата без часов — пришла из
-      CMN.11350.registration_date), а new — с реальным временем суток
-      (CMN.11023/11349.prepared_at) → да, перезаписываем, т.к. это
-      более точный источник.
-    - оба точные (time != 00:00) → берём более ранний.
+    - current с time=00:00:00 в локальной TZ (значит дата без часов —
+      пришла из CMN.11350.registration_date), а new — с реальным временем
+      суток (CMN.11023/11349.prepared_at в МСК) → да, перезаписываем.
+    - оба точные → берём более ранний.
     - оба ровно по дате — оставляем текущий.
+
+    Точность определяется в локальной TZ (МСК): hour|minute|second|μs
+    после timezone.localtime(). UTC-проверка ошибочна, т.к. 00:00 МСК
+    в БД хранится как 21:00 UTC предыдущего дня.
     """
     if not current:
         return bool(new)
     if not new or current == new:
         return False
-    current_precise = bool(current.hour or current.minute or current.second
-                           or current.microsecond)
-    new_precise     = bool(new.hour or new.minute or new.second
-                           or new.microsecond)
+    from django.utils import timezone as _tz
+    cur_local = _tz.localtime(current) if _tz.is_aware(current) else current
+    new_local = _tz.localtime(new)     if _tz.is_aware(new)     else new
+    current_precise = bool(cur_local.hour or cur_local.minute
+                           or cur_local.second or cur_local.microsecond)
+    new_precise     = bool(new_local.hour or new_local.minute
+                           or new_local.second or new_local.microsecond)
     if not current_precise and new_precise:
         return True
     if current_precise and not new_precise:
