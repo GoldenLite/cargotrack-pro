@@ -750,16 +750,13 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
 
 
 def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
-    """Batch writeback svh_do2_send_at — для resync ДО2.
+    """DEPRECATED 2026-05-26 — колонка «CargoTrack: дата ДО2» удалена.
 
-    Колонка вставляется СРАЗУ после «дата выпуска» (юзер просил этот порядок).
-    Для HAWB у которых svh_do2_send_at пуст — пишем '' (очищаем стейл).
+    Поле HouseWaybill.svh_do2_send_at в БД остаётся (используется внутренней
+    логикой), но в Sheets больше НЕ пишем — чтобы не пересоздавать удалённую
+    колонку при приходе нового CMN.13014.
     """
-    return _batch_write_hawb_dates(
-        hawbs, 'svh_do2_send_at',
-        CARGOTRACK_SVH_DO2_DATE_HEADER, 'svh_do2_date',
-        after_header=CARGOTRACK_RELEASE_DATE_HEADER,
-    )
+    return 0
 
 
 def _format_weight(value) -> str:
@@ -804,18 +801,11 @@ def batch_write_svh_do1_places_for_hawbs(hawbs: list) -> int:
 
 
 def batch_write_svh_do1_sent_for_hawbs(hawbs: list) -> int:
-    """Batch writeback HouseWaybill.svh_do1_sent_at в «дата подачи ДО1».
+    """DEPRECATED 2026-05-26 — колонка «CargoTrack: дата подачи ДО1» удалена.
 
-    Per-HAWB — только тем накладным что упомянуты в parsed_meta['hawbs']
-    конкретного ED.DO1. Одна партия может иметь несколько ДО-1 с разными
-    списками HAWB (например 222 + 186 = 408 на одну MAWB) — поэтому
-    cargo-level подход не подходит.
+    Поле svh_do1_sent_at в БД остаётся, но в Sheets больше не пишем.
     """
-    return _batch_write_hawb_dates(
-        hawbs, 'svh_do1_sent_at',
-        CARGOTRACK_SVH_DO1_SENT_HEADER, 'svh_do1_sent',
-        after_header=CARGOTRACK_SVH_LICENSE_HEADER,
-    )
+    return 0
 
 
 def _mawb_value_provider(h) -> str:
@@ -831,18 +821,12 @@ def _identity_str(v) -> str:
 
 
 def batch_write_cargo_mawb_for_hawbs(hawbs: list) -> int:
-    """Batch writeback HouseWaybill.mawb.awb_number в «номер партии».
+    """DEPRECATED 2026-05-26 — колонка «CargoTrack: номер партии» удалена.
 
-    В Sheets «Общее» MAWB-колонки у юзера нет — мы вынесли её отдельно
-    как CargoTrack-колонку. Заполняется автоматически из ED.DO1 outbox
-    observations (см. outbox._link_hawbs_to_cargo).
+    Поле mawb_id в БД остаётся (внутренняя логика), но в Sheets не пишем.
+    Юзер MAWB видит в своей колонке ТСД.
     """
-    return _batch_write_hawb_dates(
-        hawbs, 'mawb_id',
-        CARGOTRACK_CARGO_MAWB_HEADER, 'cargo_mawb',
-        formatter=_identity_str,
-        value_provider=_mawb_value_provider,
-    )
+    return 0
 
 
 # Одноразовое переименование заголовков — для сохранения данных в существующих

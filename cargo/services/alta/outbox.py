@@ -227,18 +227,11 @@ def _apply_do1_sent_at(hawb_nums: list, prepared_at) -> None:
         HouseWaybill.objects.filter(pk=h.pk).update(svh_do1_sent_at=prepared_at)
         affected.append(h)
     if affected:
-        logger.info('ED.DO1 sent_at: updated %d HAWBs to %s',
+        logger.info('ED.DO1 sent_at: updated %d HAWBs to %s (БД, без Sheets)',
                     len(affected), prepared_at)
-        try:
-            from cargo.services.sheets.writeback import (
-                batch_write_svh_do1_sent_for_hawbs, signals_suppressed,
-            )
-            if not signals_suppressed():
-                for h in affected:
-                    h.refresh_from_db(fields=['svh_do1_sent_at'])
-                batch_write_svh_do1_sent_for_hawbs(affected)
-        except Exception:
-            logger.exception('svh_do1_sent_at writeback failed')
+        # Колонка «CargoTrack: дата подачи ДО1» удалена 2026-05-26 (юзер не
+        # использует). Поле svh_do1_sent_at в БД остаётся для внутренней
+        # логики, но в Sheets больше не пишем.
 
 
 def _ensure_cargo_from_do1(obs: AltaOutboxObservation) -> Optional[Cargo]:
