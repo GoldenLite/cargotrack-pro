@@ -19,6 +19,9 @@ from django.db.models import Q
 
 from cargo.models import AltaOutboxObservation, HouseWaybill
 from cargo.services.alta.outbox import _filed_date_should_replace
+from cargo.services.sheets.writeback import (
+    _local_date_str, batch_write_filed_dates_for_hawbs,
+)
 
 
 class Command(BaseCommand):
@@ -26,12 +29,19 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--dry-run', action='store_true')
+        parser.add_argument('--force-resync', action='store_true',
+                            help='Перезатереть Sheets для всех HAWB с точным '
+                                 'filed_date в БД (исправляет стейл-ячейки, '
+                                 'которые когда-то были записаны как 00:00).')
 
     def handle(self, *args, **opts):
         # Все HAWB с filed_date — потенциальные кандидаты.
         with_date = HouseWaybill.objects.filter(
             filed_date__isnull=False
         ).only('pk', 'hawb_number', 'filed_date')
+
+        if opts['force_resync']:
+            return self._force_resync(with_date, dry_run=opts['dry_run'])
 
         midnight_total = 0
         precise_total  = 0
@@ -95,14 +105,38 @@ class Command(BaseCommand):
             f'Обновлено в БД: {len(touched)}'))
 
         try:
-            from cargo.services.sheets.writeback import (
-                batch_write_filed_dates_for_hawbs,
-            )
             for h in touched:
                 h.refresh_from_db(fields=['filed_date'])
             n = batch_write_filed_dates_for_hawbs(touched)
             self.stdout.write(self.style.SUCCESS(
                 f'Sheets writeback: {n} cells'))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(
+                f'writeback failed: {e}'))
+
+    def _force_resync(self, with_date, *, dry_run: bool) -> None:
+        """Прогоняет writeback по всем HAWB с точным filed_date в БД.
+
+        Полезно когда в БД time != 00:00, а в Sheets ячейка стейл (=00:00)
+        потому что в момент первой записи в БД ещё было только date.
+        """
+        precise = [h for h in with_date
+                   if (h.filed_date.hour or h.filed_date.minute
+                       or h.filed_date.second or h.filed_date.microsecond)]
+        self.stdout.write(self.style.NOTICE(
+            f'Force-resync filed_date в Sheets для {len(precise)} HAWB '
+            f'(с точным временем в БД)'))
+        if dry_run:
+            for h in precise[:10]:
+                self.stdout.write(
+                    f'  [DRY] {h.hawb_number}: {_local_date_str(h.filed_date)}')
+            if len(precise) > 10:
+                self.stdout.write(f'  ... ещё {len(precise)-10}')
+            return
+        try:
+            n = batch_write_filed_dates_for_hawbs(precise)
+            self.stdout.write(self.style.SUCCESS(
+                f'Sheets writeback: {n} cells обновлено'))
         except Exception as e:
             self.stdout.write(self.style.ERROR(
                 f'writeback failed: {e}'))
