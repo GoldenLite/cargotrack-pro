@@ -747,6 +747,9 @@ _HOUSE_SHIPMENT_BLOCK_RE = re.compile(
     r'<(?:[\w-]+:)?HouseShipment\b[^>]*>(.*?)</(?:[\w-]+:)?HouseShipment>',
     re.S,
 )
+_GOODS_ITEM_DETAILS_OPEN_RE = re.compile(
+    r'<(?:[\w-]+:)?GoodsItemDetails\b',
+)
 _HAWB_PAIR_RE = re.compile(
     r'<(?:[\w-]+:)?PrDocumentNumber\b[^>]*>([^<]+)</(?:[\w-]+:)?PrDocumentNumber>'
     r'[\s\S]{0,500}?'
@@ -756,19 +759,24 @@ _HAWB_PAIR_RE = re.compile(
 )
 
 
-def _count_in_item(body: str) -> int:
-    n_groups = len(_GOODS_GROUP_OPEN_RE.findall(body))
-    if n_groups > 0:
-        return n_groups
-    return 1 if _GOODS_DESC_OPEN_RE.search(body) else 0
-
-
 def _count_positions_cmn_11023(xml_text: str) -> int:
-    return sum(_count_in_item(m.group(1))
-               for m in _GOODS_ITEM_BLOCK_RE.finditer(xml_text))
+    """В CMN.11023: каждый ESADout_CUGoods = 1 товар, внутри +N групп
+    (GoodsGroupDescription) или +1 если групп нет, но есть GoodsDescription."""
+    total = 0
+    for m in _GOODS_ITEM_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        n_groups = len(_GOODS_GROUP_OPEN_RE.findall(body))
+        if n_groups > 0:
+            total += n_groups
+        elif _GOODS_DESC_OPEN_RE.search(body):
+            total += 1
+    return total
 
 
 def _count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
+    """В CMN.11349: внутри каждого HouseShipment считаем GoodsItemDetails
+    (= позиции). GoodsDescription может быть разбит на части переносами и
+    как счётчик не годится."""
     out: dict = {}
     for m in _HOUSE_SHIPMENT_BLOCK_RE.finditer(xml_text):
         body = m.group(1)
@@ -779,7 +787,7 @@ def _count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
                 break
         if not hawb:
             continue
-        n = _count_in_item(body)
+        n = len(_GOODS_ITEM_DETAILS_OPEN_RE.findall(body))
         out[hawb] = out.get(hawb, 0) + n
     return out
 
