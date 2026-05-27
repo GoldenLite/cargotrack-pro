@@ -689,4 +689,74 @@ def parse_do1_report(xml_text: str) -> dict:
     }
     return out
 
+
+# ─── Счётчик товарных позиций в CMN.11023 / CMN.11349 ──────────────────
+#
+# CMN.11023 (первичная подача): структура «один ДТ → N товаров (ESADout_CUGoods)
+# → внутри каждого товара 0..N групп описания (GoodsGroupDescription)».
+# Логика «позиции декларации»:
+#   - если у товара ≥1 GoodsGroupDescription → каждая группа = 1 позиция;
+#   - если нет → сам товар (через top-level GoodsDescription) = 1 позиция.
+# Один счётчик присваивается ВСЕМ HAWB одной декларации.
+#
+# CMN.11349 (ECD-корректировка): структура «N HouseShipment → каждая = одна
+# индивидуальная накладная (HAWB)». В каждом HouseShipment лежат
+# GoodsDescription/GoodsGroupDescription. Считаем per-HAWB по той же логике.
+
+_GOODS_ITEM_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?ESADout_CUGoods\b[^>]*>(.*?)</(?:[\w-]+:)?ESADout_CUGoods>',
+    re.S,
+)
+_GOODS_GROUP_OPEN_RE = re.compile(
+    r'<(?:[\w-]+:)?GoodsGroupDescription\b',
+)
+_GOODS_DESC_OPEN_RE = re.compile(
+    r'<(?:[\w-]+:)?GoodsDescription\b',
+)
+_HOUSE_SHIPMENT_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?HouseShipment\b[^>]*>(.*?)</(?:[\w-]+:)?HouseShipment>',
+    re.S,
+)
+# HAWB = PrDocumentNumber, у которого следующий «kind»-код = 02021
+# (в CMN.11349 встречается DocKindCode, в outbound ED.DO1 — PresentedDocumentModeCode).
+_HAWB_PAIR_RE = re.compile(
+    r'<(?:[\w-]+:)?PrDocumentNumber\b[^>]*>([^<]+)</(?:[\w-]+:)?PrDocumentNumber>'
+    r'[\s\S]{0,500}?'
+    r'<(?:[\w-]+:)?(?:DocKindCode|PresentedDocumentModeCode)\b[^>]*>'
+    r'([^<]+)'
+    r'</(?:[\w-]+:)?(?:DocKindCode|PresentedDocumentModeCode)>'
+)
+
+
+def _count_positions_in_item(body: str) -> int:
+    """Локальная логика «один товар (или одна HAWB) → сколько позиций»."""
+    n_groups = len(_GOODS_GROUP_OPEN_RE.findall(body))
+    if n_groups > 0:
+        return n_groups
+    return 1 if _GOODS_DESC_OPEN_RE.search(body) else 0
+
+
+def count_positions_cmn_11023(xml_text: str) -> int:
+    """Общее число позиций в декларации CMN.11023."""
+    return sum(_count_positions_in_item(m.group(1))
+               for m in _GOODS_ITEM_BLOCK_RE.finditer(xml_text))
+
+
+def count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
+    """Per-HAWB словарь: {hawb_number: количество позиций} для CMN.11349."""
+    out: dict = {}
+    for m in _HOUSE_SHIPMENT_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        # HAWB-номер внутри HouseShipment
+        hawb = ''
+        for nm, mode in _HAWB_PAIR_RE.findall(body):
+            if mode.strip() == '02021':
+                hawb = nm.strip()
+                break
+        if not hawb:
+            continue
+        n = _count_positions_in_item(body)
+        # Если несколько HouseShipment относятся к одной HAWB — суммируем
+        # (защита от дублей; в нормальном XML такого быть не должно).
+        out[hawb] = out.get(hawb, 0) + n
     return out

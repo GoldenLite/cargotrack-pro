@@ -72,6 +72,10 @@ CARGOTRACK_SVH_DO2_DATE_HEADER = 'CargoTrack: дата ДО2'
 # и не пишем (в БД хранится только дата ДО2 на HAWB).
 CARGOTRACK_FILED_DATE_HEADER   = 'CargoTrack: дата подачи'
 CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
+# Количество товарных позиций ДТ — из CMN.11023 / CMN.11349.
+# По юзерскому запросу: имя без префикса 'CargoTrack:' и физически слева
+# от 'CargoTrack: дата подачи' в Sheets.
+CARGOTRACK_GOODS_COUNT_HEADER  = 'Количество позиций'
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
 # данные представления вместо ДО1). Команда cleanup_svh_legacy_columns
@@ -105,7 +109,8 @@ def _find_general_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
 
 def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
                          header_name: str,
-                         after_header: str = '') -> int:
+                         after_header: str = '',
+                         before_header: str = '') -> int:
     """Возвращает 1-based индекс колонки `header_name`, создавая её при необходимости.
 
     Generic helper: используется для всех наших «CargoTrack: *»-колонок
@@ -116,7 +121,11 @@ def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
     с этим заголовком (через insert_cols со сдвигом существующих). Если
     after_header не найден — fallback в первую свободную справа.
 
-    Без after_header — добавляем в первую свободную справа от всех
+    before_header: если задан, новую колонку вставляем СРАЗУ ПЕРЕД колонкой
+    с этим заголовком (existing-колонка сдвигается вправо). Если
+    before_header не найден — fallback в первую свободную справа.
+
+    Без before/after — добавляем в первую свободную справа от всех
     существующих и записываем заголовок (порядок наших колонок — порядок
     первого появления).
     """
@@ -133,27 +142,32 @@ def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
             return idx
 
     # Колонки нет. Решаем, КУДА её вставить.
-    if after_header:
-        after_idx = 0
+    target_idx = 0
+    if before_header:
+        for idx, value in enumerate(header_values, start=1):
+            if (value or '').strip() == before_header:
+                target_idx = idx       # сдвигаем before-колонку вправо
+                break
+    if not target_idx and after_header:
         for idx, value in enumerate(header_values, start=1):
             if (value or '').strip() == after_header:
-                after_idx = idx
+                target_idx = idx + 1
                 break
-        if after_idx > 0:
-            new_col_idx = after_idx + 1
-            # gspread.insert_cols сдвигает все колонки от new_col_idx вправо,
-            # затем записываем шапку. value_input_option важен для USER_ENTERED.
-            ws.insert_cols([['' for _ in range(ws.row_count)]], col=new_col_idx)
-            ws.update_cell(header_row, new_col_idx, header_name)
-            # Инвалидируем кеш для всех колонок этого ws — индексы сдвинулись.
-            for k in list(_col_index_cache.keys()):
-                if k[0] == ws_key and _col_index_cache[k] >= new_col_idx:
-                    _col_index_cache[k] += 1
-            _col_index_cache[cache_key] = new_col_idx
-            logger.info('Inserted column "%s" after "%s" at index %d in worksheet %s',
-                        header_name, after_header, new_col_idx, ws.title)
-            return new_col_idx
-        # after_header не найден — падаем во fallback (append справа)
+    if target_idx > 0:
+        # gspread.insert_cols сдвигает все колонки от target_idx вправо,
+        # затем записываем шапку.
+        ws.insert_cols([['' for _ in range(ws.row_count)]], col=target_idx)
+        ws.update_cell(header_row, target_idx, header_name)
+        # Инвалидируем кеш для всех колонок этого ws — индексы сдвинулись.
+        for k in list(_col_index_cache.keys()):
+            if k[0] == ws_key and _col_index_cache[k] >= target_idx:
+                _col_index_cache[k] += 1
+        _col_index_cache[cache_key] = target_idx
+        anchor = before_header or after_header
+        logger.info('Inserted column "%s" %s "%s" at index %d in worksheet %s',
+                    header_name, 'before' if before_header else 'after',
+                    anchor, target_idx, ws.title)
+        return target_idx
 
     # Append в первую свободную справа
     new_col_idx = len(header_values) + 1
@@ -568,6 +582,7 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
 def _batch_write_hawb_dates(hawbs: list, value_attr: str,
                             header_name: str, log_label: str,
                             after_header: str = '',
+                            before_header: str = '',
                             formatter=None,
                             value_provider=None) -> int:
     """Generic batch writeback per-HAWB значения — 1 col_values + 1 batch_update.
@@ -628,6 +643,7 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
                             label=f'batch {log_label} open')
             col = _retry_api(_ensure_named_column, ws, source.header_row,
                              header_name, after_header=after_header,
+                             before_header=before_header,
                              label=f'batch {log_label} ensure_col')
         except (SheetsConfigError, gspread.exceptions.APIError) as e:
             logger.exception('batch %s: open/ensure failed: %s', log_label, e)
@@ -796,6 +812,22 @@ def batch_write_svh_do1_places_for_hawbs(hawbs: list) -> int:
         hawbs, 'svh_do1_place_count',
         CARGOTRACK_SVH_DO1_PLACES_HEADER, 'svh_do1_places',
         after_header=CARGOTRACK_SVH_DO1_WEIGHT_HEADER,
+        formatter=_format_int,
+    )
+
+
+def batch_write_goods_count_for_hawbs(hawbs: list) -> int:
+    """Batch writeback HouseWaybill.goods_count в «Количество позиций».
+
+    Колонка вставляется ПЕРЕД 'CargoTrack: дата подачи' при первом создании,
+    чтобы порядок колонок в Sheets был: ... | Количество позиций | дата подачи |
+    дата выпуска | ... . При повторных вызовах позиция берётся из шапки
+    (юзер может потом её передвинуть — мы найдём по имени).
+    """
+    return _batch_write_hawb_dates(
+        hawbs, 'goods_count',
+        CARGOTRACK_GOODS_COUNT_HEADER, 'goods_count',
+        before_header=CARGOTRACK_FILED_DATE_HEADER,
         formatter=_format_int,
     )
 

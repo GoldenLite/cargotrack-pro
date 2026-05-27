@@ -34,6 +34,7 @@ from cargo.services.sheets.writeback import (
     CARGOTRACK_SVH_DO2_DATE_HEADER,
     CARGOTRACK_FILED_DATE_HEADER,
     CARGOTRACK_RELEASE_DATE_HEADER,
+    CARGOTRACK_GOODS_COUNT_HEADER,
     _local_date_str,
     _retry_api,
 )
@@ -91,6 +92,10 @@ def _release(h):
     return _local_date_str(h.release_date)
 
 
+def _goods_count(h):
+    return '' if h.goods_count is None else str(h.goods_count)
+
+
 CHECKS = [
     (CARGOTRACK_COL_HEADER,            _decl,             'declaration'),
     (CARGOTRACK_SVH_LICENSE_HEADER,    _lic,              'svh_license'),
@@ -98,6 +103,7 @@ CHECKS = [
     (CARGOTRACK_SVH_DO1_HEADER,        _svh_do1_reg,      'svh_do1_reg_number'),
     (CARGOTRACK_SVH_DO1_WEIGHT_HEADER, _svh_do1_weight,   'svh_do1_weight'),
     (CARGOTRACK_SVH_DO1_PLACES_HEADER, _svh_do1_places,   'svh_do1_places'),
+    (CARGOTRACK_GOODS_COUNT_HEADER,    _goods_count,      'goods_count'),
     (CARGOTRACK_FILED_DATE_HEADER,     _filed,            'filed_date'),
     (CARGOTRACK_RELEASE_DATE_HEADER,   _release,          'release_date'),
     # Удалены 2026-05-26: cargo_mawb, svh_do1_sent_at, svh_do2_send_at —

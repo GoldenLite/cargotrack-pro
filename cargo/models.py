@@ -788,6 +788,10 @@ class HouseWaybill(models.Model):
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True)
+    goods_count  = models.PositiveIntegerField(
+        'Количество позиций', null=True, blank=True,
+        help_text='Число товарных позиций в ДТ. CMN.11023: общее по декларации '
+                  '(одинаково у всех HAWB одной ДТ). CMN.11349: per-HAWB.')
     filed_date   = models.DateTimeField('Дата подачи', null=True, blank=True)
     release_date = models.DateTimeField('Дата выпуска', null=True, blank=True)
     svh_do2_send_at = models.DateTimeField(

@@ -130,6 +130,72 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         elif hawb:
             _maybe_update_filed_date(hawb, obs.prepared_at)
 
+        # Количество позиций ДТ. Источник — parsed_meta:
+        #   CMN.11023: goods_count (общее число для всей декларации) →
+        #              ставится одинаково всем HAWB этой декларации.
+        #   CMN.11349: goods_count_per_hawb (dict[hawb_num → int]) →
+        #              ставится per-HAWB.
+        # Если в parsed_meta пусто (старый агент) — пытаемся парсить raw_xml
+        # на месте.
+        _apply_goods_count(obs, hawb_list)
+
+
+def _apply_goods_count(obs, hawb_list: list) -> None:
+    """Записывает HouseWaybill.goods_count из parsed_meta CMN.11023/11349."""
+    pm = obs.parsed_meta or {}
+    raw_xml = pm.get('raw_xml') or ''
+
+    affected: list[HouseWaybill] = []
+
+    if obs.msg_type == 'CMN.11023':
+        total = pm.get('goods_count')
+        if (total is None or total == 0) and raw_xml:
+            from cargo.services.alta.xml_extract import count_positions_cmn_11023
+            total = count_positions_cmn_11023(raw_xml) or None
+        if not total:
+            return
+        # Один и тот же счётчик всем HAWB декларации
+        for hn in (hawb_list or []):
+            h = HouseWaybill.objects.filter(
+                hawb_number__iexact=str(hn).strip()).first()
+            if not h or h.goods_count == total:
+                continue
+            HouseWaybill.objects.filter(pk=h.pk).update(goods_count=total)
+            affected.append(h)
+
+    elif obs.msg_type == 'CMN.11349':
+        per_hawb = pm.get('goods_count_per_hawb') or {}
+        if not per_hawb and raw_xml:
+            from cargo.services.alta.xml_extract import (
+                count_positions_per_hawb_cmn_11349,
+            )
+            per_hawb = count_positions_per_hawb_cmn_11349(raw_xml)
+        if not per_hawb:
+            return
+        for hn, n in per_hawb.items():
+            if not n:
+                continue
+            h = HouseWaybill.objects.filter(
+                hawb_number__iexact=str(hn).strip()).first()
+            if not h or h.goods_count == n:
+                continue
+            HouseWaybill.objects.filter(pk=h.pk).update(goods_count=n)
+            affected.append(h)
+
+    if affected:
+        logger.info('%s goods_count: updated %d HAWBs',
+                    obs.msg_type, len(affected))
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_goods_count_for_hawbs, signals_suppressed,
+            )
+            if not signals_suppressed():
+                for h in affected:
+                    h.refresh_from_db(fields=['goods_count'])
+                batch_write_goods_count_for_hawbs(affected)
+        except Exception:
+            logger.exception('goods_count writeback failed')
+
 
 def _filed_date_should_replace(current, new) -> bool:
     """Решает, нужно ли заменить current на new для HouseWaybill.filed_date.

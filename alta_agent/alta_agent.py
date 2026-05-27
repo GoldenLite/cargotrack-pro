@@ -729,6 +729,61 @@ def _all_waybill_numbers(xml_text: str) -> list:
     return out
 
 
+# Подсчёт товарных позиций. См. cargo/services/alta/xml_extract.py для
+# подробного описания логики. Дублируем парсер здесь, чтобы агент мог
+# считать на месте и не зависеть от наличия raw_xml на сервере.
+
+_GOODS_ITEM_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?ESADout_CUGoods\b[^>]*>(.*?)</(?:[\w-]+:)?ESADout_CUGoods>',
+    re.S,
+)
+_GOODS_GROUP_OPEN_RE = re.compile(
+    r'<(?:[\w-]+:)?GoodsGroupDescription\b',
+)
+_GOODS_DESC_OPEN_RE = re.compile(
+    r'<(?:[\w-]+:)?GoodsDescription\b',
+)
+_HOUSE_SHIPMENT_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?HouseShipment\b[^>]*>(.*?)</(?:[\w-]+:)?HouseShipment>',
+    re.S,
+)
+_HAWB_PAIR_RE = re.compile(
+    r'<(?:[\w-]+:)?PrDocumentNumber\b[^>]*>([^<]+)</(?:[\w-]+:)?PrDocumentNumber>'
+    r'[\s\S]{0,500}?'
+    r'<(?:[\w-]+:)?(?:DocKindCode|PresentedDocumentModeCode)\b[^>]*>'
+    r'([^<]+)'
+    r'</(?:[\w-]+:)?(?:DocKindCode|PresentedDocumentModeCode)>'
+)
+
+
+def _count_in_item(body: str) -> int:
+    n_groups = len(_GOODS_GROUP_OPEN_RE.findall(body))
+    if n_groups > 0:
+        return n_groups
+    return 1 if _GOODS_DESC_OPEN_RE.search(body) else 0
+
+
+def _count_positions_cmn_11023(xml_text: str) -> int:
+    return sum(_count_in_item(m.group(1))
+               for m in _GOODS_ITEM_BLOCK_RE.finditer(xml_text))
+
+
+def _count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
+    out: dict = {}
+    for m in _HOUSE_SHIPMENT_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        hawb = ''
+        for nm, mode in _HAWB_PAIR_RE.findall(body):
+            if mode.strip() == '02021':
+                hawb = nm.strip()
+                break
+        if not hawb:
+            continue
+        n = _count_in_item(body)
+        out[hawb] = out.get(hawb, 0) + n
+    return out
+
+
 def _parse_outbox_xml(xml_text: str) -> dict:
     """Парсит ключевые поля из исходящей копии (538134^*.gz).
 
@@ -805,22 +860,35 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
     if _state_seen(conn, envelope_id):
         return
 
+    parsed_meta = {
+        'source_file':     path.name,
+        'document_number': parsed.get('document_number', ''),
+        'mcd_id':          parsed.get('mcd_id', ''),
+        'arch_id':         parsed.get('arch_id', ''),
+        'arch_decl_id':    parsed.get('arch_decl_id', ''),
+        # Полный список HAWB этой декларации — для CMN.11023/11349
+        # сервер итерирует и проставит filed_date КАЖДОЙ накладной.
+        'hawbs':           parsed.get('hawbs', []),
+    }
+    # Для CMN.11023/11349 — считаем количество товарных позиций и сохраняем
+    # полный raw_xml (нужен для пересчёта при изменении логики на сервере).
+    msg_type = parsed.get('msg_type', '')
+    if msg_type == 'CMN.11023':
+        parsed_meta['goods_count'] = _count_positions_cmn_11023(xml_text)
+        parsed_meta['raw_xml'] = xml_text
+    elif msg_type == 'CMN.11349':
+        parsed_meta['goods_count_per_hawb'] = (
+            _count_positions_per_hawb_cmn_11349(xml_text)
+        )
+        parsed_meta['raw_xml'] = xml_text
+
     payload = {
         'envelope_id':           envelope_id,
-        'msg_type':              parsed.get('msg_type', ''),
+        'msg_type':              msg_type,
         'prepared_at':           parsed.get('prepared_at') or None,
         'common_waybill_number': parsed.get('common_waybill_number', ''),
         'waybill_number':        parsed.get('waybill_number', ''),
-        'parsed_meta': {
-            'source_file':     path.name,
-            'document_number': parsed.get('document_number', ''),
-            'mcd_id':          parsed.get('mcd_id', ''),
-            'arch_id':         parsed.get('arch_id', ''),
-            'arch_decl_id':    parsed.get('arch_decl_id', ''),
-            # Полный список HAWB этой декларации — для CMN.11023/11349
-            # сервер итерирует и проставит filed_date КАЖДОЙ накладной.
-            'hawbs':           parsed.get('hawbs', []),
-        },
+        'parsed_meta':           parsed_meta,
     }
     status, body = _post_outbox(cfg, payload)
     if status in (200, 409):
