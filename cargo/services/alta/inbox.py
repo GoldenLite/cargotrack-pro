@@ -835,14 +835,26 @@ def _writeback_svh_cargo(cargo: Cargo) -> None:
 def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     """Обработка представления (CMN.13029).
 
-    НЕ пишет НИЧЕГО в Cargo. Семантика: партия «размещена на СВХ»
-    только когда есть CMN.13010 (регистрация ДО1). До этого момента
-    — заявка подана, ждём подтверждения таможни. В Sheets никаких
-    СВХ-данных не показываем до факта размещения.
+    С 2026-05-27: пишет лицензию СВХ в Cargo сразу. Раньше ждали CMN.13010
+    («партия размещена»), но юзер указал на кейс «выпуск с колёс» — груз
+    идёт через ECD без фактического СВХ-хранения, ДО1 не оформляется,
+    CMN.13010 никогда не прилетит, и Cargo до бесконечности оставался без
+    лицензии. Лицензия из CMN.13029 фактически достоверная, поэтому
+    проставляем её сразу. Остальные СВХ-поля (svh_do1_reg_number,
+    scan_into_bond) по-прежнему ставит только apply_svh_do1.
 
-    Единственная задача — триггернуть backfill: если CMN.13010 для этой
-    партии уже пришёл раньше представления (race), сейчас доматчим его.
+    Также триггерит backfill: если CMN.13010 для этой партии уже пришла
+    раньше представления (race), сейчас доматчит его.
     """
+    parsed = msg.parsed_meta or {}
+    lic = (parsed.get('svh_warehouse_license') or '').strip()
+    if lic and not (cargo.warehouse_license or '').strip():
+        Cargo.objects.filter(pk=cargo.pk).update(warehouse_license=lic)
+        cargo.warehouse_license = lic
+        logger.info('apply_svh_placement: cargo %s warehouse_license=%s '
+                    'set from CMN.13029', cargo.pk, lic)
+        _writeback_svh_cargo(cargo)
+
     _backfill_do1_for_presentation(msg, cargo)
     return None
 
