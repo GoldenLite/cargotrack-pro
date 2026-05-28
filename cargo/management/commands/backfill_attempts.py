@@ -44,7 +44,8 @@ class Command(BaseCommand):
             status = 'RELEASED' if h.release_date else 'FILED'
             _register_attempt(h, decl, status=status,
                               filed_date=h.filed_date,
-                              release_date=h.release_date)
+                              release_date=h.release_date,
+                              trigger_writeback=False)
             created += 1
         self.stdout.write(self.style.SUCCESS(
             f'\nСоздано attempt: {created}, уже было: {already}'))

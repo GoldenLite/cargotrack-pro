@@ -354,7 +354,8 @@ def _register_attempt(hawb: HouseWaybill, declaration_number: str,
                       status: str = 'FILED',
                       filed_date=None,
                       release_date=None,
-                      rejected_date=None) -> None:
+                      rejected_date=None,
+                      trigger_writeback: bool = True) -> None:
     """Регистрирует попытку подачи декларации.
 
     Идемпотентно по (hawb, declaration_number). При update НЕ затирает
@@ -399,7 +400,8 @@ def _register_attempt(hawb: HouseWaybill, declaration_number: str,
             attempt.save(update_fields=list(upd.keys()))
             logger.info('attempt #%d for HAWB %s decl=%s updated: %s',
                         attempt.attempt_number, hawb.hawb_number, decl, upd)
-    _writeback_attempt_count_for_hawb(hawb)
+    if trigger_writeback:
+        _writeback_attempt_count_for_hawb(hawb)
 
 
 def _writeback_attempt_count_for_hawb(hawb: HouseWaybill) -> None:
