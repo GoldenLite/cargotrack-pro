@@ -32,21 +32,37 @@ class Command(BaseCommand):
 
         created = 0
         already = 0
+        import time as _time
+        from django.db import OperationalError, connection
+
+        def _retry(fn, *args, **kwargs):
+            for attempt in range(6):
+                try:
+                    return fn(*args, **kwargs)
+                except OperationalError as e:
+                    if 'locked' not in str(e).lower() or attempt == 5:
+                        raise
+                    connection.close()
+                    _time.sleep(0.5 * (attempt + 1))
+
         for h in qs.iterator():
             decl = (h.customs_declaration_number or '').strip()
             if not decl:
                 continue
-            existed = HawbDeclarationAttempt.objects.filter(
-                hawb=h, declaration_number=decl).exists()
+            existed = _retry(
+                HawbDeclarationAttempt.objects.filter(
+                    hawb=h, declaration_number=decl).exists)
             if existed:
                 already += 1
                 continue
             status = 'RELEASED' if h.release_date else 'FILED'
-            _register_attempt(h, decl, status=status,
-                              filed_date=h.filed_date,
-                              release_date=h.release_date,
-                              trigger_writeback=False)
+            _retry(_register_attempt, h, decl, status=status,
+                   filed_date=h.filed_date,
+                   release_date=h.release_date,
+                   trigger_writeback=False)
             created += 1
+            if created % 200 == 0:
+                self.stdout.write(f'  {created} attempts created...')
         self.stdout.write(self.style.SUCCESS(
             f'\nСоздано attempt: {created}, уже было: {already}'))
 
