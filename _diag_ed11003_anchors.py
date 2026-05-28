@@ -40,15 +40,31 @@ for msg in AltaInboxMessage.objects.filter(msg_type='ED.11003').order_by('-recei
     print(f'  SenderCustoms:    {sender_customs}')
     print(f'  GTDNumber(body):  {gtd_full!r}')
 
-    # Поищем CMN.11349/11023 с этим ProcessID или DocumentID
+    # Поищем CMN.11349/11023 с этим ProcessID в raw_xml (Python loop — SQLite
+    # ограничен в JSON lookup).
     if process_id:
-        obs = AltaOutboxObservation.objects.filter(
-            parsed_meta__contains={'process_id': process_id}).first()
-        # JSONField __contains не всегда работает, fallback на raw_xml содержит
-        if not obs:
-            obs = AltaOutboxObservation.objects.filter(
-                parsed_meta__raw_xml__icontains=process_id).first()
-        print(f'  Outbox by ProcessID:   {obs and obs.msg_type} env={obs and obs.envelope_id}')
+        found = None
+        for o in AltaOutboxObservation.objects.filter(
+                msg_type__in=['CMN.11349', 'CMN.11023']).iterator():
+            raw = (o.parsed_meta or {}).get('raw_xml') or ''
+            if process_id in raw:
+                found = o
+                break
+        print(f'  Outbox by ProcessID:   {found and found.msg_type} '
+              f'env={found and found.envelope_id}')
+
+    # А ещё — DocumentID можно поискать (в нашем outbox raw_xml тоже могут
+    # быть DocumentID нашего исходящего CMN.11349)
+    if doc_id:
+        found = None
+        for o in AltaOutboxObservation.objects.filter(
+                msg_type__in=['CMN.11349', 'CMN.11023']).iterator():
+            raw = (o.parsed_meta or {}).get('raw_xml') or ''
+            if doc_id in raw:
+                found = o
+                break
+        print(f'  Outbox by DocumentID:  {found and found.msg_type} '
+              f'env={found and found.envelope_id}')
 
 print('\n=== Что хранится в parsed_meta CMN.11349 outbox observations? ===')
 obs = AltaOutboxObservation.objects.filter(msg_type='CMN.11349').first()
