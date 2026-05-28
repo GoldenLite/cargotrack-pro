@@ -88,24 +88,28 @@ CARGOTRACK_ATTEMPTS_COUNT_HEADER         = 'Переподачи'
 EXPORT_HAWB_HEADER               = 'Номер накладной'
 EXPORT_TRANSPORT_DOC_HEADER      = 'Номер транспортного документа'
 EXPORT_DECLARATION_HEADER        = 'Регистрационный номер ДТ'
+EXPORT_DECLARATION_FORM_HEADER   = 'Тип декларации'
+EXPORT_ED_STATUS_HEADER          = 'Статус ЭД'
+EXPORT_FILED_DATE_HEADER         = 'Дата подачи'
 EXPORT_RELEASE_DATE_HEADER       = 'Дата выпуска'
 EXPORT_GOODS_COUNT_HEADER        = 'Количество позиций'
 EXPORT_CUSTOMS_REQUESTS_HEADER   = 'Запросы таможни'
 EXPORT_CUSTOMS_REQUESTS_COUNT_HEADER = 'Количество запросов'
 EXPORT_ATTEMPTS_COUNT_HEADER     = 'Количество переподач'
-EXPORT_DECLARATION_FORM_HEADER   = 'Тип декларации'
 
 # Точный порядок колонок при первой автонастройке (append-row).
 EXPORT_HEADERS_ORDER = [
     EXPORT_HAWB_HEADER,
     EXPORT_TRANSPORT_DOC_HEADER,
     EXPORT_DECLARATION_HEADER,
+    EXPORT_DECLARATION_FORM_HEADER,
+    EXPORT_ED_STATUS_HEADER,
+    EXPORT_FILED_DATE_HEADER,
     EXPORT_RELEASE_DATE_HEADER,
     EXPORT_GOODS_COUNT_HEADER,
     EXPORT_CUSTOMS_REQUESTS_HEADER,
     EXPORT_CUSTOMS_REQUESTS_COUNT_HEADER,
     EXPORT_ATTEMPTS_COUNT_HEADER,
-    EXPORT_DECLARATION_FORM_HEADER,
 ]
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
@@ -782,12 +786,14 @@ def _write_hawb_date(hawb: HouseWaybill, value, header_name: str,
 
 
 def write_filed_date_for_hawb(hawb: HouseWaybill) -> bool:
-    """Пишет HouseWaybill.filed_date в Sheets-колонку «CargoTrack: дата подачи».
+    """Пишет HouseWaybill.filed_date в Sheets.
 
-    Для EXPORT-HAWB filed_date в Sheets не пишем (юзер не просил).
+    Импорт → «CargoTrack: дата подачи» в «Общее».
+    Экспорт → «Дата подачи» в «Экспортная статистика».
     """
     return _write_hawb_date(hawb, hawb.filed_date,
-                            CARGOTRACK_FILED_DATE_HEADER, 'filed_date')
+                            CARGOTRACK_FILED_DATE_HEADER, 'filed_date',
+                            export_header_name=EXPORT_FILED_DATE_HEADER)
 
 
 def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
@@ -1007,9 +1013,14 @@ def _chunked_batch_update(ws, updates: list, log_label: str,
 
 
 def batch_write_filed_dates_for_hawbs(hawbs: list) -> int:
-    """Batch writeback filed_date — для resync_filed_dates."""
-    return _batch_write_hawb_dates(hawbs, 'filed_date',
-                                   CARGOTRACK_FILED_DATE_HEADER, 'filed_date')
+    """Batch writeback filed_date — для resync_filed_dates.
+
+    Для EXPORT-HAWB пишет в «Дата подачи» export-вкладки.
+    """
+    return _batch_write_hawb_dates(
+        hawbs, 'filed_date',
+        CARGOTRACK_FILED_DATE_HEADER, 'filed_date',
+        export_header_name=EXPORT_FILED_DATE_HEADER)
 
 
 def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
@@ -1213,6 +1224,28 @@ def batch_write_declaration_form_for_hawbs(hawbs: list) -> int:
         EXPORT_DECLARATION_FORM_HEADER, 'declaration_form',
         formatter=lambda v: v or '',
         value_provider=_declaration_form_for_hawb,
+        source_kind='export',
+    )
+
+
+def _ed_status_for_hawb(hawb) -> str:
+    """Реконструированный ЭД-статус HAWB. Перед каждым writeback пересчитываем
+    из inbox/outbox, чтобы не зависеть от того, успели ли мы где-то обновить
+    HAWB.ed_status поле."""
+    from cargo.services.alta.ed_status import compute_ed_status
+    return compute_ed_status(hawb)
+
+
+def batch_write_ed_status_for_hawbs(hawbs: list) -> int:
+    """Batch writeback ed_status в «Статус ЭД» — только в export-вкладке."""
+    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+    if not exp:
+        return 0
+    return _batch_write_hawb_dates(
+        exp, 'ed_status',
+        EXPORT_ED_STATUS_HEADER, 'ed_status',
+        formatter=lambda v: v or '',
+        value_provider=_ed_status_for_hawb,
         source_kind='export',
     )
 

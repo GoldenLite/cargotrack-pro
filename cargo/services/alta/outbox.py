@@ -652,6 +652,7 @@ def _writeback_export_hawbs(hawbs: list) -> None:
         from cargo.services.sheets.writeback import (
             ensure_export_rows_for_hawbs,
             batch_write_declarations_for_hawbs,
+            batch_write_filed_dates_for_hawbs,
             batch_write_release_dates_for_hawbs,
             batch_write_goods_count_for_hawbs,
             batch_write_customs_requests_for_hawbs,
@@ -659,6 +660,7 @@ def _writeback_export_hawbs(hawbs: list) -> None:
             batch_write_attempts_count_for_hawbs,
             batch_write_transport_doc_for_hawbs,
             batch_write_declaration_form_for_hawbs,
+            batch_write_ed_status_for_hawbs,
             signals_suppressed,
         )
         if signals_suppressed():
@@ -666,11 +668,13 @@ def _writeback_export_hawbs(hawbs: list) -> None:
         ensure_export_rows_for_hawbs(hawbs)
         batch_write_transport_doc_for_hawbs(hawbs)
         batch_write_declarations_for_hawbs(hawbs)
+        batch_write_filed_dates_for_hawbs(hawbs)
         batch_write_release_dates_for_hawbs(hawbs)
         batch_write_goods_count_for_hawbs(hawbs)
         batch_write_customs_requests_for_hawbs(hawbs)
         batch_write_customs_requests_count_for_hawbs(hawbs)
         batch_write_attempts_count_for_hawbs(hawbs)
         batch_write_declaration_form_for_hawbs(hawbs)
+        batch_write_ed_status_for_hawbs(hawbs)
     except Exception:
         logger.exception('export writeback failed')

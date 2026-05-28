@@ -798,6 +798,11 @@ class HouseWaybill(models.Model):
         'Тип декларации', max_length=8, choices=DECLARATION_FORM_CHOICES, blank=True,
         help_text='ПТДЭГ → ДТЭГ → ДТ. Перезаписывается при появлении нового '
                   'outbox-сообщения этого типа (естественная воронка).')
+    ed_status = models.CharField(
+        'Статус ЭД', max_length=64, blank=True,
+        help_text='Реконструированный статус из ED-обмена с таможней '
+                  '(аналог "ЭД-статус" в Альте). Обновляется при каждом '
+                  'входящем CMN-сообщении. Фраза + опц. флаги через "; ".')
     goods_count  = models.PositiveIntegerField(
         'Количество позиций', null=True, blank=True,
         help_text='Число товарных позиций в ДТ. CMN.11023: общее по декларации '

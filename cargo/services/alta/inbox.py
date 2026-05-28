@@ -292,24 +292,36 @@ def recompute_declaration(cargo: Optional[Cargo],
         # разными партиями (HAWB-номера не уникальны глобально).
         cond = cond | (Q(raw_xml__icontains=hawb.hawb_number) & Q(cargo=hawb.mawb))
 
-    # ДТ в Sheets показываем ТОЛЬКО когда есть факт выпуска — release_date
-    # и customs_declaration_number идут в паре. HOLD/REJECTED означают что
-    # выпуска нет, ДТ-номер в таких случаях скрываем (см. clear-logic в
-    # change_customs_status). withdrawn — отзыв декларации, обнуляет ДТ.
+    # Рег.номер ДТ записываем как только он впервые появится в любом значимом
+    # сообщении от таможни (released/rejected/examination/hold/withdrawn/
+    # registered) — раньше ограничивались released/withdrawn, что задерживало
+    # появление номера в Sheets до момента выпуска. Withdrawn по-прежнему
+    # стирает номер. Если у latest сообщения нет GTDNumber — ищем любое более
+    # раннее с непустым GTDNumber.
     qs = AltaInboxMessage.objects.filter(
         cond,
-        msg_kind__in=('released', 'withdrawn'),
-    )
+    ).exclude(msg_kind__in=('info', 'svh_placed',
+                            'svh_do1_registered', 'svh_do2_registered',
+                            'customs_request'))
     latest = qs.order_by('-prepared_at', '-received_at').first()
     if not latest:
         return []
 
     if latest.msg_kind == 'withdrawn':
         target_decl = ''
-    else:  # released
+    else:
         target_decl = _build_declaration_number(latest.parsed_meta or {})
         if not target_decl:
-            return []
+            # Latest без GTDNumber — поднимем самое свежее сообщение в очереди
+            # у которого номер есть.
+            for m in qs.order_by('-prepared_at', '-received_at'):
+                t = _build_declaration_number(m.parsed_meta or {})
+                if t:
+                    target_decl = t
+                    latest = m
+                    break
+            if not target_decl:
+                return []
 
     from django.db import transaction
     with transaction.atomic():
@@ -471,10 +483,12 @@ def _sync_filed_date_by_declaration(decl_number: str) -> None:
 
 
 def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
-    """Batch-writeback (decl + filed_date) для списка HAWB.
+    """Batch-writeback (decl + filed_date + ed_status) для списка HAWB.
 
     Если signals_suppressed() — пропускаем (бэдчевая операция типа reparse
     отвечает за writeback сама в конце через resync_* команды).
+    Для экспортных HAWB дополнительно гарантирует строку в export-вкладке
+    и пишет «Статус ЭД».
     """
     if not hawbs:
         return
@@ -482,14 +496,22 @@ def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
         from cargo.services.sheets.writeback import (
             batch_write_declarations_for_hawbs,
             batch_write_filed_dates_for_hawbs,
+            batch_write_ed_status_for_hawbs,
+            ensure_export_rows_for_hawbs,
             signals_suppressed,
+            _kind_for_hawb,
         )
         if signals_suppressed():
             return
         for h in hawbs:
             h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
+        # Для экспортных HAWB убедимся что строка в Sheets уже есть.
+        exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+        if exp:
+            ensure_export_rows_for_hawbs(exp)
         batch_write_declarations_for_hawbs(hawbs)
         batch_write_filed_dates_for_hawbs(hawbs)
+        batch_write_ed_status_for_hawbs(hawbs)
     except Exception:
         logger.exception('sheets writeback after declaration write failed')
 
@@ -653,6 +675,11 @@ def apply_status(msg: AltaInboxMessage,
                 # decl уже записан выше в _writeback_hawbs (recompute path).
                 # Но если status RELEASED стёр decl через Rule 4 — следующий
                 # recompute восстановит. Здесь не дублируем.
+                # ed_status — пересчитаем и запишем для экспортных HAWB.
+                from cargo.services.sheets.writeback import (
+                    batch_write_ed_status_for_hawbs,
+                )
+                batch_write_ed_status_for_hawbs(applied_hawbs)
             except Exception:
                 logger.exception('batch writeback after apply_status failed')
         threading.Thread(target=_bg_batch, daemon=True).start()
@@ -1326,15 +1353,21 @@ def apply_customs_request(msg: AltaInboxMessage) -> None:
 
 
 def _writeback_customs_requests_for_hawb(hawb: HouseWaybill) -> None:
-    """Запускает writeback запросов и счётчика в Sheets для одной HAWB."""
+    """Запускает writeback запросов, счётчика и ed_status в Sheets для HAWB."""
     def _run():
         try:
             from cargo.services.sheets.writeback import (
                 batch_write_customs_requests_for_hawbs,
                 batch_write_customs_requests_count_for_hawbs,
+                batch_write_ed_status_for_hawbs,
+                ensure_export_rows_for_hawbs,
+                _kind_for_hawb,
             )
+            if _kind_for_hawb(hawb) == 'export':
+                ensure_export_rows_for_hawbs([hawb])
             batch_write_customs_requests_for_hawbs([hawb])
             batch_write_customs_requests_count_for_hawbs([hawb])
+            batch_write_ed_status_for_hawbs([hawb])
         except ImportError:
             pass
         except Exception:
