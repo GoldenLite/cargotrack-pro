@@ -35,8 +35,12 @@ from cargo.services.sheets.writeback import (
     CARGOTRACK_FILED_DATE_HEADER,
     CARGOTRACK_RELEASE_DATE_HEADER,
     CARGOTRACK_GOODS_COUNT_HEADER,
+    CARGOTRACK_CUSTOMS_REQUESTS_HEADER,
+    CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER,
     _local_date_str,
     _retry_api,
+    _customs_requests_text,
+    _customs_requests_count,
 )
 
 
@@ -96,6 +100,14 @@ def _goods_count(h):
     return '' if h.goods_count is None else str(h.goods_count)
 
 
+def _customs_requests(h):
+    return _customs_requests_text(h)
+
+
+def _customs_requests_count_audit(h):
+    return _customs_requests_count(h)
+
+
 CHECKS = [
     (CARGOTRACK_COL_HEADER,            _decl,             'declaration'),
     (CARGOTRACK_SVH_LICENSE_HEADER,    _lic,              'svh_license'),
@@ -106,6 +118,10 @@ CHECKS = [
     (CARGOTRACK_GOODS_COUNT_HEADER,    _goods_count,      'goods_count'),
     (CARGOTRACK_FILED_DATE_HEADER,     _filed,            'filed_date'),
     (CARGOTRACK_RELEASE_DATE_HEADER,   _release,          'release_date'),
+    (CARGOTRACK_CUSTOMS_REQUESTS_HEADER,       _customs_requests,
+        'customs_requests'),
+    (CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER, _customs_requests_count_audit,
+        'customs_requests_count'),
     # Удалены 2026-05-26: cargo_mawb, svh_do1_sent_at, svh_do2_send_at —
     # юзер не использует. Поля в БД остаются для внутренней логики.
 ]

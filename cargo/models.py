@@ -2015,6 +2015,61 @@ class AltaOutboxObservation(models.Model):
         return f'{self.msg_type} {self.envelope_id}{link}'
 
 
+class HawbCustomsRequest(models.Model):
+    """Запрос документов от таможни (MY.11003) — привязан к HAWB.
+
+    Один MY.11003 = один запрос. Привязка к HAWB через:
+      1) InitialEnvelopeID → AltaOutboxObservation (наше исходящее CMN.11349)
+         → parsed_meta['raw_xml'] (=CMN.11349 XML);
+      2) Position из MY.11003 → конкретный HouseShipment в CMN.11349 →
+         HAWB-номер этого HouseShipment.
+
+    Если CMN.11349 (наше исходящее) не сматчилось — request остаётся без
+    hawb (hawb=NULL) для последующего ручного разбора.
+
+    В Sheets отображается агрегированно: все запросы одной HAWB
+    собираются в одну ячейку колонки «Запросы таможни» с группировкой
+    по дате (см. cargo/services/sheets/writeback.py).
+    """
+    envelope_id        = models.CharField('Envelope ID', max_length=64,
+                                          unique=True, db_index=True)
+    initial_envelope_id = models.CharField('InitialEnvelopeID (наш CMN)',
+                                           max_length=64, blank=True, db_index=True)
+    received_at        = models.DateTimeField('Получено', auto_now_add=True,
+                                              db_index=True)
+    prepared_at        = models.DateTimeField('Время отправки (envelope)',
+                                              null=True, blank=True)
+    request_dt_msk     = models.DateTimeField(
+        'Время запроса (МСК)', null=True, blank=True, db_index=True,
+        help_text='RequestDate+RequestTime, переведённое в МСК. '
+                  'Используется для группировки в Sheets.')
+    date_limit         = models.DateField('Срок ответа', null=True, blank=True)
+    request_position   = models.PositiveIntegerField(
+        'Позиция товара в декларации', null=True, blank=True)
+    requestor_name     = models.CharField('Имя инспектора', max_length=200, blank=True)
+    customs_code       = models.CharField('Код таможни', max_length=20, blank=True)
+    office_name        = models.CharField('Таможенный пост', max_length=200, blank=True)
+    request_text       = models.TextField('Текст запроса', blank=True)
+    raw_xml            = models.TextField('Полный XML', blank=True)
+    parsed_meta        = models.JSONField('Распаршенные поля', default=dict, blank=True)
+
+    hawb = models.ForeignKey(HouseWaybill, on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name='customs_requests',
+                             verbose_name='HAWB (привязка по Position)')
+
+    class Meta:
+        verbose_name = 'Запрос таможни (MY.11003)'
+        verbose_name_plural = 'Запросы таможни (входящие MY.11003)'
+        ordering = ['-request_dt_msk', '-received_at']
+        indexes = [
+            models.Index(fields=['hawb', '-request_dt_msk']),
+            models.Index(fields=['initial_envelope_id']),
+        ]
+
+    def __str__(self) -> str:
+        return f'MY.11003 {self.envelope_id} pos={self.request_position}'
+
+
 # ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────
 
 class SheetSource(models.Model):

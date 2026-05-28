@@ -76,6 +76,10 @@ CARGOTRACK_RELEASE_DATE_HEADER = 'CargoTrack: дата выпуска'
 # По юзерскому запросу: имя без префикса 'CargoTrack:' и физически слева
 # от 'CargoTrack: дата подачи' в Sheets.
 CARGOTRACK_GOODS_COUNT_HEADER  = 'Количество позиций'
+# Запросы документов от таможни (MY.11003) — собранный текст с группировкой
+# по датам, и счётчик запросов.
+CARGOTRACK_CUSTOMS_REQUESTS_HEADER       = 'Запросы таможни'
+CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER = 'Количество запросов'
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
 # данные представления вместо ДО1). Команда cleanup_svh_legacy_columns
@@ -829,6 +833,67 @@ def batch_write_goods_count_for_hawbs(hawbs: list) -> int:
         CARGOTRACK_GOODS_COUNT_HEADER, 'goods_count',
         before_header=CARGOTRACK_FILED_DATE_HEADER,
         formatter=_format_int,
+    )
+
+
+def _customs_requests_text(hawb) -> str:
+    """Собирает текст ячейки «Запросы таможни» из всех HawbCustomsRequest.
+
+    Формат:
+        DD.MM.YYYY
+        - <текст> - HH:MM:SS
+        - <текст> - HH:MM:SS
+
+        DD.MM.YYYY
+        - ...
+
+    Группировка по дате (МСК), сортировка по времени внутри.
+    """
+    requests = list(hawb.customs_requests.filter(
+        request_dt_msk__isnull=False).order_by('request_dt_msk'))
+    if not requests:
+        return ''
+    from collections import OrderedDict
+    from django.utils import timezone as _tz
+    grouped: 'OrderedDict[str, list]' = OrderedDict()
+    for r in requests:
+        local = (_tz.localtime(r.request_dt_msk)
+                 if _tz.is_aware(r.request_dt_msk) else r.request_dt_msk)
+        d = local.strftime('%d.%m.%Y')
+        grouped.setdefault(d, []).append((local.strftime('%H:%M:%S'),
+                                          (r.request_text or '').strip()))
+    lines: list[str] = []
+    for date, items in grouped.items():
+        if lines:
+            lines.append('')
+        lines.append(date)
+        for tm, text in items:
+            lines.append(f'- {text} - {tm}')
+    return '\n'.join(lines)
+
+
+def _customs_requests_count(hawb) -> str:
+    n = hawb.customs_requests.count()
+    return '' if n == 0 else str(n)
+
+
+def batch_write_customs_requests_for_hawbs(hawbs: list) -> int:
+    """Batch writeback колонки «Запросы таможни» (полный текст, multi-line)."""
+    return _batch_write_hawb_dates(
+        hawbs, '__customs_requests__',
+        CARGOTRACK_CUSTOMS_REQUESTS_HEADER, 'customs_requests',
+        formatter=lambda v: v or '',
+        value_provider=_customs_requests_text,
+    )
+
+
+def batch_write_customs_requests_count_for_hawbs(hawbs: list) -> int:
+    """Batch writeback колонки «Количество запросов»."""
+    return _batch_write_hawb_dates(
+        hawbs, '__customs_requests_count__',
+        CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER, 'customs_requests_count',
+        formatter=lambda v: v or '',
+        value_provider=_customs_requests_count,
     )
 
 

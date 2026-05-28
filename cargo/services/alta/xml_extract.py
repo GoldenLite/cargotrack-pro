@@ -772,3 +772,102 @@ def count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
         n = len(_GOODS_ITEM_DETAILS_OPEN_RE.findall(body))
         out[hawb] = out.get(hawb, 0) + n
     return out
+
+
+def hawb_for_position_cmn_11349(xml_text: str, position: int) -> str:
+    """Возвращает HAWB-номер, к которому относится N-я товарная позиция декларации.
+
+    Используется при матчинге MY.11003 (запросы таможни) к конкретной HAWB.
+    В MY.11003 есть <rid:Position> — порядковый номер товара в декларации.
+    HouseShipment'ы идут в порядке появления; в каждом N товаров
+    (GoodsItemDetails). Position=K → определяем какой HouseShipment
+    содержит K-ю позицию.
+
+    Пример: HouseShipment1 (3 товара) → позиции 1-3; HouseShipment2
+    (1 товар) → позиция 4; HouseShipment3 (1) → позиция 5;
+    HouseShipment4 (5) → позиции 6-10.
+
+    Возвращает HAWB или '' если позиция вне диапазона / HAWB не нашли.
+    """
+    if not position or position < 1:
+        return ''
+    cursor = 0
+    for m in _HOUSE_SHIPMENT_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        hawb = ''
+        for nm, mode in _HAWB_PAIR_RE.findall(body):
+            if mode.strip() == '02021':
+                hawb = nm.strip()
+                break
+        n = len(_GOODS_ITEM_DETAILS_OPEN_RE.findall(body))
+        if n <= 0:
+            continue
+        if cursor < position <= cursor + n:
+            return hawb
+        cursor += n
+    return ''
+
+
+# ─── MY.11003 (запрос документов от таможни) ──────────────────────────
+#
+# Структура (разобрано 2026-05-28 на 12 дампах):
+#   <env:Header>
+#     <roi:EnvelopeID>UUID-этого-сообщения</roi:EnvelopeID>
+#     <InitialEnvelopeID>UUID-нашей-исходящей-CMN.11349</InitialEnvelopeID>
+#     <roi:PreparationDateTime>...</roi:PreparationDateTime>
+#   </env:Header>
+#   <env:Body>
+#     <rid:ReqInventoryDoc>
+#       <rid:RequestNumber>1</rid:RequestNumber>
+#       <rid:RequestDate>2026-05-28</rid:RequestDate>
+#       <rid:RequestTime>17:04:22+10:00</rid:RequestTime>   ← TZ таможни
+#       <rid:DateLimit>2026-05-29</rid:DateLimit>
+#       <rid:RequestedDoc>
+#         <cat_ru:PrDocumentName>текст запроса</cat_ru:PrDocumentName>
+#         <rid:Position>2</rid:Position>                    ← позиция товара
+#         <rid:RequestorName>имя инспектора</rid:RequestorName>
+#       </rid:RequestedDoc>
+#       <rid:Customs>
+#         <cat_ru:Code>10702020</cat_ru:Code>
+#         <cat_ru:OfficeName>т/п Первомайский</cat_ru:OfficeName>
+#       </rid:Customs>
+#     </rid:ReqInventoryDoc>
+#   </env:Body>
+#
+# Один MY.11003 = один запрос. Несколько запросов на одну подачу →
+# несколько отдельных файлов с одинаковым InitialEnvelopeID.
+
+
+def parse_my_11003(xml_text: str) -> dict:
+    """Парсит MY.11003 (запрос документов от таможни) → parsed_meta."""
+    from datetime import datetime, timezone as _tz, timedelta
+
+    out = {
+        'msg_type':            'MY.11003',
+        'envelope_id':         _first(xml_text, 'EnvelopeID'),
+        'initial_envelope_id': _first(xml_text, 'InitialEnvelopeID'),
+        'prepared_at':         _first(xml_text, 'PreparationDateTime'),
+        'request_number':      _first(xml_text, 'RequestNumber'),
+        'send_date':           _first(xml_text, 'SendDate'),
+        'request_date':        _first(xml_text, 'RequestDate'),
+        'request_time':        _first(xml_text, 'RequestTime'),
+        'date_limit':          _first(xml_text, 'DateLimit'),
+        'request_position':    _first(xml_text, 'Position'),
+        'requestor_name':      _first(xml_text, 'RequestorName'),
+        'request_text':        _first(xml_text, 'PrDocumentName'),
+        'customs_code':        _first(xml_text, 'CustomsCode'),
+        'office_name':         _first(xml_text, 'OfficeName'),
+        'request_dt_msk':      '',
+    }
+    # Объединяем RequestDate + RequestTime (с локальным TZ таможни) → MSK ISO
+    if out['request_date'] and out['request_time']:
+        try:
+            iso = f'{out["request_date"]}T{out["request_time"]}'
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            msk = dt.astimezone(_tz(timedelta(hours=3)))
+            out['request_dt_msk'] = msk.isoformat()
+        except (ValueError, TypeError):
+            pass
+    return out

@@ -47,6 +47,9 @@ MSG_KIND_MAP: dict[str, str] = {
                                         # Рег.номер ДО2 + дата+время выпуска (SendDate/Time).
                                         # Связь с Cargo через MAWB в TransportDoc или ссылку
                                         # на ДО-1 в Comments.
+    'MY.11003':  'customs_request',     # ReqInventoryDoc — запрос документов от инспектора.
+                                        # InitialEnvelopeID → наша CMN.11349 (исходящая),
+                                        # Position → конкретный товар → HAWB.
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -1079,9 +1082,141 @@ def _writeback_svh_do2_hawbs(hawbs: list[HouseWaybill]) -> None:
         logger.exception('svh ДО2 writeback failed')
 
 
+def apply_customs_request(msg: AltaInboxMessage) -> None:
+    """Создаёт/обновляет HawbCustomsRequest по содержимому MY.11003.
+
+    Привязка к HAWB:
+      1) ищем AltaOutboxObservation(envelope_id=InitialEnvelopeID) —
+         это наше исходящее CMN.11349/11023 на которое таможня отвечает;
+      2) если есть raw_xml + Position → вычисляем конкретную HAWB по
+         диапазонам товаров (xml_extract.hawb_for_position_cmn_11349);
+      3) если CMN.11023 (одна декларация, привязка по позиции невозможна)
+         или CMN.11349 не имеет raw_xml — берём первую HAWB из hawbs
+         (fallback) и оставляем без точного матчинга.
+
+    Идемпотентно по envelope_id (unique на HawbCustomsRequest).
+    """
+    from cargo.models import (AltaOutboxObservation, HawbCustomsRequest,
+                              HouseWaybill)
+    from cargo.services.alta.xml_extract import (
+        hawb_for_position_cmn_11349, parse_my_11003,
+    )
+    from django.utils.dateparse import parse_datetime
+
+    # Парсим raw_xml если есть, иначе берём parsed_meta as is
+    pm = dict(msg.parsed_meta or {})
+    if msg.raw_xml and 'request_dt_msk' not in pm:
+        pm.update(parse_my_11003(msg.raw_xml))
+        msg.parsed_meta = pm
+
+    initial_env = (pm.get('initial_envelope_id') or '').strip()
+    position_raw = (pm.get('request_position') or '').strip()
+    try:
+        position = int(position_raw) if position_raw else None
+    except ValueError:
+        position = None
+
+    hawb: Optional[HouseWaybill] = None
+    if initial_env:
+        outbox = (AltaOutboxObservation.objects
+                  .filter(envelope_id=initial_env).first())
+        if outbox:
+            outbox_meta = outbox.parsed_meta or {}
+            raw_xml = outbox_meta.get('raw_xml') or ''
+            hawb_list = outbox_meta.get('hawbs') or []
+
+            if outbox.msg_type == 'CMN.11349' and raw_xml and position:
+                hn = hawb_for_position_cmn_11349(raw_xml, position)
+                if hn:
+                    hawb = HouseWaybill.objects.filter(
+                        hawb_number__iexact=hn).first()
+            if not hawb and hawb_list:
+                # Fallback: единственная HAWB в подаче — её и берём
+                if len(hawb_list) == 1:
+                    hawb = HouseWaybill.objects.filter(
+                        hawb_number__iexact=str(hawb_list[0]).strip()).first()
+        else:
+            logger.info('MY.11003 %s: outbox %s не найден в БД',
+                        msg.envelope_id, initial_env)
+
+    # Соберём datetime запроса в МСК
+    request_dt = None
+    dt_str = (pm.get('request_dt_msk') or '').strip()
+    if dt_str:
+        request_dt = parse_datetime(dt_str)
+
+    date_limit = None
+    dl_str = (pm.get('date_limit') or '').strip()
+    if dl_str:
+        from datetime import datetime as _dt
+        try:
+            date_limit = _dt.strptime(dl_str, '%Y-%m-%d').date()
+        except ValueError:
+            pass
+
+    request_text = (pm.get('request_text') or '').strip()
+    if not request_text:
+        # Иногда PrDocumentName может быть в parsed_meta под другим ключом
+        request_text = (pm.get('requested_doc_name') or '').strip()
+
+    req, _ = HawbCustomsRequest.objects.update_or_create(
+        envelope_id=msg.envelope_id,
+        defaults={
+            'initial_envelope_id': initial_env,
+            'prepared_at':         msg.prepared_at,
+            'request_dt_msk':      request_dt,
+            'date_limit':          date_limit,
+            'request_position':    position,
+            'requestor_name':      pm.get('requestor_name', ''),
+            'customs_code':        pm.get('customs_code', ''),
+            'office_name':         pm.get('office_name', ''),
+            'request_text':        request_text,
+            'raw_xml':             msg.raw_xml or '',
+            'parsed_meta':         pm,
+            'hawb':                hawb,
+        },
+    )
+    logger.info('MY.11003 %s applied: hawb=%s position=%s',
+                msg.envelope_id, hawb and hawb.hawb_number, position)
+
+    if hawb:
+        _writeback_customs_requests_for_hawb(hawb)
+
+
+def _writeback_customs_requests_for_hawb(hawb: HouseWaybill) -> None:
+    """Запускает writeback запросов и счётчика в Sheets для одной HAWB."""
+    def _run():
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_customs_requests_for_hawbs,
+                batch_write_customs_requests_count_for_hawbs,
+            )
+            batch_write_customs_requests_for_hawbs([hawb])
+            batch_write_customs_requests_count_for_hawbs([hawb])
+        except ImportError:
+            pass
+        except Exception:
+            logger.exception('customs_request writeback failed for HAWB %s',
+                             hawb.hawb_number)
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
+
+    # ── Запрос документов (MY.11003) ──
+    if msg.msg_kind == 'customs_request':
+        try:
+            apply_customs_request(msg)
+            msg.status_applied = True
+        except Exception as e:
+            logger.exception('apply_customs_request failed')
+            msg.parsed_meta = {**(msg.parsed_meta or {}), 'apply_error': str(e)}
+            msg.status_applied = False
+        msg.save(update_fields=['msg_kind', 'parsed_meta',
+                                'status_applied'])
+        return
 
     # ── СВХ-ветка: представление (CMN.13029) ──
     if msg.msg_kind == 'svh_placed':
