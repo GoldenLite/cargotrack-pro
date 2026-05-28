@@ -2031,8 +2031,14 @@ class HawbCustomsRequest(models.Model):
     собираются в одну ячейку колонки «Запросы таможни» с группировкой
     по дате (см. cargo/services/sheets/writeback.py).
     """
-    envelope_id        = models.CharField('Envelope ID', max_length=64,
-                                          unique=True, db_index=True)
+    envelope_id        = models.CharField('Envelope ID (ED.11003)',
+                                          max_length=64, db_index=True)
+    request_position_id = models.CharField(
+        'RequestPositionID (UUID запроса)', max_length=64, blank=True,
+        db_index=True,
+        help_text='Один ED.11003 envelope содержит N <RequestedDoc>. '
+                  'request_position_id уникально идентифицирует запрос '
+                  'в рамках envelope.')
     initial_envelope_id = models.CharField('InitialEnvelopeID (наш CMN)',
                                            max_length=64, blank=True, db_index=True)
     received_at        = models.DateTimeField('Получено', auto_now_add=True,
@@ -2058,16 +2064,21 @@ class HawbCustomsRequest(models.Model):
                              verbose_name='HAWB (привязка по Position)')
 
     class Meta:
-        verbose_name = 'Запрос таможни (MY.11003)'
-        verbose_name_plural = 'Запросы таможни (входящие MY.11003)'
+        verbose_name = 'Запрос таможни (ED.11003)'
+        verbose_name_plural = 'Запросы таможни (входящие ED.11003)'
         ordering = ['-request_dt_msk', '-received_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['envelope_id', 'request_position_id'],
+                name='hawbcustomsrequest_env_pos_uniq'),
+        ]
         indexes = [
             models.Index(fields=['hawb', '-request_dt_msk']),
             models.Index(fields=['initial_envelope_id']),
         ]
 
     def __str__(self) -> str:
-        return f'MY.11003 {self.envelope_id} pos={self.request_position}'
+        return f'ED.11003 {self.envelope_id} pos={self.request_position}'
 
 
 # ─────────────────────────── ИМПОРТ ИЗ GOOGLE SHEETS ───────────────────────────

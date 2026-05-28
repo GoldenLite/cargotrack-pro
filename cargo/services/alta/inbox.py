@@ -47,9 +47,12 @@ MSG_KIND_MAP: dict[str, str] = {
                                         # Рег.номер ДО2 + дата+время выпуска (SendDate/Time).
                                         # Связь с Cargo через MAWB в TransportDoc или ссылку
                                         # на ДО-1 в Comments.
-    'MY.11003':  'customs_request',     # ReqInventoryDoc — запрос документов от инспектора.
-                                        # InitialEnvelopeID → наша CMN.11349 (исходящая),
-                                        # Position → конкретный товар → HAWB.
+    'ED.11003':  'customs_request',     # ReqInventoryDoc — запросы документов от инспектора.
+                                        # Один envelope может содержать N <RequestedDoc>
+                                        # блоков (запросов). InitialEnvelopeID → наша
+                                        # CMN.11349, Position → конкретный товар → HAWB.
+                                        # (Alta-ГТД часто переименовывает файл в Alta_MY11003,
+                                        # но MessageType в теле всегда ED.11003.)
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -1083,104 +1086,111 @@ def _writeback_svh_do2_hawbs(hawbs: list[HouseWaybill]) -> None:
 
 
 def apply_customs_request(msg: AltaInboxMessage) -> None:
-    """Создаёт/обновляет HawbCustomsRequest по содержимому MY.11003.
+    """Создаёт/обновляет HawbCustomsRequest для каждого <RequestedDoc>
+    в одном ED.11003 envelope (один envelope может нести N запросов).
 
     Привязка к HAWB:
-      1) ищем AltaOutboxObservation(envelope_id=InitialEnvelopeID) —
-         это наше исходящее CMN.11349/11023 на которое таможня отвечает;
+      1) AltaOutboxObservation(envelope_id=InitialEnvelopeID) — наше
+         исходящее CMN.11349;
       2) если есть raw_xml + Position → вычисляем конкретную HAWB по
-         диапазонам товаров (xml_extract.hawb_for_position_cmn_11349);
-      3) если CMN.11023 (одна декларация, привязка по позиции невозможна)
-         или CMN.11349 не имеет raw_xml — берём первую HAWB из hawbs
-         (fallback) и оставляем без точного матчинга.
-
-    Идемпотентно по envelope_id (unique на HawbCustomsRequest).
+         диапазонам товаров (hawb_for_position_cmn_11349);
+      3) fallback: одна HAWB в подаче → её и берём.
     """
     from cargo.models import (AltaOutboxObservation, HawbCustomsRequest,
                               HouseWaybill)
     from cargo.services.alta.xml_extract import (
-        hawb_for_position_cmn_11349, parse_my_11003,
+        hawb_for_position_cmn_11349, parse_ed_11003,
     )
     from django.utils.dateparse import parse_datetime
+    from datetime import datetime as _dt
 
-    # Парсим raw_xml если есть, иначе берём parsed_meta as is
+    # Парсим raw_xml целиком — нужен массив requests
     pm = dict(msg.parsed_meta or {})
-    if msg.raw_xml and 'request_dt_msk' not in pm:
-        pm.update(parse_my_11003(msg.raw_xml))
+    if msg.raw_xml:
+        pm.update(parse_ed_11003(msg.raw_xml))
         msg.parsed_meta = pm
 
-    initial_env = (pm.get('initial_envelope_id') or '').strip()
-    position_raw = (pm.get('request_position') or '').strip()
-    try:
-        position = int(position_raw) if position_raw else None
-    except ValueError:
-        position = None
+    requests = pm.get('requests') or []
+    if not requests:
+        logger.info('ED.11003 %s: no <RequestedDoc> blocks found',
+                    msg.envelope_id)
+        return
 
-    hawb: Optional[HouseWaybill] = None
+    initial_env = (pm.get('initial_envelope_id') or '').strip()
+    outbox_raw_xml = ''
+    outbox_hawbs: list = []
+    outbox_msg_type = ''
     if initial_env:
         outbox = (AltaOutboxObservation.objects
                   .filter(envelope_id=initial_env).first())
         if outbox:
             outbox_meta = outbox.parsed_meta or {}
-            raw_xml = outbox_meta.get('raw_xml') or ''
-            hawb_list = outbox_meta.get('hawbs') or []
-
-            if outbox.msg_type == 'CMN.11349' and raw_xml and position:
-                hn = hawb_for_position_cmn_11349(raw_xml, position)
-                if hn:
-                    hawb = HouseWaybill.objects.filter(
-                        hawb_number__iexact=hn).first()
-            if not hawb and hawb_list:
-                # Fallback: единственная HAWB в подаче — её и берём
-                if len(hawb_list) == 1:
-                    hawb = HouseWaybill.objects.filter(
-                        hawb_number__iexact=str(hawb_list[0]).strip()).first()
+            outbox_raw_xml = outbox_meta.get('raw_xml') or ''
+            outbox_hawbs = outbox_meta.get('hawbs') or []
+            outbox_msg_type = outbox.msg_type
         else:
-            logger.info('MY.11003 %s: outbox %s не найден в БД',
+            logger.info('ED.11003 %s: outbox %s не найден',
                         msg.envelope_id, initial_env)
 
-    # Соберём datetime запроса в МСК
-    request_dt = None
-    dt_str = (pm.get('request_dt_msk') or '').strip()
-    if dt_str:
-        request_dt = parse_datetime(dt_str)
-
-    date_limit = None
-    dl_str = (pm.get('date_limit') or '').strip()
-    if dl_str:
-        from datetime import datetime as _dt
+    touched_hawbs: set = set()
+    for req in requests:
+        position_raw = (req.get('position') or '').strip()
         try:
-            date_limit = _dt.strptime(dl_str, '%Y-%m-%d').date()
+            position = int(position_raw) if position_raw else None
         except ValueError:
-            pass
+            position = None
 
-    request_text = (pm.get('request_text') or '').strip()
-    if not request_text:
-        # Иногда PrDocumentName может быть в parsed_meta под другим ключом
-        request_text = (pm.get('requested_doc_name') or '').strip()
+        hawb = None
+        if outbox_msg_type == 'CMN.11349' and outbox_raw_xml and position:
+            hn = hawb_for_position_cmn_11349(outbox_raw_xml, position)
+            if hn:
+                hawb = HouseWaybill.objects.filter(
+                    hawb_number__iexact=hn).first()
+        if not hawb and len(outbox_hawbs) == 1:
+            hawb = HouseWaybill.objects.filter(
+                hawb_number__iexact=str(outbox_hawbs[0]).strip()).first()
 
-    req, _ = HawbCustomsRequest.objects.update_or_create(
-        envelope_id=msg.envelope_id,
-        defaults={
-            'initial_envelope_id': initial_env,
-            'prepared_at':         msg.prepared_at,
-            'request_dt_msk':      request_dt,
-            'date_limit':          date_limit,
-            'request_position':    position,
-            'requestor_name':      pm.get('requestor_name', ''),
-            'customs_code':        pm.get('customs_code', ''),
-            'office_name':         pm.get('office_name', ''),
-            'request_text':        request_text,
-            'raw_xml':             msg.raw_xml or '',
-            'parsed_meta':         pm,
-            'hawb':                hawb,
-        },
-    )
-    logger.info('MY.11003 %s applied: hawb=%s position=%s',
-                msg.envelope_id, hawb and hawb.hawb_number, position)
+        # datetime запроса
+        request_dt = None
+        dt_str = (req.get('request_dt_msk') or '').strip()
+        if dt_str:
+            request_dt = parse_datetime(dt_str)
+        date_limit = None
+        dl_str = (req.get('date_limit') or '').strip()
+        if dl_str:
+            try:
+                date_limit = _dt.strptime(dl_str, '%Y-%m-%d').date()
+            except ValueError:
+                pass
 
-    if hawb:
-        _writeback_customs_requests_for_hawb(hawb)
+        HawbCustomsRequest.objects.update_or_create(
+            envelope_id=msg.envelope_id,
+            request_position_id=(req.get('request_position_id') or ''),
+            defaults={
+                'initial_envelope_id': initial_env,
+                'prepared_at':         msg.prepared_at,
+                'request_dt_msk':      request_dt,
+                'date_limit':          date_limit,
+                'request_position':    position,
+                'requestor_name':      req.get('requestor_name', ''),
+                'customs_code':        pm.get('customs_code', ''),
+                'office_name':         pm.get('office_name', ''),
+                'request_text':        (req.get('request_text') or '').strip(),
+                'raw_xml':             msg.raw_xml or '',
+                'parsed_meta':         req,
+                'hawb':                hawb,
+            },
+        )
+        if hawb:
+            touched_hawbs.add(hawb.pk)
+
+    logger.info('ED.11003 %s applied: %d requests, %d HAWBs touched',
+                msg.envelope_id, len(requests), len(touched_hawbs))
+
+    for pk in touched_hawbs:
+        h = HouseWaybill.objects.filter(pk=pk).first()
+        if h:
+            _writeback_customs_requests_for_hawb(h)
 
 
 def _writeback_customs_requests_for_hawb(hawb: HouseWaybill) -> None:

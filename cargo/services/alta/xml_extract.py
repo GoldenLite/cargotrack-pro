@@ -838,12 +838,40 @@ def hawb_for_position_cmn_11349(xml_text: str, position: int) -> str:
 # несколько отдельных файлов с одинаковым InitialEnvelopeID.
 
 
-def parse_my_11003(xml_text: str) -> dict:
-    """Парсит MY.11003 (запрос документов от таможни) → parsed_meta."""
+_REQUESTED_DOC_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?RequestedDoc\b[^>]*>(.*?)</(?:[\w-]+:)?RequestedDoc>',
+    re.S,
+)
+
+
+def parse_ed_11003(xml_text: str) -> dict:
+    """Парсит ED.11003 (запросы документов от таможни) → parsed_meta.
+
+    Один envelope = массив <RequestedDoc>. Возвращает общую шапку +
+    список requests (по одному на каждый <RequestedDoc>).
+
+    Структура:
+      {
+        'envelope_id', 'initial_envelope_id', 'prepared_at',
+        'send_date', 'request_date', 'request_time', 'date_limit',
+        'customs_code', 'office_name',
+        'requests': [
+          {'request_position_id': uuid,
+           'position': '1',
+           'request_text': 'Сообщаем, что...',
+           'doc_code': '09023',
+           'requestor_name': 'Иванов И.И.',
+           'req_purpose': 'В целях...',
+           'note': 'В соответствии со ст.325 ТК',
+           'date_limit': '2026-05-29',  # может быть на уровне запроса
+           'request_dt_msk': 'YYYY-MM-DDTHH:MM:SS+03:00'},
+          ...
+        ]
+      }
+    """
     from datetime import datetime, timezone as _tz, timedelta
 
     out = {
-        'msg_type':            'MY.11003',
         'envelope_id':         _first(xml_text, 'EnvelopeID'),
         'initial_envelope_id': _first(xml_text, 'InitialEnvelopeID'),
         'prepared_at':         _first(xml_text, 'PreparationDateTime'),
@@ -852,14 +880,11 @@ def parse_my_11003(xml_text: str) -> dict:
         'request_date':        _first(xml_text, 'RequestDate'),
         'request_time':        _first(xml_text, 'RequestTime'),
         'date_limit':          _first(xml_text, 'DateLimit'),
-        'request_position':    _first(xml_text, 'Position'),
-        'requestor_name':      _first(xml_text, 'RequestorName'),
-        'request_text':        _first(xml_text, 'PrDocumentName'),
         'customs_code':        _first(xml_text, 'CustomsCode'),
         'office_name':         _first(xml_text, 'OfficeName'),
-        'request_dt_msk':      '',
     }
-    # Объединяем RequestDate + RequestTime (с локальным TZ таможни) → MSK ISO
+    # request_dt_msk считаем один раз для всех запросов в этом envelope
+    request_dt_msk = ''
     if out['request_date'] and out['request_time']:
         try:
             iso = f'{out["request_date"]}T{out["request_time"]}'
@@ -867,7 +892,32 @@ def parse_my_11003(xml_text: str) -> dict:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=_tz.utc)
             msk = dt.astimezone(_tz(timedelta(hours=3)))
-            out['request_dt_msk'] = msk.isoformat()
+            request_dt_msk = msk.isoformat()
         except (ValueError, TypeError):
             pass
+
+    # Парсим каждый <RequestedDoc>
+    requests = []
+    for m in _REQUESTED_DOC_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        req = {
+            'request_position_id': _first(body, 'RequestPositionID'),
+            'position':            _first(body, 'Position'),
+            'request_text':        _first(body, 'PrDocumentName'),
+            'doc_code':            _first(body, 'DocCode'),
+            'requestor_name':      _first(body, 'RequestorName'),
+            'req_purpose':         _first(body, 'ReqPurpose'),
+            'note':                _first(body, 'Note'),
+            # date_limit может быть в верхней шапке или per-request
+            'date_limit':          _first(body, 'DateLimit') or out['date_limit'],
+            'request_dt_msk':      request_dt_msk,
+        }
+        if req['request_text'] or req['request_position_id']:
+            requests.append(req)
+
+    out['requests'] = requests
     return out
+
+
+# Совместимость: parse_my_11003 — алиас (старый код может вызывать).
+parse_my_11003 = parse_ed_11003
