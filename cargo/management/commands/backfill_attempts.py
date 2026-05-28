@@ -30,22 +30,26 @@ class Command(BaseCommand):
         )
         self.stdout.write(f'HAWB с customs_declaration_number: {qs.count()}')
 
+        # Загружаем всё в память сразу — итератор держит SQLite-курсор и
+        # ловит лок чаще. Объём небольшой (несколько тысяч).
+        rows = list(qs)
+        self.stdout.write(f'Загружено в память: {len(rows)}')
+
         created = 0
         already = 0
         import time as _time
-        from django.db import OperationalError, connection
+        from django.db import OperationalError
 
         def _retry(fn, *args, **kwargs):
-            for attempt in range(6):
+            for attempt in range(8):
                 try:
                     return fn(*args, **kwargs)
                 except OperationalError as e:
-                    if 'locked' not in str(e).lower() or attempt == 5:
+                    if 'locked' not in str(e).lower() or attempt == 7:
                         raise
-                    connection.close()
                     _time.sleep(0.5 * (attempt + 1))
 
-        for h in qs.iterator():
+        for h in rows:
             decl = (h.customs_declaration_number or '').strip()
             if not decl:
                 continue
