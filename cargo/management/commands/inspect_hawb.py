@@ -86,6 +86,7 @@ class Command(BaseCommand):
             self.stdout.write(f'  release_date(MSK): {rd}')
             self.stdout.write(f'  svh_do1_gross_weight: {h.svh_do1_gross_weight}')
             self.stdout.write(f'  svh_do1_place_count:  {h.svh_do1_place_count}')
+            self.stdout.write(f'  goods_count:          {h.goods_count}')
             if h.mawb_id:
                 c = Cargo.objects.filter(pk=h.mawb_id).first()
                 if c:
@@ -103,7 +104,8 @@ class Command(BaseCommand):
                 f'  row {r.source_row_index} ТСД={d.get("ТСД")!r}')
             for k in ('Регистрационный номер ДТ', 'Дата выпуска ДТ',
                      'Дата подачи ДТ', 'CargoTrack: рег. номер ДТ',
-                     'CargoTrack: дата подачи', 'CargoTrack: дата выпуска'):
+                     'CargoTrack: дата подачи', 'CargoTrack: дата выпуска',
+                     'Количество позиций'):
                 v = d.get(k)
                 if v:
                     self.stdout.write(f'    {k!r}: {v!r}')
@@ -135,5 +137,16 @@ class Command(BaseCommand):
         self.stdout.write(f'\nCMN.11023/11349 содержат эту HAWB: {len(matched)}')
         for o in matched:
             local = tz.localtime(o.prepared_at) if o.prepared_at else None
+            pm = o.parsed_meta or {}
+            extras = []
+            if 'goods_count' in pm:
+                extras.append(f'goods_count={pm["goods_count"]}')
+            per = pm.get('goods_count_per_hawb') or {}
+            if per:
+                extras.append(f'per_hawb[{hawb_number}]='
+                              f'{per.get(hawb_number, "—")}')
+            if 'raw_xml' in pm:
+                extras.append(f'raw_xml={len(pm["raw_xml"])} bytes')
             self.stdout.write(
-                f'  {o.msg_type} env={o.envelope_id} | MSK={local}')
+                f'  {o.msg_type} env={o.envelope_id} | MSK={local} | '
+                + (' | '.join(extras) if extras else 'no goods_count meta'))
