@@ -1136,6 +1136,7 @@ def apply_customs_request(msg: AltaInboxMessage) -> None:
     outbox_hawbs: list = []
     outbox_msg_type = ''
     outbox = None
+    initial_env = ''
     if process_id_xml:
         # Поиск среди CMN.11349/11023 у которых в raw_xml есть тот же
         # ProcessID. SQLite не умеет efficient JSON-lookup, но outbox-список
@@ -1152,6 +1153,7 @@ def apply_customs_request(msg: AltaInboxMessage) -> None:
         outbox_raw_xml = outbox_meta.get('raw_xml') or ''
         outbox_hawbs = outbox_meta.get('hawbs') or []
         outbox_msg_type = outbox.msg_type
+        initial_env = outbox.envelope_id  # для сохранения в HawbCustomsRequest
 
     # Fallback-якорь: GTDNumber в теле ED.11003. Когда таможня
     # зарегистрировала декларацию, она в каждом ED.11003 пишет полный
