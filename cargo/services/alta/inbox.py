@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Optional
 
@@ -1116,21 +1117,67 @@ def apply_customs_request(msg: AltaInboxMessage) -> None:
                     msg.envelope_id)
         return
 
-    initial_env = (pm.get('initial_envelope_id') or '').strip()
+    # Находим наш исходящий outbox. ED.11003 не несёт InitialEnvelopeID в
+    # routing-блоке, поэтому используем два резервных якоря:
+    #   1) ProcessID (UUID процесса) совпадает с ProcessID в нашем
+    #      CMN.11349/11023 (это надёжная связь — таможня сохраняет процесс
+    #      ID через всю цепочку сообщений).
+    #   2) GTDNumber в теле ED.11003 (когда таможня зарегистрировала ДТ —
+    #      номер совпадает с HouseWaybill.customs_declaration_number).
+    process_id_xml = ''
+    if msg.raw_xml:
+        m_pid = re.search(
+            r'<(?:[\w-]+:)?ProccessID\b[^>]*>([^<]+)</(?:[\w-]+:)?ProccessID>',
+            msg.raw_xml)
+        if m_pid:
+            process_id_xml = m_pid.group(1).strip()
+
     outbox_raw_xml = ''
     outbox_hawbs: list = []
     outbox_msg_type = ''
-    if initial_env:
-        outbox = (AltaOutboxObservation.objects
-                  .filter(envelope_id=initial_env).first())
-        if outbox:
-            outbox_meta = outbox.parsed_meta or {}
-            outbox_raw_xml = outbox_meta.get('raw_xml') or ''
-            outbox_hawbs = outbox_meta.get('hawbs') or []
-            outbox_msg_type = outbox.msg_type
-        else:
-            logger.info('ED.11003 %s: outbox %s не найден',
-                        msg.envelope_id, initial_env)
+    outbox = None
+    if process_id_xml:
+        # Поиск среди CMN.11349/11023 у которых в raw_xml есть тот же
+        # ProcessID. SQLite не умеет efficient JSON-lookup, но outbox-список
+        # небольшой (~сотни) — линейный обход допустим.
+        for o in (AltaOutboxObservation.objects
+                  .filter(msg_type__in=['CMN.11349', 'CMN.11023'])
+                  .iterator()):
+            raw = (o.parsed_meta or {}).get('raw_xml') or ''
+            if process_id_xml in raw:
+                outbox = o
+                break
+    if outbox:
+        outbox_meta = outbox.parsed_meta or {}
+        outbox_raw_xml = outbox_meta.get('raw_xml') or ''
+        outbox_hawbs = outbox_meta.get('hawbs') or []
+        outbox_msg_type = outbox.msg_type
+
+    # Fallback-якорь: GTDNumber в теле ED.11003. Когда таможня
+    # зарегистрировала декларацию, она в каждом ED.11003 пишет полный
+    # GTDNumber: <CustomsCode>/<RegistrationDate>/<GTDNumber>. По нему
+    # можно найти HouseWaybill.customs_declaration_number напрямую.
+    decl_from_gtd = ''
+    if msg.raw_xml and not outbox:
+        gtd_block = re.search(
+            r'<rid:GTDNumber\b[^>]*>(.*?)</rid:GTDNumber>',
+            msg.raw_xml, re.S)
+        if gtd_block:
+            body = gtd_block.group(1)
+            cc = re.search(r'>([^<]+)</(?:[\w-]+:)?CustomsCode>', body)
+            rd = re.search(r'>([^<]+)</(?:[\w-]+:)?RegistrationDate>', body)
+            gn = re.search(r'>([^<]+)</(?:[\w-]+:)?GTDNumber>', body)
+            cc = cc.group(1).strip() if cc else ''
+            rd = rd.group(1).strip() if rd else ''
+            gn = gn.group(1).strip() if gn else ''
+            # Формат БД: 10229030/280526/5036325 (DDMMYY компактно)
+            if cc and rd and gn and rd != '0001-01-01' and gn != '000000':
+                try:
+                    y, m_, d = rd.split('-')
+                    rd_short = f'{d}{m_}{y[2:]}'
+                    decl_from_gtd = f'{cc}/{rd_short}/{gn}'
+                except ValueError:
+                    pass
 
     touched_hawbs: set = set()
     for req in requests:
@@ -1141,14 +1188,23 @@ def apply_customs_request(msg: AltaInboxMessage) -> None:
             position = None
 
         hawb = None
+        # 1) Через ProcessID-сматченный outbox: CMN.11349 + Position → HAWB.
         if outbox_msg_type == 'CMN.11349' and outbox_raw_xml and position:
             hn = hawb_for_position_cmn_11349(outbox_raw_xml, position)
             if hn:
                 hawb = HouseWaybill.objects.filter(
                     hawb_number__iexact=hn).first()
+        # 2) Outbox с одной HAWB (CMN.11023/single-HAWB CMN.11349) → её.
         if not hawb and len(outbox_hawbs) == 1:
             hawb = HouseWaybill.objects.filter(
                 hawb_number__iexact=str(outbox_hawbs[0]).strip()).first()
+        # 3) Outbox не нашёлся, но в теле ED.11003 есть номер ДТ → ищем
+        #    HouseWaybill по customs_declaration_number. Применяется к ВСЕМ
+        #    HAWB этой декларации (а не per-Position — раз outbox потерян,
+        #    точную привязку не построим).
+        if not hawb and decl_from_gtd:
+            hawb = HouseWaybill.objects.filter(
+                customs_declaration_number=decl_from_gtd).first()
 
         # datetime запроса
         request_dt = None
