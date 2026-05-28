@@ -80,6 +80,8 @@ CARGOTRACK_GOODS_COUNT_HEADER  = 'Количество позиций'
 # по датам, и счётчик запросов.
 CARGOTRACK_CUSTOMS_REQUESTS_HEADER       = 'Запросы таможни'
 CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER = 'Количество запросов'
+# Счётчик переподач = (число HawbDeclarationAttempt) − 1.
+CARGOTRACK_ATTEMPTS_COUNT_HEADER         = 'Переподачи'
 
 # Старые заголовки которые мы один раз использовали (содержание было неверным —
 # данные представления вместо ДО1). Команда cleanup_svh_legacy_columns
@@ -894,6 +896,23 @@ def batch_write_customs_requests_count_for_hawbs(hawbs: list) -> int:
         CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER, 'customs_requests_count',
         formatter=lambda v: v or '',
         value_provider=_customs_requests_count,
+    )
+
+
+def _attempts_count(hawb) -> str:
+    """Счётчик переподач = (число попыток) − 1, мин. 0. Пусто если 0."""
+    n = hawb.declaration_attempts.count()
+    reattempts = max(0, n - 1)
+    return '' if reattempts == 0 else str(reattempts)
+
+
+def batch_write_attempts_count_for_hawbs(hawbs: list) -> int:
+    """Batch writeback колонки «Переподачи»."""
+    return _batch_write_hawb_dates(
+        hawbs, '__attempts_count__',
+        CARGOTRACK_ATTEMPTS_COUNT_HEADER, 'attempts_count',
+        formatter=lambda v: v or '',
+        value_provider=_attempts_count,
     )
 
 

@@ -2015,6 +2015,63 @@ class AltaOutboxObservation(models.Model):
         return f'{self.msg_type} {self.envelope_id}{link}'
 
 
+class HawbDeclarationAttempt(models.Model):
+    """Одна попытка подачи декларации (одна ДТ) для HAWB.
+
+    Иногда одна HAWB переподаётся несколько раз: подали → отказ → новый
+    пакет документов → подали снова → выпуск. У такого груза будет:
+      attempt #1: declaration_number=A, status=REJECTED
+      attempt #2: declaration_number=B, status=RELEASED
+
+    Триггер создания: смена `HouseWaybill.customs_declaration_number`
+    (когда таможня регистрирует новую ДТ). Уникальная пара
+    (hawb, declaration_number) — повторный CMN.11350 на ту же ДТ
+    апдейтит существующую запись, не создаёт новую.
+
+    Счётчик переподач = (число attempts) − 1.
+    """
+    STATUS_CHOICES = [
+        ('FILED',     'Подано'),
+        ('RELEASED',  'Выпуск'),
+        ('REJECTED',  'Отказ'),
+        ('WITHDRAWN', 'Отозвано'),
+    ]
+
+    hawb = models.ForeignKey(HouseWaybill, on_delete=models.CASCADE,
+                             related_name='declaration_attempts',
+                             verbose_name='HAWB')
+    declaration_number = models.CharField('Рег. номер ДТ', max_length=64,
+                                          db_index=True)
+    attempt_number     = models.PositiveIntegerField(
+        'Порядковый номер попытки', default=1,
+        help_text='1, 2, 3... в порядке появления. Первая подача = 1.')
+    status             = models.CharField('Статус', max_length=16,
+                                          choices=STATUS_CHOICES,
+                                          default='FILED', db_index=True)
+    filed_date         = models.DateTimeField('Дата подачи', null=True, blank=True)
+    release_date       = models.DateTimeField('Дата выпуска', null=True, blank=True)
+    rejected_date      = models.DateTimeField('Дата отказа', null=True, blank=True)
+    notes              = models.TextField('Заметки', blank=True)
+    created_at         = models.DateTimeField('Создано', auto_now_add=True)
+    updated_at         = models.DateTimeField('Обновлено', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Попытка подачи ДТ'
+        verbose_name_plural = 'Попытки подачи ДТ'
+        ordering = ['hawb', 'attempt_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['hawb', 'declaration_number'],
+                name='hawbdeclattempt_hawb_decl_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['hawb', 'attempt_number']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.hawb.hawb_number} #{self.attempt_number} {self.declaration_number} [{self.status}]'
+
+
 class HawbCustomsRequest(models.Model):
     """Запрос документов от таможни (MY.11003) — привязан к HAWB.
 

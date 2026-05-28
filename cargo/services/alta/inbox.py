@@ -319,6 +319,8 @@ def recompute_declaration(cargo: Optional[Cargo],
             return []
         HouseWaybill.objects.filter(pk=hawb.pk).update(
             customs_declaration_number=target_decl)
+        # Регистрируем попытку подачи: новый decl_number → новая попытка.
+        _register_attempt(hawb, target_decl)
 
         # filed_date: дата подачи декларации = дата регистрации в таможне
         # (parsed_meta['registration_date'] из CMN-релиза). Ставим ОДИН раз
@@ -346,6 +348,76 @@ def recompute_declaration(cargo: Optional[Cargo],
             # HAWB этой же ДТ → нужно скопировать filed_date соседям.
             _sync_filed_date_by_declaration(target_decl)
     return [hawb]
+
+
+def _register_attempt(hawb: HouseWaybill, declaration_number: str,
+                      status: str = 'FILED',
+                      filed_date=None,
+                      release_date=None,
+                      rejected_date=None) -> None:
+    """Регистрирует попытку подачи декларации.
+
+    Идемпотентно по (hawb, declaration_number). При update НЕ затирает
+    уже установленные даты пустыми.
+    Триггерит writeback счётчика «Переподачи» в Sheets.
+    """
+    from cargo.models import HawbDeclarationAttempt
+    decl = (declaration_number or '').strip()
+    if not decl or not hawb:
+        return
+    attempt, created = HawbDeclarationAttempt.objects.get_or_create(
+        hawb=hawb,
+        declaration_number=decl,
+        defaults={
+            'status':        status,
+            'filed_date':    filed_date or hawb.filed_date,
+            'release_date':  release_date or hawb.release_date,
+            'rejected_date': rejected_date,
+        },
+    )
+    if created:
+        # Назначаем порядковый номер: count existing уже включая текущую.
+        n = HawbDeclarationAttempt.objects.filter(hawb=hawb).count()
+        attempt.attempt_number = n
+        attempt.save(update_fields=['attempt_number'])
+        logger.info('attempt #%d for HAWB %s decl=%s status=%s',
+                    n, hawb.hawb_number, decl, status)
+    else:
+        # Апдейтим только пустые поля (никогда не затираем существующие).
+        upd = {}
+        if status and attempt.status != status and status != 'FILED':
+            upd['status'] = status
+        if filed_date and not attempt.filed_date:
+            upd['filed_date'] = filed_date
+        if release_date and not attempt.release_date:
+            upd['release_date'] = release_date
+        if rejected_date and not attempt.rejected_date:
+            upd['rejected_date'] = rejected_date
+        if upd:
+            for k, v in upd.items():
+                setattr(attempt, k, v)
+            attempt.save(update_fields=list(upd.keys()))
+            logger.info('attempt #%d for HAWB %s decl=%s updated: %s',
+                        attempt.attempt_number, hawb.hawb_number, decl, upd)
+    _writeback_attempt_count_for_hawb(hawb)
+
+
+def _writeback_attempt_count_for_hawb(hawb: HouseWaybill) -> None:
+    """Триггерит запись счётчика «Переподачи» в Sheets для одной HAWB."""
+    def _run():
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_attempts_count_for_hawbs, signals_suppressed,
+            )
+            if signals_suppressed():
+                return
+            batch_write_attempts_count_for_hawbs([hawb])
+        except ImportError:
+            pass
+        except Exception:
+            logger.exception('attempts_count writeback failed for HAWB %s',
+                             hawb.hawb_number)
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _sync_filed_date_by_declaration(decl_number: str) -> None:
