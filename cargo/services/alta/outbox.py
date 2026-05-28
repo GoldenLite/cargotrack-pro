@@ -567,31 +567,30 @@ def _ensure_export_hawb(hawb_number: str, cargo: Optional[Cargo]
                         ) -> Optional[HouseWaybill]:
     """Auto-create HouseWaybill(shipment_type='EXPORT') если ещё нет в БД.
 
-    Привязка к Cargo (через mawb FK) делается прямым UPDATE минуя save() —
-    HouseWaybill.save() имеет валидацию вес/места ≤ MAWB которая не нужна
-    для пустого auto-create.
+    HouseWaybill.save() запрещает привязку к mawb при статусе ≠ AT_ORIGIN_WH.
+    Для экспортной HAWB которая сразу идёт через таможню это правило не
+    нужно — обходим через прямой UPDATE: создаём HAWB без mawb, потом
+    UPDATE mawb_id отдельным запросом минуя save().
     """
     hawb_number = (hawb_number or '').strip()
     if not hawb_number:
         return None
     h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_number).first()
-    created = False
     if not h:
         try:
             h = HouseWaybill.objects.create(
                 hawb_number=hawb_number,
                 shipment_type='EXPORT',
                 logistics_status='EXPORT_CUSTOMS',
-                mawb=cargo,
             )
-            created = True
-            logger.info('export: auto-created HAWB %s (EXPORT) → %s',
-                        hawb_number, cargo.awb_number if cargo else 'no-mawb')
+            logger.info('export: auto-created HAWB %s (EXPORT_CUSTOMS)',
+                        hawb_number)
         except Exception:
             logger.exception('export: failed to create HAWB %s', hawb_number)
             return HouseWaybill.objects.filter(
                 hawb_number__iexact=hawb_number).first()
-    elif cargo and h.mawb_id != cargo.pk and not h.mawb_id:
+    # Привязка к Cargo — прямым UPDATE минуя save() и валидацию статусов.
+    if cargo and h.mawb_id != cargo.pk and not h.mawb_id:
         HouseWaybill.objects.filter(pk=h.pk).update(mawb_id=cargo.pk)
         h.refresh_from_db(fields=['mawb'])
     return h
