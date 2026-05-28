@@ -44,3 +44,30 @@ class Command(BaseCommand):
         linked = HawbCustomsRequest.objects.exclude(hawb=None).count()
         self.stdout.write(self.style.SUCCESS(
             f'\nHawbCustomsRequest: {total}, привязано к HAWB: {linked}'))
+
+        # Синхронно прогоняем writeback для всех HAWB у которых есть
+        # запросы — нужно чтобы колонки «Запросы таможни» и «Количество
+        # запросов» создались в Sheets даже если они ещё не существовали
+        # (audit_sheets_vs_db не создаёт новые колонки сам).
+        from cargo.models import HouseWaybill
+        hawb_ids = set(HawbCustomsRequest.objects
+                       .exclude(hawb=None)
+                       .values_list('hawb_id', flat=True))
+        if not hawb_ids:
+            self.stdout.write('Sheets writeback: нет HAWB с запросами')
+            return
+        hawbs = list(HouseWaybill.objects.filter(pk__in=hawb_ids))
+        self.stdout.write(f'\nSheets writeback для {len(hawbs)} HAWB...')
+        try:
+            from cargo.services.sheets.writeback import (
+                batch_write_customs_requests_for_hawbs,
+                batch_write_customs_requests_count_for_hawbs,
+            )
+            n1 = batch_write_customs_requests_for_hawbs(hawbs)
+            n2 = batch_write_customs_requests_count_for_hawbs(hawbs)
+            self.stdout.write(self.style.SUCCESS(
+                f'  «Запросы таможни»:   {n1} cells'))
+            self.stdout.write(self.style.SUCCESS(
+                f'  «Количество запросов»: {n2} cells'))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f'writeback failed: {e}'))
