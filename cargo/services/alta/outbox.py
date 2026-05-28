@@ -139,6 +139,13 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         # на месте.
         _apply_goods_count(obs, hawb_list)
 
+    # Экспортные сообщения: CMN.11335 (ПТДЭГ), CMN.11349 ЭК (ДТЭГ),
+    # CMN.11024 ЭК (ДТ). Auto-create HAWB+Cargo, проставляем declaration_form,
+    # filed_date, goods_count, транспортный документ, добавляем строку в
+    # Sheets «Экспортная статистика».
+    if obs.msg_type in ('CMN.11335', 'CMN.11349', 'CMN.11024'):
+        _apply_export_outbox(obs)
+
 
 def _apply_goods_count(obs, hawb_list: list) -> None:
     """Записывает HouseWaybill.goods_count из parsed_meta CMN.11023/11349."""
@@ -479,3 +486,192 @@ def relink_for_hawb(hawb: HouseWaybill) -> int:
         .filter(waybill_number__iexact=wb, hawb=None)
         .update(hawb=hawb)
     )
+
+
+# ─── Экспортные исходящие сообщения ────────────────────────────────────
+
+_DECL_FORM_BY_MSG_TYPE = {
+    'CMN.11335': 'ПТДЭГ',
+    'CMN.11349': 'ДТЭГ',
+    'CMN.11024': 'ДТ',
+}
+
+
+def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
+    """Парсит raw_xml observation в зависимости от msg_type.
+
+    Возвращает dict с ключами:
+      'is_export': bool,
+      'hawbs':     list[str],
+      'transport_per_hawb': {hawb: transport_doc} или {} для CMN.11024,
+      'goods_count_per_hawb': {hawb: int}    — для CMN.11335/11349,
+      'goods_count':          int            — для CMN.11024 (один на ДТ).
+
+    None если raw_xml пуст или ничего не вытащили.
+    """
+    raw_xml = (obs.parsed_meta or {}).get('raw_xml') or ''
+    if not raw_xml:
+        return None
+
+    from cargo.services.alta.xml_extract import (
+        parse_cmn_11335, parse_cmn_11024, parse_cmn_11349_meta,
+    )
+    if obs.msg_type == 'CMN.11335':
+        r = parse_cmn_11335(raw_xml)
+        return {
+            'is_export':            (r['declaration_kind'] or '').strip() == 'ЭК',
+            'hawbs':                r['hawbs'],
+            'transport_per_hawb':   r['transport_per_hawb'],
+            'goods_count_per_hawb': r['goods_count_per_hawb'],
+            'goods_count':          0,
+        }
+    if obs.msg_type == 'CMN.11349':
+        r = parse_cmn_11349_meta(raw_xml)
+        return {
+            'is_export':            (r['declaration_kind'] or '').strip() == 'ЭК',
+            'hawbs':                r['hawbs'],
+            'transport_per_hawb':   r['transport_per_hawb'],
+            'goods_count_per_hawb': r['goods_count_per_hawb'],
+            'goods_count':          0,
+        }
+    if obs.msg_type == 'CMN.11024':
+        r = parse_cmn_11024(raw_xml)
+        return {
+            'is_export':            (r['customs_procedure'] or '').strip() == 'ЭК',
+            'hawbs':                r['hawbs'],
+            'transport_per_hawb':   r['transport_per_hawb'],
+            'goods_count_per_hawb': {},
+            'goods_count':          r['goods_count'],
+        }
+    return None
+
+
+def _ensure_export_cargo(awb_number: str) -> Optional[Cargo]:
+    """Auto-create Cargo для экспортного транспортного документа (CDEK-XX-NNNN)."""
+    awb_number = (awb_number or '').strip()
+    if not awb_number:
+        return None
+    cargo = Cargo.objects.filter(awb_number__iexact=awb_number).first()
+    if cargo:
+        return cargo
+    try:
+        cargo = Cargo.objects.create(awb_number=awb_number, stage='DRAFT')
+        logger.info('export: auto-created Cargo %s', awb_number)
+        return cargo
+    except Exception:
+        logger.exception('export: failed to create Cargo %s', awb_number)
+        return Cargo.objects.filter(awb_number__iexact=awb_number).first()
+
+
+def _ensure_export_hawb(hawb_number: str, cargo: Optional[Cargo]
+                        ) -> Optional[HouseWaybill]:
+    """Auto-create HouseWaybill(shipment_type='EXPORT') если ещё нет в БД.
+
+    Привязка к Cargo (через mawb FK) делается прямым UPDATE минуя save() —
+    HouseWaybill.save() имеет валидацию вес/места ≤ MAWB которая не нужна
+    для пустого auto-create.
+    """
+    hawb_number = (hawb_number or '').strip()
+    if not hawb_number:
+        return None
+    h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_number).first()
+    created = False
+    if not h:
+        try:
+            h = HouseWaybill.objects.create(
+                hawb_number=hawb_number,
+                shipment_type='EXPORT',
+                logistics_status='EXPORT_CUSTOMS',
+                mawb=cargo,
+            )
+            created = True
+            logger.info('export: auto-created HAWB %s (EXPORT) → %s',
+                        hawb_number, cargo.awb_number if cargo else 'no-mawb')
+        except Exception:
+            logger.exception('export: failed to create HAWB %s', hawb_number)
+            return HouseWaybill.objects.filter(
+                hawb_number__iexact=hawb_number).first()
+    elif cargo and h.mawb_id != cargo.pk and not h.mawb_id:
+        HouseWaybill.objects.filter(pk=h.pk).update(mawb_id=cargo.pk)
+        h.refresh_from_db(fields=['mawb'])
+    return h
+
+
+def _apply_export_outbox(obs: AltaOutboxObservation) -> None:
+    """Обработка одного экспортного outbox-сообщения (CMN.11335/11349/11024).
+
+    Шаги:
+      1. Парсим raw_xml — проверяем что это ЭК.
+      2. Auto-create Cargo (транспортный документ) и HAWB(EXPORT_CUSTOMS).
+      3. Проставляем declaration_form, filed_date, goods_count.
+      4. _ensure_export_row для каждой HAWB.
+      5. Batch writeback declaration_form, transport_doc, goods_count + всё
+         что уже есть на HAWB (declaration, release_date, requests, attempts).
+    """
+    parsed = _parse_export_obs(obs)
+    if not parsed:
+        return  # raw_xml нет или unknown msg_type
+    if not parsed['is_export']:
+        return  # ЭК не подтверждён — это импортное сообщение, не наш case
+
+    decl_form = _DECL_FORM_BY_MSG_TYPE.get(obs.msg_type, '')
+
+    affected: list[HouseWaybill] = []
+    for hawb_num in parsed['hawbs']:
+        transport_doc = parsed['transport_per_hawb'].get(hawb_num, '')
+        cargo = _ensure_export_cargo(transport_doc) if transport_doc else None
+        h = _ensure_export_hawb(hawb_num, cargo)
+        if not h:
+            continue
+
+        update_fields: dict = {}
+        if decl_form and h.declaration_form != decl_form:
+            update_fields['declaration_form'] = decl_form
+        if obs.prepared_at and _filed_date_should_replace(
+                h.filed_date, obs.prepared_at):
+            update_fields['filed_date'] = obs.prepared_at
+        per_hawb_count = parsed['goods_count_per_hawb'].get(hawb_num) \
+            or parsed['goods_count']
+        if per_hawb_count and h.goods_count != per_hawb_count:
+            update_fields['goods_count'] = per_hawb_count
+        if update_fields:
+            HouseWaybill.objects.filter(pk=h.pk).update(**update_fields)
+            h.refresh_from_db(fields=list(update_fields.keys()) + ['mawb'])
+        affected.append(h)
+
+    if not affected:
+        return
+
+    logger.info('%s ЭК: applied to %d HAWBs, decl_form=%s',
+                obs.msg_type, len(affected), decl_form)
+    _writeback_export_hawbs(affected)
+
+
+def _writeback_export_hawbs(hawbs: list) -> None:
+    """Все batch writeback для экспортных HAWB в одну вкладку."""
+    try:
+        from cargo.services.sheets.writeback import (
+            ensure_export_rows_for_hawbs,
+            batch_write_declarations_for_hawbs,
+            batch_write_release_dates_for_hawbs,
+            batch_write_goods_count_for_hawbs,
+            batch_write_customs_requests_for_hawbs,
+            batch_write_customs_requests_count_for_hawbs,
+            batch_write_attempts_count_for_hawbs,
+            batch_write_transport_doc_for_hawbs,
+            batch_write_declaration_form_for_hawbs,
+            signals_suppressed,
+        )
+        if signals_suppressed():
+            return
+        ensure_export_rows_for_hawbs(hawbs)
+        batch_write_transport_doc_for_hawbs(hawbs)
+        batch_write_declarations_for_hawbs(hawbs)
+        batch_write_release_dates_for_hawbs(hawbs)
+        batch_write_goods_count_for_hawbs(hawbs)
+        batch_write_customs_requests_for_hawbs(hawbs)
+        batch_write_customs_requests_count_for_hawbs(hawbs)
+        batch_write_attempts_count_for_hawbs(hawbs)
+        batch_write_declaration_form_for_hawbs(hawbs)
+    except Exception:
+        logger.exception('export writeback failed')

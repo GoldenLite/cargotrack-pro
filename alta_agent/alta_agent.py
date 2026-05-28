@@ -880,6 +880,8 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
     }
     # Для CMN.11023/11349 — считаем количество товарных позиций и сохраняем
     # полный raw_xml (нужен для пересчёта при изменении логики на сервере).
+    # Для CMN.11335 (ПТДЭГ) и CMN.11024 (ДТ) — только raw_xml; сервер парсит
+    # экспортные поля через cargo.services.alta.xml_extract на месте.
     msg_type = parsed.get('msg_type', '')
     if msg_type == 'CMN.11023':
         parsed_meta['goods_count'] = _count_positions_cmn_11023(xml_text)
@@ -888,6 +890,8 @@ def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> Non
         parsed_meta['goods_count_per_hawb'] = (
             _count_positions_per_hawb_cmn_11349(xml_text)
         )
+        parsed_meta['raw_xml'] = xml_text
+    elif msg_type in ('CMN.11335', 'CMN.11024'):
         parsed_meta['raw_xml'] = xml_text
 
     payload = {

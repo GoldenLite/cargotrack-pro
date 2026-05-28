@@ -921,3 +921,145 @@ def parse_ed_11003(xml_text: str) -> dict:
 
 # Совместимость: parse_my_11003 — алиас (старый код может вызывать).
 parse_my_11003 = parse_ed_11003
+
+
+# ─── Экспортные сообщения (CMN.11335 / CMN.11349 ЭК / CMN.11024 ЭК) ───
+#
+# Маркеры экспорта:
+#   CMN.11335 / CMN.11349 — ExpressCargoDeclaration → <DeclarationKindCode>ЭК</…>
+#   CMN.11024             — ESADout_CU             → <CustomsProcedure>ЭК</…>
+#
+# HAWB-номер всегда лежит в PrDocumentNumber с kind=02021 (DocKindCode или
+# PresentedDocumentModeCode — _HAWB_PAIR_RE уже умеет оба).
+#
+# Транспортный документ для экспорта (что юзер хочет видеть в Sheets как «номер
+# транспортного документа»):
+#   CMN.11335 / CMN.11349 — PrDocumentNumber c DocKindCode=02099
+#     (HouseShipment > TransportDocumentDetails). Формат «CDEK-XX-NNNN».
+#   CMN.11024 — TransportDocument > PrDocumentNumber c PresentedDocumentModeCode
+#     =02099 (в шапке ESADout_CUGoodsShipment). Формат также «CDEK-XX-NNNN».
+
+_DECL_KIND_CODE_RE = re.compile(
+    r'<(?:[\w-]+:)?DeclarationKindCode\b[^>]*>([^<]+)</(?:[\w-]+:)?DeclarationKindCode>'
+)
+_CUSTOMS_PROCEDURE_RE = re.compile(
+    r'<(?:[\w-]+:)?CustomsProcedure\b[^>]*>([^<]+)</(?:[\w-]+:)?CustomsProcedure>'
+)
+# Транспортный документ (DocKindCode=02099). Тот же паттерн что у HAWB-pair,
+# только проверяем код 02099 а не 02021.
+_TRANSPORT_PAIR_RE = _HAWB_PAIR_RE  # тот же regex — фильтруем по коду в _hawb_and_transport_in_houseshipment
+
+
+def _hawb_and_transport_in_houseshipment(body: str) -> tuple[str, str]:
+    """Из тела одного <HouseShipment> возвращает (hawb_number, transport_doc).
+
+    Используется для CMN.11335/11349 — там per-HAWB HouseShipment с двумя
+    PrDocumentNumber: один HAWB (02021), второй транспортный (02099).
+    """
+    hawb = ''
+    transport = ''
+    for nm, mode in _HAWB_PAIR_RE.findall(body):
+        m = mode.strip()
+        if m == '02021' and not hawb:
+            hawb = nm.strip()
+        elif m == '02099' and not transport:
+            transport = nm.strip()
+    return hawb, transport
+
+
+def parse_cmn_11335(xml_text: str) -> dict:
+    """Парсер CMN.11335 (предварительная ДТЭГ, ПТДЭГ).
+
+    Структура: ExpressCargoDeclaration → DeclarationKindCode → HouseShipment
+    (по одному на HAWB). Каждая HouseShipment содержит:
+    - HouseWaybillDetails.PrDocumentNumber (DocKindCode=02021) → HAWB
+    - TransportDocumentDetails.PrDocumentNumber (DocKindCode=02099) → транспорт. док (CDEK-XX-NNNN)
+    - N GoodsItemDetails → количество позиций per-HAWB
+
+    Возвращает:
+      {
+        'declaration_kind': 'ЭК'|'ИМ'|'',
+        'hawbs': ['10269627133', ...],
+        'transport_per_hawb': {'10269627133': 'CDEK-AZ-3045', ...},
+        'goods_count_per_hawb': {'10269627133': 8, ...},
+      }
+    """
+    out = {
+        'declaration_kind':     '',
+        'hawbs':                [],
+        'transport_per_hawb':   {},
+        'goods_count_per_hawb': {},
+    }
+    m = _DECL_KIND_CODE_RE.search(xml_text)
+    if m:
+        out['declaration_kind'] = m.group(1).strip()
+    for hs in _HOUSE_SHIPMENT_BLOCK_RE.finditer(xml_text):
+        body = hs.group(1)
+        hawb, transport = _hawb_and_transport_in_houseshipment(body)
+        if not hawb:
+            continue
+        out['hawbs'].append(hawb)
+        if transport:
+            out['transport_per_hawb'][hawb] = transport
+        out['goods_count_per_hawb'][hawb] = len(
+            _GOODS_ITEM_DETAILS_OPEN_RE.findall(body))
+    return out
+
+
+def parse_cmn_11349_meta(xml_text: str) -> dict:
+    """Расширенный парсер CMN.11349 (ДТЭГ): то же что parse_cmn_11335 + DeclarationKindCode.
+
+    Структурно CMN.11335 и CMN.11349 идентичны, разница только в семантике
+    (предварительная vs итоговая). Используем одну функцию.
+    """
+    return parse_cmn_11335(xml_text)
+
+
+def parse_cmn_11024(xml_text: str) -> dict:
+    """Парсер CMN.11024 (классическая ДТ).
+
+    Структура: ESADout_CU → CustomsProcedure → ESADout_CUGoodsShipment →
+    ESADout_CUGoods (N штук = TotalGoodsNumber). HAWB лежит в каждом
+    ESADout_CUGoods → ESADout_CUPresentedDocument с PresentedDocumentModeCode
+    =02021 (одна и та же на все товары если декларация на одну партию).
+
+    Возвращает:
+      {
+        'customs_procedure':  'ЭК'|'ИМ'|'',
+        'hawbs':              ['10255988260'],   # уникальные
+        'transport_per_hawb': {'10255988260': 'CDEK-...'},  # если в шапке есть
+        'goods_count':        12,    # = число ESADout_CUGoods (или групп внутри)
+      }
+    """
+    out = {
+        'customs_procedure':  '',
+        'hawbs':              [],
+        'transport_per_hawb': {},
+        'goods_count':        0,
+    }
+    m = _CUSTOMS_PROCEDURE_RE.search(xml_text)
+    if m:
+        out['customs_procedure'] = m.group(1).strip()
+
+    # HAWB — все уникальные PrDocumentNumber с kind=02021 в теле документа.
+    hawbs_seen: list[str] = []
+    for nm, mode in _HAWB_PAIR_RE.findall(xml_text):
+        if mode.strip() == '02021':
+            v = nm.strip()
+            if v and v not in hawbs_seen:
+                hawbs_seen.append(v)
+    out['hawbs'] = hawbs_seen
+
+    # Транспортный документ (02099) — обычно один на всю декларацию.
+    transport_doc = ''
+    for nm, mode in _HAWB_PAIR_RE.findall(xml_text):
+        if mode.strip() == '02099':
+            transport_doc = nm.strip()
+            break
+    if transport_doc and hawbs_seen:
+        for h in hawbs_seen:
+            out['transport_per_hawb'][h] = transport_doc
+
+    # Количество позиций — используем общий счётчик ESADout_CUGoods/GoodsGroup.
+    out['goods_count'] = count_positions_cmn_11023(xml_text)
+    return out

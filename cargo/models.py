@@ -788,6 +788,16 @@ class HouseWaybill(models.Model):
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True)
+    DECLARATION_FORM_CHOICES = [
+        ('',      '—'),
+        ('ПТДЭГ', 'ПТДЭГ — предварительная ДТЭГ (CMN.11335)'),
+        ('ДТЭГ',  'ДТЭГ — декларация на экспресс-грузы (CMN.11349)'),
+        ('ДТ',    'ДТ — классическая декларация (CMN.11024)'),
+    ]
+    declaration_form = models.CharField(
+        'Тип декларации', max_length=8, choices=DECLARATION_FORM_CHOICES, blank=True,
+        help_text='ПТДЭГ → ДТЭГ → ДТ. Перезаписывается при появлении нового '
+                  'outbox-сообщения этого типа (естественная воронка).')
     goods_count  = models.PositiveIntegerField(
         'Количество позиций', null=True, blank=True,
         help_text='Число товарных позиций в ДТ. CMN.11023: общее по декларации '
@@ -2145,6 +2155,7 @@ class SheetSource(models.Model):
     KIND_CHOICES = [
         ('general', 'Таблица "Общее"'),
         ('crm',     'Таблица CRM'),
+        ('export',  'Экспортная статистика'),
     ]
     STATUS_CHOICES = [
         ('',      '—'),
