@@ -244,8 +244,8 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         # для CMN.11024). Если raw_xml пустой — НЕ создаём, мы не знаем
         # export или import (legacy agent). Импортные HAWB у нас живут в
         # таблице «Общее», их юзер вводит вручную.
-        if obs and obs.msg_type in ('CMN.11024', 'CMN.11335',
-                                    'CMN.11349'):
+        if obs and obs.msg_type in ('CMN.11024', 'CMN.11023',
+                                    'CMN.11335', 'CMN.11349'):
             pm = obs.parsed_meta or {}
             hawb_list = pm.get('hawbs') or []
 
@@ -271,7 +271,7 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
                     parse_cmn_11335, parse_cmn_11024, parse_cmn_11349_meta,
                 )
                 try:
-                    if obs.msg_type == 'CMN.11024':
+                    if obs.msg_type in ('CMN.11024', 'CMN.11023'):
                         r = parse_cmn_11024(raw_xml)
                         is_export = (r.get('customs_procedure') or '').strip() == 'ЭК'
                     else:

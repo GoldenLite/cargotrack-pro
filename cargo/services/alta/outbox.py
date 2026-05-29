@@ -140,10 +140,10 @@ def dispatch(obs: AltaOutboxObservation) -> None:
         _apply_goods_count(obs, hawb_list)
 
     # Экспортные сообщения: CMN.11335 (ПТДЭГ), CMN.11349 ЭК (ДТЭГ),
-    # CMN.11024 ЭК (ДТ). Auto-create HAWB+Cargo, проставляем declaration_form,
-    # filed_date, goods_count, транспортный документ, добавляем строку в
-    # Sheets «Экспортная статистика».
-    if obs.msg_type in ('CMN.11335', 'CMN.11349', 'CMN.11024'):
+    # CMN.11024/11023 ЭК (ДТ). Auto-create HAWB+Cargo, проставляем
+    # declaration_form, filed_date, goods_count, транспортный документ,
+    # добавляем строку в Sheets «Экспортная статистика».
+    if obs.msg_type in ('CMN.11335', 'CMN.11349', 'CMN.11024', 'CMN.11023'):
         _apply_export_outbox(obs)
 
 
@@ -494,6 +494,7 @@ _DECL_FORM_BY_MSG_TYPE = {
     'CMN.11335': 'ПТДЭГ',
     'CMN.11349': 'ДТЭГ',
     'CMN.11024': 'ДТ',
+    'CMN.11023': 'ДТ',
 }
 
 
@@ -536,7 +537,8 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
             'goods_count':          0,
             'signatory':            r.get('signatory') or '',
         }
-    if obs.msg_type == 'CMN.11024':
+    if obs.msg_type in ('CMN.11024', 'CMN.11023'):
+        # CMN.11023 и CMN.11024 — обе на основе ESADout_CU. Парсер один.
         r = parse_cmn_11024(raw_xml)
         return {
             'is_export':            (r['customs_procedure'] or '').strip() == 'ЭК',
