@@ -1110,8 +1110,13 @@ class HouseWaybill(models.Model):
                 and self.shipment_type != 'EXPORT'):
             self.customs_declaration_number = ''
 
-        # Правило 5: не привязан к партии — нет рег. номера ДТ
-        if self.customs_declaration_number and not self.mawb:
+        # Правило 5: не привязан к партии — нет рег. номера ДТ.
+        # Для ЭКСПОРТА не применяется: экспортные HAWB могут быть auto-created
+        # через initial_envelope CMN.11337/11001 БЕЗ MAWB (transport_doc был
+        # только в raw_xml исходящей CMN.11024, которого нет при старом агенте).
+        # Рег.номер от таможни уже пришёл — стирать его бессмысленно.
+        if (self.customs_declaration_number and not self.mawb
+                and self.shipment_type != 'EXPORT'):
             self.customs_declaration_number = ''
 
         super().save(*args, **kwargs)
