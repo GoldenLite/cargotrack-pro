@@ -949,23 +949,27 @@ _SIGNATORY_BLOCK_RE = re.compile(
     r'<(?:[\w-]+:)?SignatoryPerson\b[^>]*>(.*?)</(?:[\w-]+:)?SignatoryPerson>',
     re.S,
 )
+# CMN.11024 (классическая ДТ) хранит подписанта в FilledPerson, а не
+# SignatoryPerson. Структура SigningDetails внутри идентична.
+_FILLED_PERSON_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?FilledPerson\b[^>]*>(.*?)</(?:[\w-]+:)?FilledPerson>',
+    re.S,
+)
 
 
 def extract_signatory_name(xml_text: str) -> str:
-    """Собирает ФИО декларанта из <SignatoryPerson><SigningDetails>.
+    """Собирает ФИО декларанта из SignatoryPerson или FilledPerson.
 
-    Структура:
-        <SignatoryPerson>
-            <SigningDetails>
-                <cat_ru:PersonSurname>Алексеева</cat_ru:PersonSurname>
-                <cat_ru:PersonName>Екатерина</cat_ru:PersonName>
-                <cat_ru:PersonMiddleName>Ильинична</cat_ru:PersonMiddleName>
-            </SigningDetails>
-        </SignatoryPerson>
+    Структура (CMN.11335/11349/11023): SignatoryPerson > SigningDetails >
+    Person{Surname,Name,MiddleName}.
+    Структура (CMN.11024): FilledPerson > SigningDetails > Person{...} —
+    тот же набор тэгов, другой родительский блок.
 
-    Возвращает 'Алексеева Екатерина Ильинична' или '' если блока нет.
+    Возвращает 'Фамилия Имя Отчество' или '' если блока нет.
     """
     m = _SIGNATORY_BLOCK_RE.search(xml_text)
+    if not m:
+        m = _FILLED_PERSON_BLOCK_RE.search(xml_text)
     if not m:
         return ''
     body = m.group(1)
