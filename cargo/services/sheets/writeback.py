@@ -323,18 +323,175 @@ def _do_append_export_row(hawb: HouseWaybill,
 
 
 def ensure_export_rows_for_hawbs(hawbs: list) -> int:
-    """Для каждой экспортной HAWB гарантирует наличие строки в export-вкладке.
+    """Bulk-вариант _ensure_export_row для пачки HAWB.
+
+    Делает ~4 API-вызова на любую пачку вместо ~3/HAWB:
+    1. open_worksheet + ensure_headers
+    2. col_values(hawb_col) — карта существующих HAWB в Sheets
+    3. add_rows(N+50) если в grid'е не хватает места
+    4. ws.update(range, matrix) — одна вставка всех новых строк
+    Плюс ImportedSheetRow.bulk_create.
+
+    Per-HAWB сигнал-роутинг продолжает звать _ensure_export_row.
 
     Возвращает кол-во HAWB которые получили строку (новую или существующую).
     """
-    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export' and h.hawb_number]
+    exp = [h for h in hawbs
+           if _kind_for_hawb(h) == 'export' and h.hawb_number]
     if not exp:
         return 0
-    n = 0
-    for h in exp:
-        if _ensure_export_row(h):
-            n += 1
-    return n
+
+    src = _get_export_source()
+    if not src:
+        logger.info('export-rows bulk: no SheetSource(kind=export), skip')
+        return 0
+
+    with _export_row_lock:
+        try:
+            ws = _retry_api(open_worksheet, src,
+                            label='export bulk open')
+        except SheetsConfigError as e:
+            logger.warning('export-rows bulk: open failed: %s', e)
+            return 0
+
+        try:
+            headers = _retry_api(_ensure_export_headers, ws, src.header_row,
+                                 label='export bulk ensure_headers')
+        except gspread.exceptions.APIError as e:
+            logger.exception('export-rows bulk: header ensure failed: %s', e)
+            return 0
+
+        hawb_col = headers.get(EXPORT_HAWB_HEADER, 1)
+        try:
+            col_vals = _retry_api(ws.col_values, hawb_col,
+                                  label='export bulk read_col')
+        except gspread.exceptions.APIError as e:
+            logger.exception('export-rows bulk: col_values failed: %s', e)
+            return 0
+
+        # Карта HAWB → row_idx по фактическому содержимому Sheets.
+        sheet_hawb_to_row: dict[str, int] = {}
+        for i, v in enumerate(col_vals, start=1):
+            if i <= src.header_row:
+                continue
+            hn = (v or '').strip()
+            if hn:
+                sheet_hawb_to_row[hn] = i
+
+        # Существующие ImportedSheetRow одной выборкой.
+        wanted_numbers = [h.hawb_number for h in exp]
+        existing_db = {
+            r.hawb_number_norm: r for r in ImportedSheetRow.objects.filter(
+                source=src,
+                hawb_number_norm__in=wanted_numbers,
+            )
+        }
+
+        to_append: list = []           # [(hawb, transport_doc)]
+        to_db_only: list = []          # [(hawb, row_idx)]  есть в Sheets, нет в БД
+        ok_count = 0
+
+        for h in exp:
+            db_rec = existing_db.get(h.hawb_number)
+            sheet_row = sheet_hawb_to_row.get(h.hawb_number)
+            db_row_valid = (db_rec is not None
+                            and db_rec.source_row_index <= ws.row_count
+                            and (sheet_row is None
+                                 or sheet_row == db_rec.source_row_index))
+            if db_row_valid:
+                ok_count += 1
+                continue
+            if sheet_row is not None:
+                # есть в Sheets — синкаем БД на актуальный row_idx
+                to_db_only.append((h, sheet_row))
+                ok_count += 1
+            else:
+                to_append.append(h)
+
+        # Создаём/обновляем DB-only записи (без записи в Sheets).
+        for h, row_idx in to_db_only:
+            ImportedSheetRow.objects.update_or_create(
+                source=src,
+                source_row_index=row_idx,
+                defaults={
+                    'hawb_number_raw':  h.hawb_number,
+                    'hawb_number_norm': h.hawb_number,
+                    'match_status':     'promoted',
+                    'promoted_hawb':    h,
+                    'matched_hawb':     h,
+                },
+            )
+
+        if not to_append:
+            return ok_count
+
+        # Bulk append: расширяем grid + один update.
+        n_append = len(to_append)
+        used_max = max(
+            [src.header_row] + list(sheet_hawb_to_row.values()))
+        free_below = ws.row_count - used_max
+        if free_below < n_append:
+            extra = n_append - free_below + 50
+            try:
+                _retry_api(ws.add_rows, extra,
+                           label='export bulk add_rows')
+            except gspread.exceptions.APIError as e:
+                logger.exception('export-rows bulk: add_rows failed: %s', e)
+                return ok_count
+
+        start_row = used_max + 1
+        end_row = start_row + n_append - 1
+        last_col_letter = _col_letter(len(EXPORT_HEADERS_ORDER))
+        rng = f'A{start_row}:{last_col_letter}{end_row}'
+
+        # Матрица: каждая строка — пустая, кроме HAWB и transport_doc.
+        matrix = []
+        hawb_idx = EXPORT_HEADERS_ORDER.index(EXPORT_HAWB_HEADER)
+        tr_idx = EXPORT_HEADERS_ORDER.index(EXPORT_TRANSPORT_DOC_HEADER)
+        n_cols = len(EXPORT_HEADERS_ORDER)
+        for h in to_append:
+            row = [''] * n_cols
+            row[hawb_idx] = h.hawb_number
+            if h.mawb_id and h.mawb:
+                row[tr_idx] = h.mawb.awb_number or ''
+            matrix.append(row)
+
+        try:
+            _retry_api(ws.update, rng, matrix,
+                       value_input_option='RAW',
+                       label='export bulk update')
+        except gspread.exceptions.APIError as e:
+            logger.exception('export-rows bulk: update failed: %s', e)
+            return ok_count
+
+        # bulk_create ImportedSheetRow на новые строки.
+        new_records = []
+        for offset, h in enumerate(to_append):
+            new_records.append(ImportedSheetRow(
+                source=src,
+                source_row_index=start_row + offset,
+                hawb_number_raw=h.hawb_number,
+                hawb_number_norm=h.hawb_number,
+                match_status='promoted',
+                promoted_hawb=h,
+                matched_hawb=h,
+            ))
+        # update_or_create по уникальному (source, source_row_index)
+        for rec in new_records:
+            ImportedSheetRow.objects.update_or_create(
+                source=rec.source,
+                source_row_index=rec.source_row_index,
+                defaults={
+                    'hawb_number_raw':  rec.hawb_number_raw,
+                    'hawb_number_norm': rec.hawb_number_norm,
+                    'match_status':     'promoted',
+                    'promoted_hawb':    rec.promoted_hawb,
+                    'matched_hawb':     rec.matched_hawb,
+                },
+            )
+        logger.info('export-rows bulk: appended %d new rows (range %s)',
+                    n_append, rng)
+        return ok_count + n_append
 
 
 def _ensure_named_column(ws: gspread.Worksheet, header_row: int,
