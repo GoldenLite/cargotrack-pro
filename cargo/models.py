@@ -803,6 +803,10 @@ class HouseWaybill(models.Model):
         help_text='Реконструированный статус из ED-обмена с таможней '
                   '(аналог "ЭД-статус" в Альте). Обновляется при каждом '
                   'входящем CMN-сообщении. Фраза + опц. флаги через "; ".')
+    declarant_name = models.CharField(
+        'Декларант (ФИО)', max_length=200, blank=True,
+        help_text='ФИО декларанта из <SignatoryPerson><SigningDetails> '
+                  'в исходящей CMN.11335/11349/11024 (только для EXPORT).')
     goods_count  = models.PositiveIntegerField(
         'Количество позиций', null=True, blank=True,
         help_text='Число товарных позиций в ДТ. CMN.11023: общее по декларации '

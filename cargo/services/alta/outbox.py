@@ -614,6 +614,7 @@ def _apply_export_outbox(obs: AltaOutboxObservation) -> None:
         return  # ЭК не подтверждён — это импортное сообщение, не наш case
 
     decl_form = _DECL_FORM_BY_MSG_TYPE.get(obs.msg_type, '')
+    signatory = (parsed.get('signatory') or '').strip()
 
     affected: list[HouseWaybill] = []
     for hawb_num in parsed['hawbs']:
@@ -626,6 +627,8 @@ def _apply_export_outbox(obs: AltaOutboxObservation) -> None:
         update_fields: dict = {}
         if decl_form and h.declaration_form != decl_form:
             update_fields['declaration_form'] = decl_form
+        if signatory and h.declarant_name != signatory:
+            update_fields['declarant_name'] = signatory
         if obs.prepared_at and _filed_date_should_replace(
                 h.filed_date, obs.prepared_at):
             update_fields['filed_date'] = obs.prepared_at
@@ -660,6 +663,7 @@ def _writeback_export_hawbs(hawbs: list) -> None:
             batch_write_attempts_count_for_hawbs,
             batch_write_transport_doc_for_hawbs,
             batch_write_declaration_form_for_hawbs,
+            batch_write_declarant_for_hawbs,
             batch_write_ed_status_for_hawbs,
             signals_suppressed,
         )
@@ -675,6 +679,7 @@ def _writeback_export_hawbs(hawbs: list) -> None:
         batch_write_customs_requests_count_for_hawbs(hawbs)
         batch_write_attempts_count_for_hawbs(hawbs)
         batch_write_declaration_form_for_hawbs(hawbs)
+        batch_write_declarant_for_hawbs(hawbs)
         batch_write_ed_status_for_hawbs(hawbs)
     except Exception:
         logger.exception('export writeback failed')

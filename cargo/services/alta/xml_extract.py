@@ -945,6 +945,35 @@ _DECL_KIND_CODE_RE = re.compile(
 _CUSTOMS_PROCEDURE_RE = re.compile(
     r'<(?:[\w-]+:)?CustomsProcedure\b[^>]*>([^<]+)</(?:[\w-]+:)?CustomsProcedure>'
 )
+_SIGNATORY_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?SignatoryPerson\b[^>]*>(.*?)</(?:[\w-]+:)?SignatoryPerson>',
+    re.S,
+)
+
+
+def extract_signatory_name(xml_text: str) -> str:
+    """Собирает ФИО декларанта из <SignatoryPerson><SigningDetails>.
+
+    Структура:
+        <SignatoryPerson>
+            <SigningDetails>
+                <cat_ru:PersonSurname>Алексеева</cat_ru:PersonSurname>
+                <cat_ru:PersonName>Екатерина</cat_ru:PersonName>
+                <cat_ru:PersonMiddleName>Ильинична</cat_ru:PersonMiddleName>
+            </SigningDetails>
+        </SignatoryPerson>
+
+    Возвращает 'Алексеева Екатерина Ильинична' или '' если блока нет.
+    """
+    m = _SIGNATORY_BLOCK_RE.search(xml_text)
+    if not m:
+        return ''
+    body = m.group(1)
+    surname = _first(body, 'PersonSurname')
+    name = _first(body, 'PersonName')
+    middle = _first(body, 'PersonMiddleName')
+    parts = [p for p in [surname, name, middle] if p]
+    return ' '.join(parts)
 # Транспортный документ (DocKindCode=02099). Тот же паттерн что у HAWB-pair,
 # только проверяем код 02099 а не 02021.
 _TRANSPORT_PAIR_RE = _HAWB_PAIR_RE  # тот же regex — фильтруем по коду в _hawb_and_transport_in_houseshipment
@@ -989,6 +1018,7 @@ def parse_cmn_11335(xml_text: str) -> dict:
         'hawbs':                [],
         'transport_per_hawb':   {},
         'goods_count_per_hawb': {},
+        'signatory':            extract_signatory_name(xml_text),
     }
     m = _DECL_KIND_CODE_RE.search(xml_text)
     if m:
@@ -1036,6 +1066,7 @@ def parse_cmn_11024(xml_text: str) -> dict:
         'hawbs':              [],
         'transport_per_hawb': {},
         'goods_count':        0,
+        'signatory':          extract_signatory_name(xml_text),
     }
     m = _CUSTOMS_PROCEDURE_RE.search(xml_text)
     if m:

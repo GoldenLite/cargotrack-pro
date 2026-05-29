@@ -89,6 +89,7 @@ EXPORT_HAWB_HEADER               = 'Номер накладной'
 EXPORT_TRANSPORT_DOC_HEADER      = 'Номер транспортного документа'
 EXPORT_DECLARATION_HEADER        = 'Регистрационный номер ДТ'
 EXPORT_DECLARATION_FORM_HEADER   = 'Тип декларации'
+EXPORT_DECLARANT_HEADER          = 'Декларант'
 EXPORT_ED_STATUS_HEADER          = 'Статус ЭД'
 EXPORT_FILED_DATE_HEADER         = 'Дата подачи'
 EXPORT_RELEASE_DATE_HEADER       = 'Дата выпуска'
@@ -103,6 +104,7 @@ EXPORT_HEADERS_ORDER = [
     EXPORT_TRANSPORT_DOC_HEADER,
     EXPORT_DECLARATION_HEADER,
     EXPORT_DECLARATION_FORM_HEADER,
+    EXPORT_DECLARANT_HEADER,
     EXPORT_ED_STATUS_HEADER,
     EXPORT_FILED_DATE_HEADER,
     EXPORT_RELEASE_DATE_HEADER,
@@ -1224,6 +1226,21 @@ def batch_write_declaration_form_for_hawbs(hawbs: list) -> int:
         EXPORT_DECLARATION_FORM_HEADER, 'declaration_form',
         formatter=lambda v: v or '',
         value_provider=_declaration_form_for_hawb,
+        source_kind='export',
+    )
+
+
+def batch_write_declarant_for_hawbs(hawbs: list) -> int:
+    """Batch writeback HAWB.declarant_name в колонку «Декларант» —
+    только в export-вкладке.
+    """
+    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+    if not exp:
+        return 0
+    return _batch_write_hawb_dates(
+        exp, 'declarant_name',
+        EXPORT_DECLARANT_HEADER, 'declarant',
+        formatter=lambda v: v or '',
         source_kind='export',
     )
 
