@@ -43,6 +43,7 @@ class Command(BaseCommand):
             begin_batch_writeback, end_batch_writeback,
             batch_write_declarations_for_hawbs,
             batch_write_release_dates_for_hawbs,
+            batch_write_filed_dates_for_hawbs,
             batch_write_attempts_count_for_hawbs,
         )
 
@@ -130,6 +131,7 @@ class Command(BaseCommand):
             end_batch_writeback()
 
         batch_write_declarations_for_hawbs(affected)
+        batch_write_filed_dates_for_hawbs(affected)
         batch_write_release_dates_for_hawbs(affected)
         batch_write_attempts_count_for_hawbs(affected)
         self.stdout.write(self.style.SUCCESS(
