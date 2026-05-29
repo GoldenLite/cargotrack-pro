@@ -405,11 +405,16 @@ def recompute_declaration(cargo: Optional[Cargo],
                 return []
 
     from django.db import transaction
+    extra_touched: list = []
     with transaction.atomic():
         current = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
             'customs_declaration_number', flat=True).first() or ''
+        # Пропагацию decl на siblings делаем В ЛЮБОМ случае (даже если у
+        # текущей hawb decl уже совпал) — siblings могут отставать.
+        if target_decl:
+            extra_touched = _sync_decl_via_outbox(hawb, target_decl, latest)
         if current == target_decl:
-            return []
+            return extra_touched
         HouseWaybill.objects.filter(pk=hawb.pk).update(
             customs_declaration_number=target_decl)
         # Регистрируем попытку подачи: новый decl_number → новая попытка.
@@ -441,12 +446,6 @@ def recompute_declaration(cargo: Optional[Cargo],
             # HAWB этой же ДТ → нужно скопировать filed_date соседям.
             _sync_filed_date_by_declaration(target_decl)
 
-            # Пропагируем decl_number на всех HAWB одной декларации через
-            # AltaOutboxObservation (наша подача CMN.11023/11335/11024/11349).
-            # В parsed_meta.hawbs у этих outbox лежит ПОЛНЫЙ список HAWB
-            # декларации. Если рег.номер уже выставлен у одной — проставим
-            # тот же decl у всех siblings (если у них пусто).
-            extra_touched = _sync_decl_via_outbox(hawb, target_decl, latest)
     return [hawb] + extra_touched
 
 
