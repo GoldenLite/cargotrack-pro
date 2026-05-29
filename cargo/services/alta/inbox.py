@@ -829,12 +829,7 @@ def apply_status(msg: AltaInboxMessage,
                     errors.append(f'HAWB {h.hawb_number}: {err}')
                 else:
                     applied_hawbs.append(h)
-                    # Синхронизируем attempt для CURRENT ДТ с новым статусом
-                    # HAWB. _register_attempt идемпотентен и обновит status
-                    # с FILED на RELEASED/REJECTED. Это критично для siblings
-                    # multi-HAWB ДТ: их attempts создавались как FILED через
-                    # propagation и не обновлялись бы иначе. compute_ed_status
-                    # опирается на cur_attempt.status для финального статуса.
+                    # Синхронизируем attempt для CURRENT ДТ с новым статусом.
                     cur_decl = (h.customs_declaration_number or '').strip()
                     if cur_decl and new_status in ('RELEASED', 'REJECTED'):
                         try:
@@ -850,6 +845,15 @@ def apply_status(msg: AltaInboxMessage,
                         except Exception:
                             logger.exception('attempt sync failed for HAWB %s',
                                              h.pk)
+                    # REJECTED: стираем рег.номер и дату подачи у HAWB
+                    # (история остаётся в HawbDeclarationAttempt). Юзер хочет
+                    # видеть пустые поля в Sheets когда таможня отказала.
+                    if new_status == 'REJECTED':
+                        HouseWaybill.objects.filter(pk=h.pk).update(
+                            customs_declaration_number='',
+                            filed_date=None)
+                        h.refresh_from_db(fields=[
+                            'customs_declaration_number', 'filed_date'])
             except Exception as e:
                 logger.exception('change_customs_status failed for HAWB %s', h.pk)
                 errors.append(f'HAWB {h.hawb_number}: {e}')
@@ -998,6 +1002,14 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                                 logger.exception(
                                     'attempt sync (consignment) failed '
                                     'for HAWB %s', h.pk)
+                        # REJECTED: стираем decl + filed_date у HAWB,
+                        # история остаётся в HawbDeclarationAttempt.
+                        if new_status == 'REJECTED':
+                            HouseWaybill.objects.filter(pk=h.pk).update(
+                                customs_declaration_number='',
+                                filed_date=None)
+                            h.refresh_from_db(fields=[
+                                'customs_declaration_number', 'filed_date'])
                 except Exception as e:
                     logger.exception('change_customs_status failed for HAWB %s', h.pk)
                     errors.append(f'HAWB {h.hawb_number}: {e}')
