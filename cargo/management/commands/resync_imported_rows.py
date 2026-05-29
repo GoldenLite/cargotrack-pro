@@ -85,9 +85,10 @@ class Command(BaseCommand):
             self.stdout.write(f'  HAWB в Sheets: {len(sheet_map)}, '
                               f'дубли: {len(dupes)}')
 
-            # Сравниваем с БД.
-            rs = ImportedSheetRow.objects.filter(source=src)
-            updated, untouched, missing = 0, 0, 0
+            # Собираем (id, new_idx) пары для записей которые надо двинуть.
+            rs = list(ImportedSheetRow.objects.filter(source=src))
+            to_move = []  # (pk, new_idx)
+            untouched, missing = 0, 0
             for r in rs:
                 hn = r.hawb_number_norm
                 if not hn:
@@ -95,19 +96,39 @@ class Command(BaseCommand):
                 sheet_idx = sheet_map.get(hn)
                 if sheet_idx is None:
                     missing += 1
-                    if opts['delete_missing']:
-                        if not opts['dry_run']:
-                            r.delete()
+                    if opts['delete_missing'] and not opts['dry_run']:
+                        r.delete()
                     continue
                 if r.source_row_index == sheet_idx:
                     untouched += 1
                     continue
-                if not opts['dry_run']:
-                    r.source_row_index = sheet_idx
-                    r.save(update_fields=['source_row_index'])
-                updated += 1
+                to_move.append((r.pk, sheet_idx))
+
+            if opts['dry_run']:
+                self.stdout.write(self.style.SUCCESS(
+                    f'  будет обновлено: {len(to_move)}, без изменений: '
+                    f'{untouched}, нет в Sheets: {missing}'))
+                continue
+
+            # Двухфазный апдейт чтобы обойти unique(source, source_row_index):
+            # 1) кидаем нужные записи в negative temp (точно уникальные).
+            # 2) выставляем финальный row_idx.
+            from django.db import connection
+            with connection.cursor() as cur:
+                # Фаза 1: temp = -pk
+                for pk, _new in to_move:
+                    cur.execute(
+                        'UPDATE cargo_importedsheetrow SET source_row_index = ? '
+                        'WHERE id = ?',
+                        [-pk, pk])
+                # Фаза 2: финальный
+                for pk, new_idx in to_move:
+                    cur.execute(
+                        'UPDATE cargo_importedsheetrow SET source_row_index = ? '
+                        'WHERE id = ?',
+                        [new_idx, pk])
             self.stdout.write(self.style.SUCCESS(
-                f'  обновлено: {updated}, без изменений: {untouched}, '
+                f'  обновлено: {len(to_move)}, без изменений: {untouched}, '
                 f'нет в Sheets: {missing}'))
             if dupes[:5]:
                 self.stdout.write('  --- примеры дублей ---')
