@@ -175,6 +175,12 @@ def compute_ed_status(hawb) -> str:
                 main = 'Отказано в выпуске'
 
     # 1.5. Если финальных нет — смотрим последнее значимое CMN-сообщение.
+    # ВАЖНО: attempt со статусом FILED (без явного RELEASED/REJECTED от
+    # таможни) НЕ источник 'Присвоен номер' — backfill_attempts создаёт
+    # такой при любой ручной ДТ в Sheets, для легаси-HAWB (выпущенных до
+    # подключения агента) это вводило бы в заблуждение. 'Присвоен номер'
+    # ставим только когда таможня реально прислала CMN.11337/11001
+    # (kind=registered) или другое значимое сообщение.
     if not main:
         msgs = AltaInboxMessage.objects.filter(
             hawb=hawb,
@@ -182,12 +188,6 @@ def compute_ed_status(hawb) -> str:
                                 'svh_do1_registered', 'svh_do2_registered'))
         latest = msgs.order_by('-prepared_at', '-received_at').first()
         main = _status_from_msg(latest) if latest else ''
-        # FILED-attempt → 'Присвоен номер' (если CMN не дал чего-то лучше).
-        if not main and cur_decl:
-            cur_attempt = hawb.declaration_attempts.filter(
-                declaration_number=cur_decl, status='FILED').first()
-            if cur_attempt:
-                main = 'Присвоен номер'
 
     if not main:
         # 2. Нет значимых входящих — смотрим outbox. Подача → "Присвоен номер"
