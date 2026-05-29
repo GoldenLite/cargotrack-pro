@@ -829,6 +829,27 @@ def apply_status(msg: AltaInboxMessage,
                     errors.append(f'HAWB {h.hawb_number}: {err}')
                 else:
                     applied_hawbs.append(h)
+                    # Синхронизируем attempt для CURRENT ДТ с новым статусом
+                    # HAWB. _register_attempt идемпотентен и обновит status
+                    # с FILED на RELEASED/REJECTED. Это критично для siblings
+                    # multi-HAWB ДТ: их attempts создавались как FILED через
+                    # propagation и не обновлялись бы иначе. compute_ed_status
+                    # опирается на cur_attempt.status для финального статуса.
+                    cur_decl = (h.customs_declaration_number or '').strip()
+                    if cur_decl and new_status in ('RELEASED', 'REJECTED'):
+                        try:
+                            _register_attempt(
+                                h, cur_decl, status=new_status,
+                                release_date=(msg.prepared_at
+                                              if new_status == 'RELEASED'
+                                              else None),
+                                rejected_date=(msg.prepared_at
+                                               if new_status == 'REJECTED'
+                                               else None),
+                                trigger_writeback=False)
+                        except Exception:
+                            logger.exception('attempt sync failed for HAWB %s',
+                                             h.pk)
             except Exception as e:
                 logger.exception('change_customs_status failed for HAWB %s', h.pk)
                 errors.append(f'HAWB {h.hawb_number}: {e}')
@@ -959,6 +980,24 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                                                   event_dt=event_dt)
                     if err:
                         errors.append(f'HAWB {h.hawb_number}: {err}')
+                    else:
+                        # Синхронизируем attempt для текущей ДТ.
+                        cur_decl = (h.customs_declaration_number or '').strip()
+                        if cur_decl and new_status in ('RELEASED', 'REJECTED'):
+                            try:
+                                _register_attempt(
+                                    h, cur_decl, status=new_status,
+                                    release_date=(event_dt
+                                                  if new_status == 'RELEASED'
+                                                  else None),
+                                    rejected_date=(event_dt
+                                                   if new_status == 'REJECTED'
+                                                   else None),
+                                    trigger_writeback=False)
+                            except Exception:
+                                logger.exception(
+                                    'attempt sync (consignment) failed '
+                                    'for HAWB %s', h.pk)
                 except Exception as e:
                     logger.exception('change_customs_status failed for HAWB %s', h.pk)
                     errors.append(f'HAWB {h.hawb_number}: {e}')
