@@ -1233,8 +1233,13 @@ def batch_write_declaration_form_for_hawbs(hawbs: list) -> int:
 def batch_write_declarant_for_hawbs(hawbs: list) -> int:
     """Batch writeback HAWB.declarant_name в колонку «Декларант» —
     только в export-вкладке.
+
+    Skip-empty: HAWB с пустым declarant_name НЕ перезаписывают ячейку.
+    Это позволяет юзеру вручную вписать ФИО для legacy-кейсов (когда
+    raw_xml не пришёл) без риска что наш writeback его сотрёт.
     """
-    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export'
+           and (h.declarant_name or '').strip()]
     if not exp:
         return 0
     return _batch_write_hawb_dates(
