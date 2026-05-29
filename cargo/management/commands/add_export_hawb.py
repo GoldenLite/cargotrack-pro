@@ -32,19 +32,20 @@ class Command(BaseCommand):
             if existing:
                 self.stdout.write(self.style.WARNING(
                     f'  {hn}: уже существует (pk={existing.pk}, '
-                    f'shipment_type={existing.shipment_type})'))
-                continue
-            try:
-                h = HouseWaybill.objects.create(
-                    hawb_number=hn,
-                    shipment_type='EXPORT',
-                    logistics_status='EXPORT_CUSTOMS',
-                )
-                self.stdout.write(self.style.SUCCESS(
-                    f'  {hn}: создан pk={h.pk} (EXPORT_CUSTOMS)'))
-            except Exception as e:
-                self.stdout.write(self.style.ERROR(f'  {hn}: ошибка {e}'))
-                continue
+                    f'shipment_type={existing.shipment_type}) — передиспатч'))
+                h = existing
+            else:
+                try:
+                    h = HouseWaybill.objects.create(
+                        hawb_number=hn,
+                        shipment_type='EXPORT',
+                        logistics_status='EXPORT_CUSTOMS',
+                    )
+                    self.stdout.write(self.style.SUCCESS(
+                        f'  {hn}: создан pk={h.pk} (EXPORT_CUSTOMS)'))
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f'  {hn}: ошибка {e}'))
+                    continue
 
             # 1. Привязать висящие CMN.11337/11001/CMN.11002/CMN.11350 без
             #    hawb_id, у которых raw_xml содержит наш hawb_number.
