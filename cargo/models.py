@@ -1027,18 +1027,13 @@ class HouseWaybill(models.Model):
             elif not self.release_date:
                 self.release_date = timezone.now()
         elif event_dt:
-            # event_dt = реальный CMN от таможни. Если новый статус не
-            # RELEASED — выпуска нет, значит и ДТ-номер с датой выпуска
-            # в Sheets показывать не должны (юзер хочет видеть ДТ только
-            # в паре с фактом выпуска). Стираем оба.
-            # Для ЭКСПОРТА правило не применяется: юзер хочет видеть
-            # рег.номер в «Экспортной статистике» сразу при первом
-            # сообщении таможни (CMN.11337/11001), даже до выпуска.
-            if (self.shipment_type or 'IMPORT').upper() != 'EXPORT':
-                if self.release_date:
-                    self.release_date = None
-                if self.customs_declaration_number:
-                    self.customs_declaration_number = ''
+            # Нет выпуска → не должно быть release_date. Это правило ОК
+            # для всех типов (даты выпуска не может быть если не RELEASED).
+            # Рег.номер ДТ при этом ОСТАЁТСЯ — юзер хочет видеть его как
+            # только таможня присвоила (CMN.11337/11001), независимо от
+            # того дошло ли уже до выпуска.
+            if self.release_date:
+                self.release_date = None
             # После выпуска на импорте — переводим в следующий лог.статус
             if self.logistics_status == 'IMPORT_CUSTOMS':
                 self.logistics_status = 'READY_DELIVERY'
@@ -1104,19 +1099,11 @@ class HouseWaybill(models.Model):
         # Правило 3: нет даты СВХ — нет лицензии склада
         # (лицензия берётся из MAWB, поэтому просто убеждаемся что scan_into_bond чист)
 
-        # Правило 4: неполный чеклист — нет рег. номера ДТ.
-        # Исключение: customs_status == RELEASED — номер выдан таможней
-        # и факт выпуска есть, внутренний чеклист уже не релевантен.
-        # При HOLD/REJECTED/EXAMINATION/FILED номер тоже не показываем
-        # для ИМПОРТА — юзер хочет видеть ДТ только в паре с выпуском.
-        # Для ЭКСПОРТА правило не применяется: HAWB(EXPORT) автосоздаются
-        # из CMN.11335/11349/11024 БЕЗ чеклиста, и юзер хочет видеть рег.
-        # номер сразу при первом сообщении таможни.
-        if (self.customs_declaration_number
-                and not self.docs_ready
-                and self.customs_status != 'RELEASED'
-                and self.shipment_type != 'EXPORT'):
-            self.customs_declaration_number = ''
+        # Правило 4 СНЯТО (2026-05-29): раньше для импорта при неполном
+        # чеклисте и customs_status != RELEASED мы стирали рег.номер,
+        # чтобы юзер видел ДТ только в паре с выпуском. Сейчас юзер
+        # просит показывать рег.номер сразу как только таможня его
+        # присвоила (CMN.11337/11001), независимо от чеклиста и статуса.
 
         # Правило 5: не привязан к партии — нет рег. номера ДТ.
         # Для ЭКСПОРТА не применяется: экспортные HAWB могут быть auto-created
