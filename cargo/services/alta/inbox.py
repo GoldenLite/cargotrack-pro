@@ -303,6 +303,18 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
                 except Exception:
                     logger.exception('match: auto-create HAWB %s failed', hn)
 
+    # 2.7. providing_hawbs — для CMN.11001 (ProvidingIndicationList).
+    # initial_envelope в нём отсутствует, но в теле явно перечислены HAWB
+    # с DocCode=02021. Берём первый существующий HAWB.
+    providing_hawbs = parsed.get('providing_hawbs') or []
+    for hn in providing_hawbs:
+        hn = str(hn).strip()
+        if not hn:
+            continue
+        h = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
+        if h:
+            return (h.mawb, h)
+
     # 3. По собранному номеру ДТ
     decl = _build_declaration_number(parsed)
     if decl:

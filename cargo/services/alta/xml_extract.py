@@ -79,10 +79,17 @@ def parse_raw_xml(xml_text: str) -> dict:
     плюс выбирает «правильную» ДТ при наличии нескольких упоминаний (КДТ).
     """
     cc, rd, gn = _pick_effective_decl(xml_text)
+    # MessageKind (в SOAP-конверте app:MessageKind) — реальный тип сообщения
+    # бизнес-уровня (CMN.11001 / CMN.11337 / ...). MessageType (edhead:) —
+    # тип ED-конверта (часто ED.11010 для «приёма»). Для классификации нам
+    # нужен бизнес-тип. Берём MessageKind если он есть, иначе MessageType.
+    msg_kind = _first(xml_text, 'MessageKind')
+    msg_type_envelope = _first(xml_text, 'MessageType')
+    msg_type = msg_kind or msg_type_envelope
     base = {
         'envelope_id':        _first(xml_text, 'EnvelopeID'),
         'initial_envelope':   _first(xml_text, 'InitialEnvelopeID'),
-        'msg_type':           _first(xml_text, 'MessageType'),
+        'msg_type':           msg_type,
         'prepared_at':        _first(xml_text, 'PreparationDateTime'),
         'waybill_number':     _first(xml_text, 'WayBillNumber'),
         'declaration_number': _first(xml_text, 'DeclarationNumber'),
@@ -126,6 +133,18 @@ def parse_raw_xml(xml_text: str) -> dict:
         cons = parse_consignments(xml_text)
         if cons:
             base['consignments'] = cons
+
+    # CMN.11001 (ProvidingIndicationList) — извещение о приёме классической
+    # ДТ. Тело содержит pil:FirstDT с рег.номером ДТ и список pil:DocList
+    # с приложенными документами; HAWB лежит в DocList'ах с DocCode=02021.
+    if 'ProvidingIndicationList' in xml_text or 'pil:' in xml_text:
+        pil = parse_providing_indication_list(xml_text)
+        if pil.get('gtd_number') and not base.get('gtd_number'):
+            base['customs_code'] = pil['customs_code']
+            base['registration_date'] = pil['registration_date']
+            base['gtd_number'] = pil['gtd_number']
+        if pil.get('hawbs'):
+            base['providing_hawbs'] = pil['hawbs']
 
     return base
 
@@ -978,6 +997,76 @@ def extract_signatory_name(xml_text: str) -> str:
     middle = _first(body, 'PersonMiddleName')
     parts = [p for p in [surname, name, middle] if p]
     return ' '.join(parts)
+
+
+# CMN.11001 (ProvidingIndicationList) — приём классической ДТ.
+# Структура (реальный пример):
+#   <pil:ProvidingIndicationList>
+#     <cat_ru:DocumentID>...</cat_ru:DocumentID>
+#     <pil:DocList>
+#       <cat_ru:PrDocumentName>ИНДИВИДУАЛЬНАЯ НАКЛАДНАЯ...</cat_ru:PrDocumentName>
+#       <cat_ru:PrDocumentNumber>10256073419</cat_ru:PrDocumentNumber>
+#       <pil:DocCode>02021</pil:DocCode>
+#       <pil:FirstDT>
+#         <cat_ru:CustomsCode>10228010</cat_ru:CustomsCode>
+#         <cat_ru:RegistrationDate>2026-05-29</cat_ru:RegistrationDate>
+#         <cat_ru:GTDNumber>5170142</cat_ru:GTDNumber>
+#       </pil:FirstDT>
+#     </pil:DocList>
+#     ... (другие документы декларации с тем же FirstDT)
+#   </pil:ProvidingIndicationList>
+#
+# HAWB — все DocList'ы где DocCode=02021. Рег.номер берём из любого FirstDT
+# (одинаков по всем DocList'ам в рамках одной декларации).
+
+_PIL_DOCLIST_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?DocList\b[^>]*>(.*?)</(?:[\w-]+:)?DocList>',
+    re.S,
+)
+_PIL_DOC_CODE_RE = re.compile(
+    r'<(?:[\w-]+:)?DocCode\b[^>]*>([^<]+)</(?:[\w-]+:)?DocCode>'
+)
+
+
+def parse_providing_indication_list(xml_text: str) -> dict:
+    """Парсер CMN.11001 — возвращает рег.номер ДТ + список HAWB.
+
+    Возвращает:
+      {
+        'customs_code':      '10228010',
+        'registration_date': '2026-05-29',
+        'gtd_number':        '5170142',
+        'hawbs':             ['10256073419', ...],
+      }
+    """
+    out = {
+        'customs_code':      '',
+        'registration_date': '',
+        'gtd_number':        '',
+        'hawbs':             [],
+    }
+    hawbs_seen: list[str] = []
+    for m in _PIL_DOCLIST_BLOCK_RE.finditer(xml_text):
+        body = m.group(1)
+        dc = _PIL_DOC_CODE_RE.search(body)
+        if not dc or dc.group(1).strip() != '02021':
+            continue
+        num = _first(body, 'PrDocumentNumber').strip()
+        if num and num not in hawbs_seen:
+            hawbs_seen.append(num)
+    out['hawbs'] = hawbs_seen
+
+    # FirstDT (один и тот же по всем DocList'ам) — берём первый встретившийся.
+    cc = _first(xml_text, 'CustomsCode')
+    rd = _first(xml_text, 'RegistrationDate')
+    gn = _first(xml_text, 'GTDNumber')
+    if cc and rd and gn:
+        out['customs_code'] = cc.strip()
+        out['registration_date'] = rd.strip()
+        out['gtd_number'] = gn.strip()
+    return out
+
+
 # Транспортный документ (DocKindCode=02099). Тот же паттерн что у HAWB-pair,
 # только проверяем код 02099 а не 02021.
 _TRANSPORT_PAIR_RE = _HAWB_PAIR_RE  # тот же regex — фильтруем по коду в _hawb_and_transport_in_houseshipment
