@@ -54,20 +54,15 @@ class Command(BaseCommand):
         # при удалении меньшего row.
         empty_rows_sorted = sorted(empty_rows, reverse=True)
         deleted = 0
+        from django.db import connection
         for r in empty_rows_sorted:
             try:
                 _retry_api(ws.delete_rows, r, label=f'purge delete_rows {r}')
-                # Обновляем ImportedSheetRow: всем строкам > r сдвигаем -1.
-                ImportedSheetRow.objects.filter(
-                    source=src, source_row_index__gt=r,
-                ).update(source_row_index=ImportedSheetRow._meta.get_field(
-                    'source_row_index'))  # placeholder
             except Exception as e:
                 self.stdout.write(self.style.ERROR(
                     f'  row {r}: delete_rows failed: {e}'))
                 continue
-            # Сдвиг индексов в БД делаем raw SQL для эффективности
-            from django.db import connection
+            # Сдвиг индексов в БД: для всех строк > r вычитаем 1.
             with connection.cursor() as cur:
                 cur.execute(
                     'UPDATE cargo_importedsheetrow '
