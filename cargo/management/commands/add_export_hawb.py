@@ -28,6 +28,12 @@ class Command(BaseCommand):
             help='Тип декларации (ПТДЭГ/ДТЭГ/ДТ). Полезно для legacy кейсов '
                  'где outbox CMN.11024/11335/11349 без raw_xml — автомат '
                  'тип декларации не определит.')
+        parser.add_argument(
+            '--goods-count', type=int, default=0,
+            help='Количество товарных позиций ДТ (если raw_xml outbox пуст).')
+        parser.add_argument(
+            '--declarant', default='',
+            help='ФИО декларанта (если raw_xml outbox пуст).')
 
     def handle(self, *args, **opts):
         for hn in opts['hawb_numbers']:
@@ -52,13 +58,18 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.ERROR(f'  {hn}: ошибка {e}'))
                     continue
 
-            # Если задан явный тип декларации — проставляем сразу
+            # Ручное заполнение legacy-полей если задано
+            manual_fields = {}
             if opts['decl_form']:
-                HouseWaybill.objects.filter(pk=h.pk).update(
-                    declaration_form=opts['decl_form'])
-                h.refresh_from_db(fields=['declaration_form'])
-                self.stdout.write(
-                    f'    declaration_form = {h.declaration_form!r}')
+                manual_fields['declaration_form'] = opts['decl_form']
+            if opts['goods_count']:
+                manual_fields['goods_count'] = opts['goods_count']
+            if opts['declarant']:
+                manual_fields['declarant_name'] = opts['declarant']
+            if manual_fields:
+                HouseWaybill.objects.filter(pk=h.pk).update(**manual_fields)
+                h.refresh_from_db(fields=list(manual_fields.keys()))
+                self.stdout.write(f'    manual: {manual_fields}')
 
             # 1. Привязать висящие CMN.11337/11001/CMN.11002/CMN.11350 без
             #    hawb_id, у которых raw_xml содержит наш hawb_number.
