@@ -62,6 +62,11 @@ MSG_KIND_MAP: dict[str, str] = {
     'CMN.11001': 'registered',          # ED-приём (приём ЭД) — таможня присвоила
                                         # рег.номер. Аналогично CMN.11337 для классических
                                         # ДТ (CMN.11024) и других не-ДТЭГ-форм.
+    'CMN.11002': 'examination',         # «Начато оформление» / «Уведомление о начале
+                                        # проверки ДТ» — в Альте отображается как
+                                        # «Идет проверка». Refine на rejected/released
+                                        # происходит в classify() если в parsed_meta
+                                        # есть decision_code/design_code.
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -229,6 +234,38 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         if obs and (obs.cargo or obs.hawb):
             cargo = obs.cargo or (obs.hawb.mawb if obs.hawb and obs.hawb.mawb_id else None)
             return (cargo, obs.hawb)
+        # 2.5. Auto-create export HAWB по hawbs списку из outbox parsed_meta.
+        # Сценарий: старый агент для CMN.11024/11335 не сохранил raw_xml,
+        # поэтому _apply_export_outbox не создал HAWB. Теперь приходит CMN.11337
+        # /11001 с initial_envelope ссылающийся на тот outbox. У outbox в
+        # parsed_meta есть hawbs=[X] (это поле собиралось всегда, независимо
+        # от raw_xml). Создаём HAWB(EXPORT) и возвращаем — recompute_declaration
+        # сразу запишет рег.номер из этого CMN.11337/11001.
+        if obs and obs.msg_type in ('CMN.11024', 'CMN.11335',
+                                    'CMN.11349'):
+            pm = obs.parsed_meta or {}
+            hawb_list = pm.get('hawbs') or []
+            for hn in hawb_list:
+                hn = str(hn).strip()
+                if not hn:
+                    continue
+                existing = HouseWaybill.objects.filter(
+                    hawb_number__iexact=hn).first()
+                if existing:
+                    return (existing.mawb, existing)
+                # Auto-create — без MAWB (нет transport_doc без raw_xml)
+                try:
+                    new_h = HouseWaybill.objects.create(
+                        hawb_number=hn,
+                        shipment_type='EXPORT',
+                        logistics_status='EXPORT_CUSTOMS',
+                    )
+                    logger.info(
+                        'match: auto-created HAWB %s (EXPORT) via initial_envelope %s',
+                        hn, init)
+                    return (None, new_h)
+                except Exception:
+                    logger.exception('match: auto-create HAWB %s failed', hn)
 
     # 3. По собранному номеру ДТ
     decl = _build_declaration_number(parsed)
