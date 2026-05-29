@@ -196,6 +196,9 @@ def _ensure_export_headers(ws, header_row: int) -> dict[str, int]:
     return out
 
 
+_export_row_lock = threading.Lock()
+
+
 def _ensure_export_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
     """Гарантирует наличие строки HAWB в export-вкладке.
 
@@ -207,6 +210,11 @@ def _ensure_export_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
        ImportedSheetRow и возвращает индекс.
 
     Возвращает (source, row_index) или None если export-source не настроен.
+
+    Защита от race-condition: глобальный Lock на длительность append + создание
+    ImportedSheetRow. Иначе при параллельных вызовах (несколько потоков из
+    одного waitress-процесса) обе read'или ImportedSheetRow=None ДО append,
+    затем оба делали append и получали 2 строки в Sheets для одной HAWB.
     """
     if not hawb.hawb_number:
         return None
@@ -215,13 +223,30 @@ def _ensure_export_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
         logger.info('export-row: no SheetSource(kind=export) configured, skip')
         return None
 
-    # Уже есть в ImportedSheetRow → ничего не делаем.
+    # Уже есть в ImportedSheetRow → ничего не делаем. (Lock не нужен —
+    # SELECT без побочных эффектов.)
     existing = ImportedSheetRow.objects.filter(
         source=src,
         hawb_number_norm__iexact=hawb.hawb_number,
     ).first()
     if existing:
         return (src, existing.source_row_index)
+
+    # Возможно append уже идёт в другом потоке — ждём его и повторяем поиск.
+    with _export_row_lock:
+        existing = ImportedSheetRow.objects.filter(
+            source=src,
+            hawb_number_norm__iexact=hawb.hawb_number,
+        ).first()
+        if existing:
+            return (src, existing.source_row_index)
+        return _do_append_export_row(hawb, src)
+
+
+def _do_append_export_row(hawb: HouseWaybill,
+                          src: SheetSource
+                          ) -> Optional[tuple[SheetSource, int]]:
+    """Старая логика _ensure_export_row, вызывается только внутри Lock."""
 
     try:
         ws = _retry_api(open_worksheet, src, label='export ensure_row open')
