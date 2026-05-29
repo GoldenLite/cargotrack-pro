@@ -157,32 +157,37 @@ def compute_ed_status(hawb) -> str:
     if not hawb or not hawb.pk:
         return ''
 
-    # 1. Финальные/значимые входящие
-    msgs = AltaInboxMessage.objects.filter(
-        hawb=hawb,
-    ).exclude(msg_kind__in=('info', 'svh_placed',
-                            'svh_do1_registered', 'svh_do2_registered'))
-    latest = msgs.order_by('-prepared_at', '-received_at').first()
-    main = _status_from_msg(latest) if latest else ''
+    # 1. ФИНАЛЬНЫЕ источники (release_date / attempt RELEASED/REJECTED) —
+    # высший приоритет. Финальный факт выпуска/отказа должен пересиливать
+    # промежуточные фразы вроде 'Присвоен номер' от CMN.11337 (которое
+    # таможня могла прислать ПОСЛЕ выпуска как уведомление).
+    main = ''
+    cur_decl = (hawb.customs_declaration_number or '').strip()
+    if hawb.release_date:
+        main = 'Выпуск разрешен'
+    elif cur_decl:
+        cur_attempt = hawb.declaration_attempts.filter(
+            declaration_number=cur_decl).first()
+        if cur_attempt:
+            if cur_attempt.status == 'RELEASED':
+                main = 'Выпуск разрешен'
+            elif cur_attempt.status == 'REJECTED':
+                main = 'Отказано в выпуске'
 
-    # 1.5. HAWB.release_date / HawbDeclarationAttempt — более надёжный источник
-    # когда CMN не пришли (юзер заполнил через bulk_resubmission или вручную).
-    # Финальная фраза перекрывает 'Присвоен номер' / 'Открытие процедуры'.
+    # 1.5. Если финальных нет — смотрим последнее значимое CMN-сообщение.
     if not main:
-        cur_decl = (hawb.customs_declaration_number or '').strip()
-        if hawb.release_date:
-            main = 'Выпуск разрешен'
-        elif cur_decl:
-            # Смотрим статус последнего attempt этой текущей ДТ
+        msgs = AltaInboxMessage.objects.filter(
+            hawb=hawb,
+        ).exclude(msg_kind__in=('info', 'svh_placed',
+                                'svh_do1_registered', 'svh_do2_registered'))
+        latest = msgs.order_by('-prepared_at', '-received_at').first()
+        main = _status_from_msg(latest) if latest else ''
+        # FILED-attempt → 'Присвоен номер' (если CMN не дал чего-то лучше).
+        if not main and cur_decl:
             cur_attempt = hawb.declaration_attempts.filter(
-                declaration_number=cur_decl).first()
+                declaration_number=cur_decl, status='FILED').first()
             if cur_attempt:
-                if cur_attempt.status == 'RELEASED':
-                    main = 'Выпуск разрешен'
-                elif cur_attempt.status == 'REJECTED':
-                    main = 'Отказано в выпуске'
-                elif cur_attempt.status == 'FILED':
-                    main = 'Присвоен номер'
+                main = 'Присвоен номер'
 
     if not main:
         # 2. Нет значимых входящих — смотрим outbox. Подача → "Присвоен номер"
