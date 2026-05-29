@@ -181,13 +181,48 @@ def compute_ed_status(hawb) -> str:
     # подключения агента) это вводило бы в заблуждение. 'Присвоен номер'
     # ставим только когда таможня реально прислала CMN.11337/11001
     # (kind=registered) или другое значимое сообщение.
+    msgs = AltaInboxMessage.objects.filter(
+        hawb=hawb,
+    ).exclude(msg_kind__in=('info', 'svh_placed',
+                            'svh_do1_registered', 'svh_do2_registered'))
+    latest = msgs.order_by('-prepared_at', '-received_at').first()
     if not main:
-        msgs = AltaInboxMessage.objects.filter(
-            hawb=hawb,
-        ).exclude(msg_kind__in=('info', 'svh_placed',
-                                'svh_do1_registered', 'svh_do2_registered'))
-        latest = msgs.order_by('-prepared_at', '-received_at').first()
         main = _status_from_msg(latest) if latest else ''
+
+    # 1.6. Переподача после финального решения: если у HAWB есть outbox
+    # CMN.11023/11349/11335/11024 с prepared_at ПОЗЖЕ финального
+    # решения от таможни (rejected/withdrawn) — значит юзер переподал,
+    # начинается новая фаза «Открытие процедуры» (или «Присвоен номер»
+    # если уже пришёл CMN.11337/11001 на новую ДТ).
+    if main in ('Отказано в выпуске', 'Считается не поданной', 'Отзыв'):
+        baseline_ts = latest.prepared_at if latest else None
+        if baseline_ts:
+            # Связь outbox с HAWB: либо FK hawb_id, либо в parsed_meta.hawbs
+            # или raw_xml. Полный поиск дорогой; ограничиваем по дате.
+            candidates = AltaOutboxObservation.objects.filter(
+                msg_type__in=('CMN.11023', 'CMN.11349',
+                              'CMN.11335', 'CMN.11024'),
+                prepared_at__gt=baseline_ts,
+            )
+            has_resubmission = False
+            for o in candidates:
+                if o.hawb_id == hawb.pk:
+                    has_resubmission = True
+                    break
+                pm = o.parsed_meta or {}
+                if hawb.hawb_number in (pm.get('hawbs') or []):
+                    has_resubmission = True
+                    break
+            if has_resubmission:
+                # Если уже пришёл CMN.11337/11001 на новую подачу с
+                # GTDNumber — current_decl уже изменился, и attempt
+                # RELEASED/REJECTED не для текущей ДТ. Тогда фраза
+                # из latest_msg перебьёт rejected. Здесь главное —
+                # вернуть к «открытию процедуры» / «присвоен номер».
+                if (hawb.customs_declaration_number or '').strip():
+                    main = 'Присвоен номер'
+                else:
+                    main = 'Открытие процедуры'
 
     if not main:
         # 2. Нет значимых входящих — смотрим outbox. Подача → "Присвоен номер"
