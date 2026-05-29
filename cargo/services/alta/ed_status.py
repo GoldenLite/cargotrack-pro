@@ -157,15 +157,15 @@ def compute_ed_status(hawb) -> str:
     if not hawb or not hawb.pk:
         return ''
 
-    # 1. ФИНАЛЬНЫЕ источники (release_date / attempt RELEASED/REJECTED) —
-    # высший приоритет. Финальный факт выпуска/отказа должен пересиливать
-    # промежуточные фразы вроде 'Присвоен номер' от CMN.11337 (которое
-    # таможня могла прислать ПОСЛЕ выпуска как уведомление).
+    # 1. ФИНАЛЬНЫЕ источники: release_date / attempt RELEASED/REJECTED.
+    # ВАЖНО: финал применяется только если он относится к ТЕКУЩЕЙ ДТ.
+    # Сценарий переподачи: старая ДТ была released, потом юзер подал
+    # новую — release_date от старой не очищается. Если current_decl
+    # отличается от ДТ при которой был release, нельзя показывать
+    # «Выпуск разрешен» — current ДТ в работе.
     main = ''
     cur_decl = (hawb.customs_declaration_number or '').strip()
-    if hawb.release_date:
-        main = 'Выпуск разрешен'
-    elif cur_decl:
+    if cur_decl:
         cur_attempt = hawb.declaration_attempts.filter(
             declaration_number=cur_decl).first()
         if cur_attempt:
@@ -173,6 +173,12 @@ def compute_ed_status(hawb) -> str:
                 main = 'Выпуск разрешен'
             elif cur_attempt.status == 'REJECTED':
                 main = 'Отказано в выпуске'
+            # FILED для current — релиз был от ДРУГОЙ (старой) ДТ,
+            # не используем release_date. Падаем дальше в latest CMN.
+    elif hawb.release_date:
+        # Нет current decl, но есть release_date — легаси-кейс,
+        # сохраняем старое поведение.
+        main = 'Выпуск разрешен'
 
     # 1.5. Если финальных нет — смотрим последнее значимое CMN-сообщение.
     # ВАЖНО: attempt со статусом FILED (без явного RELEASED/REJECTED от
