@@ -16,7 +16,7 @@ class Command(BaseCommand):
         if not cargo:
             self.stdout.write(self.style.ERROR(f'Cargo {awb} не найден'))
             return
-        hawbs = list(cargo.house_waybills.all())
+        hawbs = list(cargo.hawbs.all())
         export_hawbs = [h for h in hawbs
                         if (h.shipment_type or 'IMPORT').upper() == 'EXPORT']
         self.stdout.write(f'Cargo {awb}: всего {len(hawbs)} HAWB, '
