@@ -247,6 +247,23 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         if obs and obs.msg_type in ('CMN.11024', 'CMN.11335',
                                     'CMN.11349'):
             pm = obs.parsed_meta or {}
+            hawb_list = pm.get('hawbs') or []
+
+            # Сначала смотрим — может HAWB уже существует в БД (например
+            # создана вручную через add_export_hawb). Тогда возвращаем её
+            # независимо от raw_xml.
+            for hn in hawb_list:
+                hn = str(hn).strip()
+                if not hn:
+                    continue
+                existing = HouseWaybill.objects.filter(
+                    hawb_number__iexact=hn).first()
+                if existing:
+                    return (existing.mawb, existing)
+
+            # HAWB в БД нет → пытаемся auto-create, но только если raw_xml
+            # подтверждает ЭК. Без raw_xml не знаем экспорт это или импорт
+            # — пропускаем (импортные мы не хотим в экспортной вкладке).
             raw_xml = pm.get('raw_xml') or ''
             is_export = False
             if raw_xml:
@@ -267,15 +284,10 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
             if not is_export:
                 return (None, None)  # импорт/неизвестно → пропускаем
 
-            hawb_list = pm.get('hawbs') or []
             for hn in hawb_list:
                 hn = str(hn).strip()
                 if not hn:
                     continue
-                existing = HouseWaybill.objects.filter(
-                    hawb_number__iexact=hn).first()
-                if existing:
-                    return (existing.mawb, existing)
                 try:
                     new_h = HouseWaybill.objects.create(
                         hawb_number=hn,
