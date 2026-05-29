@@ -234,16 +234,39 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         if obs and (obs.cargo or obs.hawb):
             cargo = obs.cargo or (obs.hawb.mawb if obs.hawb and obs.hawb.mawb_id else None)
             return (cargo, obs.hawb)
-        # 2.5. Auto-create export HAWB по hawbs списку из outbox parsed_meta.
+        # 2.5. Auto-create EXPORT HAWB по hawbs списку из outbox parsed_meta.
         # Сценарий: старый агент для CMN.11024/11335 не сохранил raw_xml,
-        # поэтому _apply_export_outbox не создал HAWB. Теперь приходит CMN.11337
-        # /11001 с initial_envelope ссылающийся на тот outbox. У outbox в
-        # parsed_meta есть hawbs=[X] (это поле собиралось всегда, независимо
-        # от raw_xml). Создаём HAWB(EXPORT) и возвращаем — recompute_declaration
-        # сразу запишет рег.номер из этого CMN.11337/11001.
+        # поэтому _apply_export_outbox не создал HAWB. Теперь приходит
+        # CMN.11337/11001 с initial_envelope ссылающимся на тот outbox.
+        # Создаём HAWB(EXPORT) и возвращаем.
+        # ВАЖНО: создаём только если outbox raw_xml подтверждает ЭК
+        # (DeclarationKindCode='ЭК' для CMN.11335/11349, CustomsProcedure='ЭК'
+        # для CMN.11024). Если raw_xml пустой — НЕ создаём, мы не знаем
+        # export или import (legacy agent). Импортные HAWB у нас живут в
+        # таблице «Общее», их юзер вводит вручную.
         if obs and obs.msg_type in ('CMN.11024', 'CMN.11335',
                                     'CMN.11349'):
             pm = obs.parsed_meta or {}
+            raw_xml = pm.get('raw_xml') or ''
+            is_export = False
+            if raw_xml:
+                from cargo.services.alta.xml_extract import (
+                    parse_cmn_11335, parse_cmn_11024, parse_cmn_11349_meta,
+                )
+                try:
+                    if obs.msg_type == 'CMN.11024':
+                        r = parse_cmn_11024(raw_xml)
+                        is_export = (r.get('customs_procedure') or '').strip() == 'ЭК'
+                    else:
+                        r = parse_cmn_11335(raw_xml)
+                        is_export = (r.get('declaration_kind') or '').strip() == 'ЭК'
+                except Exception:
+                    logger.exception(
+                        'match: parse outbox raw_xml failed for %s', obs.envelope_id)
+                    is_export = False
+            if not is_export:
+                return (None, None)  # импорт/неизвестно → пропускаем
+
             hawb_list = pm.get('hawbs') or []
             for hn in hawb_list:
                 hn = str(hn).strip()
@@ -253,7 +276,6 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
                     hawb_number__iexact=hn).first()
                 if existing:
                     return (existing.mawb, existing)
-                # Auto-create — без MAWB (нет transport_doc без raw_xml)
                 try:
                     new_h = HouseWaybill.objects.create(
                         hawb_number=hn,
