@@ -1099,11 +1099,15 @@ class HouseWaybill(models.Model):
         # Правило 4: неполный чеклист — нет рег. номера ДТ.
         # Исключение: customs_status == RELEASED — номер выдан таможней
         # и факт выпуска есть, внутренний чеклист уже не релевантен.
-        # При HOLD/REJECTED/EXAMINATION/FILED номер тоже не показываем —
-        # юзер хочет видеть ДТ только в паре с выпуском.
+        # При HOLD/REJECTED/EXAMINATION/FILED номер тоже не показываем
+        # для ИМПОРТА — юзер хочет видеть ДТ только в паре с выпуском.
+        # Для ЭКСПОРТА правило не применяется: HAWB(EXPORT) автосоздаются
+        # из CMN.11335/11349/11024 БЕЗ чеклиста, и юзер хочет видеть рег.
+        # номер сразу при первом сообщении таможни.
         if (self.customs_declaration_number
                 and not self.docs_ready
-                and self.customs_status != 'RELEASED'):
+                and self.customs_status != 'RELEASED'
+                and self.shipment_type != 'EXPORT'):
             self.customs_declaration_number = ''
 
         # Правило 5: не привязан к партии — нет рег. номера ДТ
