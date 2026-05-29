@@ -29,9 +29,11 @@ class Command(BaseCommand):
         ncols = len(EXPORT_HEADERS_ORDER)
         last_letter = _col_letter(ncols)
 
-        # Читаем колонку A — найти пустые строки (HAWB пустой)
+        # col_values отрезает trailing empty, но между заполненными
+        # рядами пустые возвращает как ''. Этого достаточно.
         col_vals = _retry_api(ws.col_values, 1, label='purge col_values')
 
+        # Внутри диапазона данных найти пустые
         empty_rows: list[int] = []
         for idx, v in enumerate(col_vals, start=1):
             if idx <= src.header_row:
