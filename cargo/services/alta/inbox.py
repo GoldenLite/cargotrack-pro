@@ -931,16 +931,14 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                     # Можно залогировать но не считать ошибкой.
                     continue
 
-                # decl_number + filed_date: только при released/withdrawn.
-                # HOLD/REJECTED/EXAMINATION ДТ не показывают (юзер хочет
-                # видеть ДТ только когда есть выпуск). При переходе со
-                # статуса RELEASED на любой другой change_customs_status
-                # сам очистит decl_number (см. event_dt-логика в моделях).
+                # decl_number + filed_date: пишем как только в любом значимом
+                # сообщении (registered/released/hold/examination/withdrawn)
+                # появляется GTDNumber — юзер хочет видеть рег.номер сразу
+                # как его присвоит таможня, не дожидаясь выпуска.
                 # refresh_from_db: recompute пишет в DB через UPDATE минуя
-                # save() — in-memory h.customs_declaration_number отстаёт,
-                # без refresh последующий h.save() в change_customs_status
-                # перетёр бы новый номер старым значением.
-                if kind in ('released', 'withdrawn'):
+                # save() — in-memory h.customs_declaration_number отстаёт.
+                if kind in ('released', 'withdrawn', 'registered',
+                            'hold', 'examination', 'rejected'):
                     recompute_declaration(cargo, h)
                     h.refresh_from_db(fields=[
                         'customs_declaration_number', 'filed_date',
