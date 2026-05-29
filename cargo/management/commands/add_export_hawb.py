@@ -23,6 +23,11 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('hawb_numbers', nargs='+')
+        parser.add_argument(
+            '--decl-form', default='', choices=['', 'ПТДЭГ', 'ДТЭГ', 'ДТ'],
+            help='Тип декларации (ПТДЭГ/ДТЭГ/ДТ). Полезно для legacy кейсов '
+                 'где outbox CMN.11024/11335/11349 без raw_xml — автомат '
+                 'тип декларации не определит.')
 
     def handle(self, *args, **opts):
         for hn in opts['hawb_numbers']:
@@ -46,6 +51,14 @@ class Command(BaseCommand):
                 except Exception as e:
                     self.stdout.write(self.style.ERROR(f'  {hn}: ошибка {e}'))
                     continue
+
+            # Если задан явный тип декларации — проставляем сразу
+            if opts['decl_form']:
+                HouseWaybill.objects.filter(pk=h.pk).update(
+                    declaration_form=opts['decl_form'])
+                h.refresh_from_db(fields=['declaration_form'])
+                self.stdout.write(
+                    f'    declaration_form = {h.declaration_form!r}')
 
             # 1. Привязать висящие CMN.11337/11001/CMN.11002/CMN.11350 без
             #    hawb_id, у которых raw_xml содержит наш hawb_number.
