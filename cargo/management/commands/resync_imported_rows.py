@@ -85,14 +85,35 @@ class Command(BaseCommand):
             self.stdout.write(f'  HAWB в Sheets: {len(sheet_map)}, '
                               f'дубли: {len(dupes)}')
 
-            # Собираем (id, new_idx) пары для записей которые надо двинуть.
-            rs = list(ImportedSheetRow.objects.filter(source=src))
-            to_move = []  # (pk, new_idx)
-            untouched, missing = 0, 0
+            # Сначала дедуп по hawb_number_norm — оставляем самую свежую запись
+            # на каждый HAWB, остальные удаляем (это были побочки старых импортов).
+            rs = list(ImportedSheetRow.objects.filter(source=src)
+                      .order_by('-last_imported_at', '-id'))
+            seen_hawb: set = set()
+            dup_delete = []
+            uniq = []
             for r in rs:
                 hn = r.hawb_number_norm
                 if not hn:
                     continue
+                if hn in seen_hawb:
+                    dup_delete.append(r.pk)
+                else:
+                    seen_hawb.add(hn)
+                    uniq.append(r)
+            if dup_delete:
+                self.stdout.write(
+                    f'  HAWB-дубли в БД: удаляю {len(dup_delete)} '
+                    f'старых записей')
+                if not opts['dry_run']:
+                    ImportedSheetRow.objects.filter(
+                        pk__in=dup_delete).delete()
+
+            # Собираем (id, new_idx) пары для записей которые надо двинуть.
+            to_move = []  # (pk, new_idx)
+            untouched, missing = 0, 0
+            for r in uniq:
+                hn = r.hawb_number_norm
                 sheet_idx = sheet_map.get(hn)
                 if sheet_idx is None:
                     missing += 1
