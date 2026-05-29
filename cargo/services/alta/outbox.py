@@ -524,6 +524,7 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
             'transport_per_hawb':   r['transport_per_hawb'],
             'goods_count_per_hawb': r['goods_count_per_hawb'],
             'goods_count':          0,
+            'signatory':            r.get('signatory') or '',
         }
     if obs.msg_type == 'CMN.11349':
         r = parse_cmn_11349_meta(raw_xml)
@@ -533,6 +534,7 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
             'transport_per_hawb':   r['transport_per_hawb'],
             'goods_count_per_hawb': r['goods_count_per_hawb'],
             'goods_count':          0,
+            'signatory':            r.get('signatory') or '',
         }
     if obs.msg_type == 'CMN.11024':
         r = parse_cmn_11024(raw_xml)
@@ -542,6 +544,7 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
             'transport_per_hawb':   r['transport_per_hawb'],
             'goods_count_per_hawb': {},
             'goods_count':          r['goods_count'],
+            'signatory':            r.get('signatory') or '',
         }
     return None
 
