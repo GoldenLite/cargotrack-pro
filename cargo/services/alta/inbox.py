@@ -488,11 +488,32 @@ def _sync_decl_via_outbox(hawb: HouseWaybill, target_decl: str,
             if d:
                 reg_date_dt = timezone.make_aware(_dt.combine(d, _dt_time(0, 0)))
 
+    # Если у hawb уже shipment_type='EXPORT' — siblings из outbox тоже
+    # экспортные, можно auto-create при отсутствии.
+    is_export_chain = (hawb.shipment_type or 'IMPORT').upper() == 'EXPORT'
+
     changed: list[HouseWaybill] = []
     for hn in sibling_set:
         sib = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
+        if not sib and is_export_chain:
+            # Auto-create отсутствующего sibling как EXPORT_CUSTOMS.
+            try:
+                sib = HouseWaybill.objects.create(
+                    hawb_number=hn,
+                    shipment_type='EXPORT',
+                    logistics_status='EXPORT_CUSTOMS',
+                )
+                logger.info(
+                    'sync_decl: auto-created sibling HAWB %s (EXPORT) of %s',
+                    hn, hawb.hawb_number)
+            except Exception:
+                logger.exception('sync_decl: create %s failed', hn)
+                continue
         if not sib:
             continue
+        # Привязка к той же партии (если у sibling нет mawb, а у hawb есть)
+        if hawb.mawb_id and not sib.mawb_id:
+            HouseWaybill.objects.filter(pk=sib.pk).update(mawb_id=hawb.mawb_id)
         cur = (sib.customs_declaration_number or '').strip()
         if cur == target_decl:
             continue
