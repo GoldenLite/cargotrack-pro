@@ -1027,10 +1027,14 @@ class HouseWaybill(models.Model):
             # RELEASED — выпуска нет, значит и ДТ-номер с датой выпуска
             # в Sheets показывать не должны (юзер хочет видеть ДТ только
             # в паре с фактом выпуска). Стираем оба.
-            if self.release_date:
-                self.release_date = None
-            if self.customs_declaration_number:
-                self.customs_declaration_number = ''
+            # Для ЭКСПОРТА правило не применяется: юзер хочет видеть
+            # рег.номер в «Экспортной статистике» сразу при первом
+            # сообщении таможни (CMN.11337/11001), даже до выпуска.
+            if (self.shipment_type or 'IMPORT').upper() != 'EXPORT':
+                if self.release_date:
+                    self.release_date = None
+                if self.customs_declaration_number:
+                    self.customs_declaration_number = ''
             # После выпуска на импорте — переводим в следующий лог.статус
             if self.logistics_status == 'IMPORT_CUSTOMS':
                 self.logistics_status = 'READY_DELIVERY'
