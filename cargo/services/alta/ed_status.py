@@ -227,10 +227,18 @@ def compute_ed_status(hawb) -> str:
     if not main:
         # 2. Нет значимых входящих — смотрим outbox. Подача → "Присвоен номер"
         # если уже есть customs_declaration_number, иначе "Открытие процедуры".
-        has_outbox = AltaOutboxObservation.objects.filter(
-            hawb=hawb,
+        # Outbox может быть FK-привязан к HAWB ИЛИ упомянут только через
+        # parsed_meta.hawbs (multi-HAWB ДТ). Проверяем оба пути.
+        outbox_qs = AltaOutboxObservation.objects.filter(
             msg_type__in=('CMN.11335', 'CMN.11349', 'CMN.11024', 'CMN.11023'),
-        ).exists()
+        )
+        has_outbox = outbox_qs.filter(hawb=hawb).exists()
+        if not has_outbox:
+            for o in outbox_qs:
+                if hawb.hawb_number in (
+                        (o.parsed_meta or {}).get('hawbs') or []):
+                    has_outbox = True
+                    break
         if has_outbox:
             if (hawb.customs_declaration_number or '').strip():
                 main = 'Присвоен номер'
