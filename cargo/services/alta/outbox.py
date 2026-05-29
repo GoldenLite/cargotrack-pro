@@ -146,6 +146,37 @@ def dispatch(obs: AltaOutboxObservation) -> None:
     if obs.msg_type in ('CMN.11335', 'CMN.11349', 'CMN.11024', 'CMN.11023'):
         _apply_export_outbox(obs)
 
+    # Race-fix: если CMN.11337/11001 от таможни уже пришла РАНЬШЕ нашей
+    # outbox observation (агент в двух потоках мог обогнать порядком POST),
+    # её dispatch вернул hawb_id=None — потому что HAWB ещё не было.
+    # Сейчас HAWB существует (auto-create выше), пере-dispatch таких
+    # сообщений по initial_envelope, чтобы они сматчились и прописали
+    # рег.номер/статусы.
+    _redispatch_unmatched_for_envelope(obs.envelope_id)
+
+
+def _redispatch_unmatched_for_envelope(envelope_id: str) -> None:
+    """Пере-dispatch unmatched inbox-msg с этим initial_envelope."""
+    if not envelope_id:
+        return
+    try:
+        from cargo.models import AltaInboxMessage
+        from cargo.services.alta.inbox import dispatch as inbox_dispatch
+    except Exception:
+        return
+    qs = AltaInboxMessage.objects.filter(
+        hawb_id__isnull=True,
+        parsed_meta__initial_envelope__iexact=envelope_id,
+    ).exclude(msg_kind__in=('info', 'svh_placed',
+                            'svh_do1_registered', 'svh_do2_registered'))
+    for m in qs:
+        try:
+            inbox_dispatch(m)
+            logger.info('outbox: re-dispatched unmatched inbox #%s via '
+                        'envelope %s', m.pk, envelope_id)
+        except Exception:
+            logger.exception('outbox: redispatch failed for inbox #%s', m.pk)
+
 
 def _apply_goods_count(obs, hawb_list: list) -> None:
     """Записывает HouseWaybill.goods_count из parsed_meta CMN.11023/11349."""
