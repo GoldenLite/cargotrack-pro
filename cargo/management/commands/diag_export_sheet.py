@@ -25,3 +25,12 @@ class Command(BaseCommand):
         for r in over[:10]:
             self.stdout.write(
                 f'  row={r.source_row_index}  hawb={r.hawb_number_norm}')
+
+        from django.db.models import Count
+        dupes = (rs.values('source_row_index')
+                   .annotate(c=Count('id'))
+                   .filter(c__gt=1)
+                   .order_by('-c')[:20])
+        self.stdout.write('--- дубли по row_idx ---')
+        for d in dupes:
+            self.stdout.write(f'  row={d["source_row_index"]}  count={d["c"]}')
