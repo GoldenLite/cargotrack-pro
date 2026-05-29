@@ -210,12 +210,9 @@ def compute_ed_status(hawb) -> str:
             flags.append('Запрошены док-ты!')
     except Exception:
         pass
-    try:
-        n_att = hawb.declaration_attempts.count()
-        if n_att >= 2 and 'Корректировка' not in main:
-            flags.append('Корректировка!')
-    except Exception:
-        pass
+    # Флаг «Корректировка!» в Альте = КДТ (изменение декларации после
+    # выпуска), а не «переподача с новой декларацией». 2+ attempts у нас
+    # = переподача (отказ→новая подача), это не КДТ — не ставим флаг.
 
     if not main and not flags:
         return ''
