@@ -165,6 +165,25 @@ def compute_ed_status(hawb) -> str:
     latest = msgs.order_by('-prepared_at', '-received_at').first()
     main = _status_from_msg(latest) if latest else ''
 
+    # 1.5. HAWB.release_date / HawbDeclarationAttempt — более надёжный источник
+    # когда CMN не пришли (юзер заполнил через bulk_resubmission или вручную).
+    # Финальная фраза перекрывает 'Присвоен номер' / 'Открытие процедуры'.
+    if not main:
+        cur_decl = (hawb.customs_declaration_number or '').strip()
+        if hawb.release_date:
+            main = 'Выпуск разрешен'
+        elif cur_decl:
+            # Смотрим статус последнего attempt этой текущей ДТ
+            cur_attempt = hawb.declaration_attempts.filter(
+                declaration_number=cur_decl).first()
+            if cur_attempt:
+                if cur_attempt.status == 'RELEASED':
+                    main = 'Выпуск разрешен'
+                elif cur_attempt.status == 'REJECTED':
+                    main = 'Отказано в выпуске'
+                elif cur_attempt.status == 'FILED':
+                    main = 'Присвоен номер'
+
     if not main:
         # 2. Нет значимых входящих — смотрим outbox. Подача → "Присвоен номер"
         # если уже есть customs_declaration_number, иначе "Открытие процедуры".
