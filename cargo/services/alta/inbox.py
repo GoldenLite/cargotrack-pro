@@ -440,7 +440,74 @@ def recompute_declaration(cargo: Optional[Cargo],
             # а потом CMN.11350 проставила customs_declaration_number у других
             # HAWB этой же ДТ → нужно скопировать filed_date соседям.
             _sync_filed_date_by_declaration(target_decl)
-    return [hawb]
+
+            # Пропагируем decl_number на всех HAWB одной декларации через
+            # AltaOutboxObservation (наша подача CMN.11023/11335/11024/11349).
+            # В parsed_meta.hawbs у этих outbox лежит ПОЛНЫЙ список HAWB
+            # декларации. Если рег.номер уже выставлен у одной — проставим
+            # тот же decl у всех siblings (если у них пусто).
+            extra_touched = _sync_decl_via_outbox(hawb, target_decl, latest)
+    return [hawb] + extra_touched
+
+
+def _sync_decl_via_outbox(hawb: HouseWaybill, target_decl: str,
+                          latest_msg) -> list[HouseWaybill]:
+    """Пропагирует target_decl на siblings HAWB одной декларации.
+
+    Находит AltaOutboxObservation (CMN.11023/11335/11024/11349) у которого
+    в parsed_meta.hawbs есть hawb.hawb_number. Берёт ОСТАЛЬНЫЕ HAWB из этого
+    списка и проставляет им target_decl + filed_date (если пусто).
+    Регистрирует attempts.
+
+    Возвращает список изменённых HAWB.
+    """
+    from cargo.models import AltaOutboxObservation
+
+    obs_list = AltaOutboxObservation.objects.filter(
+        msg_type__in=('CMN.11023', 'CMN.11335',
+                      'CMN.11024', 'CMN.11349'),
+    )
+    sibling_set: set = set()
+    for o in obs_list:
+        pm = o.parsed_meta or {}
+        hawbs = pm.get('hawbs') or []
+        if hawb.hawb_number in hawbs:
+            for hn in hawbs:
+                if hn != hawb.hawb_number:
+                    sibling_set.add(hn)
+    if not sibling_set:
+        return []
+
+    # registration_date для filed_date (только дата 00:00)
+    reg_date_dt = None
+    if latest_msg:
+        reg_date_str = (latest_msg.parsed_meta or {}).get('registration_date') or ''
+        if reg_date_str:
+            from django.utils.dateparse import parse_date
+            from datetime import datetime as _dt, time as _dt_time
+            d = parse_date(reg_date_str)
+            if d:
+                reg_date_dt = timezone.make_aware(_dt.combine(d, _dt_time(0, 0)))
+
+    changed: list[HouseWaybill] = []
+    for hn in sibling_set:
+        sib = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
+        if not sib:
+            continue
+        cur = (sib.customs_declaration_number or '').strip()
+        if cur == target_decl:
+            continue
+        upd = {'customs_declaration_number': target_decl}
+        if reg_date_dt and sib.filed_date is None:
+            upd['filed_date'] = reg_date_dt
+        HouseWaybill.objects.filter(pk=sib.pk).update(**upd)
+        sib.refresh_from_db(fields=list(upd.keys()))
+        _register_attempt(sib, target_decl)
+        changed.append(sib)
+    if changed:
+        logger.info('decl propagated to %d siblings of %s (decl=%s)',
+                    len(changed), hawb.hawb_number, target_decl)
+    return changed
 
 
 def _register_attempt(hawb: HouseWaybill, declaration_number: str,
