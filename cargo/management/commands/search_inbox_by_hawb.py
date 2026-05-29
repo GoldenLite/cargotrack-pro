@@ -25,4 +25,4 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'  #{m.pk}  {m.prepared_at}  {m.msg_type}  '
                 f'kind={m.msg_kind!r}  hawb_id={m.hawb_id}  '
-                f'gtd={m.gtd_reg_number!r}')
+                f'cargo={m.cargo_id}')
