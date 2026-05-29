@@ -26,7 +26,8 @@ class Command(BaseCommand):
         parser.add_argument('--limit', type=int, default=0,
                             help='Обработать первые N сообщений (0 = все)')
         parser.add_argument('--msg-types', nargs='+',
-                            default=['CMN.11335', 'CMN.11349', 'CMN.11024'])
+                            default=['CMN.11335', 'CMN.11349',
+                                     'CMN.11024', 'CMN.11023'])
 
     def handle(self, *args, **opts):
         qs = (AltaOutboxObservation.objects
