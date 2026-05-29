@@ -38,6 +38,7 @@ from cargo.services.sheets.writeback import (
     CARGOTRACK_CUSTOMS_REQUESTS_HEADER,
     CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER,
     CARGOTRACK_ATTEMPTS_COUNT_HEADER,
+    CARGOTRACK_ED_STATUS_HEADER,
     _local_date_str,
     _retry_api,
     _customs_requests_text,
@@ -126,6 +127,10 @@ CHECKS = [
         'customs_requests_count'),
     (CARGOTRACK_ATTEMPTS_COUNT_HEADER,         lambda h: _attempts_count(h),
         'attempts_count'),
+    (CARGOTRACK_ED_STATUS_HEADER,
+        lambda h: __import__('cargo.services.alta.ed_status',
+                             fromlist=['compute_ed_status']).compute_ed_status(h),
+        'ed_status'),
     # Удалены 2026-05-26: cargo_mawb, svh_do1_sent_at, svh_do2_send_at —
     # юзер не использует. Поля в БД остаются для внутренней логики.
 ]

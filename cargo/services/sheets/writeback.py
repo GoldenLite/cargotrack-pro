@@ -82,6 +82,10 @@ CARGOTRACK_CUSTOMS_REQUESTS_HEADER       = 'Запросы таможни'
 CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER = 'Количество запросов'
 # Счётчик переподач = (число HawbDeclarationAttempt) − 1.
 CARGOTRACK_ATTEMPTS_COUNT_HEADER         = 'Переподачи'
+# Реконструированный статус ЭД (аналог «ЭД-статус» в Альте) — фраза +
+# опц. флаги через «; ». Колонка добавляется в первую свободную справа,
+# юзер сам перетащит на удобное место.
+CARGOTRACK_ED_STATUS_HEADER              = 'CargoTrack: статус ЭД'
 
 # ── Колонки вкладки «Экспортная статистика» (kind='export') ─────────
 # Юзер уже знает что писать в каждую. Имена без префикса CargoTrack:.
@@ -1261,55 +1265,74 @@ def _ed_status_for_hawb(hawb) -> str:
 def batch_write_ed_status_for_hawbs(hawbs: list) -> int:
     """Batch writeback ed_status в «Статус ЭД» + цвет фона ячейки по статусу.
 
-    Только для export-вкладки.
+    Auto-routing: импортные HAWB → колонка «CargoTrack: статус ЭД» в
+    таблице «Общее»; экспортные → «Статус ЭД» в «Экспортной статистике».
     """
-    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
-    if not exp:
+    if not hawbs:
         return 0
-    n = _batch_write_hawb_dates(
-        exp, 'ed_status',
-        EXPORT_ED_STATUS_HEADER, 'ed_status',
-        formatter=lambda v: v or '',
-        value_provider=_ed_status_for_hawb,
-        source_kind='export',
-    )
+    imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
+    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+    n = 0
+    if imp:
+        n += _batch_write_hawb_dates(
+            imp, 'ed_status',
+            CARGOTRACK_ED_STATUS_HEADER, 'ed_status',
+            formatter=lambda v: v or '',
+            value_provider=_ed_status_for_hawb,
+            source_kind='general',
+        )
+    if exp:
+        n += _batch_write_hawb_dates(
+            exp, 'ed_status',
+            EXPORT_ED_STATUS_HEADER, 'ed_status',
+            formatter=lambda v: v or '',
+            value_provider=_ed_status_for_hawb,
+            source_kind='export',
+        )
     # После записи — расставим цвета фона.
     try:
-        _apply_ed_status_colors(exp)
+        _apply_ed_status_colors(hawbs)
     except Exception:
         logger.exception('ed_status color formatting failed')
     return n
 
 
 def _apply_ed_status_colors(hawbs: list) -> None:
-    """Применяет background color к ячейкам строки HAWB:
-    - вся строка A..last → белый (сбрасываем жёлтый от шапки, который
-      ловится через ws.append_row);
-    - колонка «Статус ЭД» → цвет по фразе статуса.
+    """Раскрашивает ячейку «Статус ЭД» по фразе статуса.
 
-    Один batch_format запросом для всех HAWB.
+    Auto-routing по shipment_type: для экспорта работает с колонкой
+    EXPORT_ED_STATUS_HEADER в kind='export' (там же очищается фон всей
+    строки от жёлтого шапки append_row). Для импорта — с колонкой
+    CARGOTRACK_ED_STATUS_HEADER в kind='general' (фон строки не трогаем,
+    юзер сам формат держит).
     """
-    from cargo.services.alta.ed_status import bg_color_for_status, compute_ed_status
-
     if not hawbs:
         return
+    imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
+    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+    if exp:
+        _apply_ed_status_colors_for_export(exp)
+    if imp:
+        _apply_ed_status_colors_for_general(imp)
+
+
+def _apply_ed_status_colors_for_export(hawbs: list) -> None:
+    """Цвет ed_status в export-вкладке + clear жёлтого фона строки."""
+    from cargo.services.alta.ed_status import bg_color_for_status, compute_ed_status
+
     src = _get_export_source()
     if not src:
         return
     by_hawb = {h.hawb_number: h for h in hawbs if h.hawb_number}
-    if not by_hawb:
-        return
     rows = (ImportedSheetRow.objects
-            .filter(source=src, hawb_number_norm__in=list(by_hawb.keys()))
-            .select_related('source'))
+            .filter(source=src, hawb_number_norm__in=list(by_hawb.keys())))
     items: list[tuple[int, dict]] = []
     for r in rows:
         h = by_hawb.get(r.hawb_number_norm)
         if not h:
             continue
-        status = compute_ed_status(h)
-        items.append((r.source_row_index, bg_color_for_status(status)))
-
+        items.append((r.source_row_index,
+                      bg_color_for_status(compute_ed_status(h))))
     if not items:
         return
 
@@ -1326,22 +1349,70 @@ def _apply_ed_status_colors(hawbs: list) -> None:
 
     formats: list[dict] = []
     for row_idx, color in items:
-        # 1) очистить фон всей строки A:last
         formats.append({
             'range': f'A{row_idx}:{last_letter}{row_idx}',
             'format': {'backgroundColor': white},
         })
-        # 2) покрасить ячейку Статус ЭД
         formats.append({
             'range': f'{letter}{row_idx}:{letter}{row_idx}',
             'format': {'backgroundColor': color},
         })
     try:
         _retry_api(ws.batch_format, formats, label='ed_status batch_format')
-        logger.info('ed_status: colored %d cells (with row clear)',
-                    len(items))
+        logger.info('ed_status export: colored %d cells', len(items))
     except gspread.exceptions.APIError as e:
         logger.exception('ed_status batch_format failed: %s', e)
+
+
+def _apply_ed_status_colors_for_general(hawbs: list) -> None:
+    """Цвет ed_status в general-вкладке (только колонка ed_status)."""
+    from cargo.services.alta.ed_status import bg_color_for_status, compute_ed_status
+
+    by_hawb = {h.hawb_number: h for h in hawbs if h.hawb_number}
+    if not by_hawb:
+        return
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(by_hawb.keys()))
+            .select_related('source'))
+
+    by_source: dict[int, list[tuple[int, dict]]] = defaultdict(list)
+    sources: dict[int, SheetSource] = {}
+    seen: set[str] = set()
+    for r in rows.order_by('-last_imported_at'):
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        h = by_hawb.get(r.hawb_number_norm)
+        if not h:
+            continue
+        sources[r.source_id] = r.source
+        by_source[r.source_id].append(
+            (r.source_row_index, bg_color_for_status(compute_ed_status(h))))
+
+    for source_id, items in by_source.items():
+        src = sources[source_id]
+        try:
+            ws = _retry_api(open_worksheet, src,
+                            label='ed_status gen fmt open')
+            col = _retry_api(_ensure_named_column, ws, src.header_row,
+                             CARGOTRACK_ED_STATUS_HEADER,
+                             label='ed_status gen fmt col')
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('ed_status gen color: open/col failed: %s', e)
+            continue
+        letter = _col_letter(col)
+        formats = [
+            {'range': f'{letter}{r}:{letter}{r}',
+             'format': {'backgroundColor': color}}
+            for r, color in items
+        ]
+        try:
+            _retry_api(ws.batch_format, formats,
+                       label='ed_status gen batch_format')
+            logger.info('ed_status general: colored %d cells', len(formats))
+        except gspread.exceptions.APIError as e:
+            logger.exception('ed_status gen batch_format failed: %s', e)
 
 
 def batch_write_svh_do1_sent_for_hawbs(hawbs: list) -> int:
