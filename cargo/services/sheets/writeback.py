@@ -1260,11 +1260,14 @@ def batch_write_ed_status_for_hawbs(hawbs: list) -> int:
 
 
 def _apply_ed_status_colors(hawbs: list) -> None:
-    """Применяет background color к ячейкам «Статус ЭД» по фразе статуса.
+    """Применяет background color к ячейкам строки HAWB:
+    - вся строка A..last → белый (сбрасываем жёлтый от шапки, который
+      ловится через ws.append_row);
+    - колонка «Статус ЭД» → цвет по фразе статуса.
 
-    Группирует HAWB по цвету и одним batch_format запросом пишет всё.
+    Один batch_format запросом для всех HAWB.
     """
-    from cargo.services.alta.ed_status import bg_color_for_status
+    from cargo.services.alta.ed_status import bg_color_for_status, compute_ed_status
 
     if not hawbs:
         return
@@ -1282,7 +1285,6 @@ def _apply_ed_status_colors(hawbs: list) -> None:
         h = by_hawb.get(r.hawb_number_norm)
         if not h:
             continue
-        from cargo.services.alta.ed_status import compute_ed_status
         status = compute_ed_status(h)
         items.append((r.source_row_index, bg_color_for_status(status)))
 
@@ -1297,16 +1299,25 @@ def _apply_ed_status_colors(hawbs: list) -> None:
         logger.exception('ed_status color: open/col failed: %s', e)
         return
     letter = _col_letter(col)
+    last_letter = _col_letter(len(EXPORT_HEADERS_ORDER))
+    white = {'red': 1.0, 'green': 1.0, 'blue': 1.0}
 
     formats: list[dict] = []
     for row_idx, color in items:
+        # 1) очистить фон всей строки A:last
+        formats.append({
+            'range': f'A{row_idx}:{last_letter}{row_idx}',
+            'format': {'backgroundColor': white},
+        })
+        # 2) покрасить ячейку Статус ЭД
         formats.append({
             'range': f'{letter}{row_idx}:{letter}{row_idx}',
             'format': {'backgroundColor': color},
         })
     try:
         _retry_api(ws.batch_format, formats, label='ed_status batch_format')
-        logger.info('ed_status: colored %d cells', len(formats))
+        logger.info('ed_status: colored %d cells (with row clear)',
+                    len(items))
     except gspread.exceptions.APIError as e:
         logger.exception('ed_status batch_format failed: %s', e)
 
