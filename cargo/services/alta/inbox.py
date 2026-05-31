@@ -811,6 +811,19 @@ def apply_status(msg: AltaInboxMessage,
             # прямым UPDATE минуя save(). Без refresh in-memory отстаёт и
             # h.change_customs_status → self.save() перетёр бы новый номер старым.
             h.refresh_from_db(fields=['customs_declaration_number', 'filed_date'])
+
+            # Защита от downgrade финального статуса при пере-обработке
+            # старых сообщений (sweeper'ы): если уже есть более свежее
+            # released/rejected/withdrawn сообщение для этой HAWB — не
+            # применяем статус из текущего (он только историческая запись).
+            newer_final = AltaInboxMessage.objects.filter(
+                hawb=h,
+                prepared_at__gt=msg.prepared_at,
+                msg_kind__in=('released', 'rejected', 'withdrawn'),
+            ).exists()
+            if newer_final:
+                continue
+
             # CMN от таможни — это факт. Не отказываем по причине «HAWB ещё не
             # в IMPORT_CUSTOMS в нашей БД» — декларация может подаваться через
             # Альту, минуя CargoTrack-workflow.
@@ -969,6 +982,17 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                     h.refresh_from_db(fields=[
                         'customs_declaration_number', 'filed_date',
                     ])
+
+                # Защита от downgrade финального статуса (sweeper'ы):
+                # если есть более свежее released/rejected/withdrawn для
+                # этой HAWB — не меняем status (только recompute decl).
+                newer_final = AltaInboxMessage.objects.filter(
+                    hawb=h,
+                    prepared_at__gt=msg.prepared_at,
+                    msg_kind__in=('released', 'rejected', 'withdrawn'),
+                ).exists()
+                if newer_final:
+                    continue
 
                 new_status = STATUS_FROM_KIND.get(kind)
                 if not new_status:
