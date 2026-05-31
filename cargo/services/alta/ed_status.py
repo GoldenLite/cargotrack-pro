@@ -181,14 +181,17 @@ def compute_ed_status(hawb) -> str:
         main = 'Выпуск разрешен'
 
     # 1.5. Если финальных нет — смотрим последнее значимое CMN-сообщение.
-    # ВАЖНО: attempt со статусом FILED (без явного RELEASED/REJECTED от
-    # таможни) НЕ источник 'Присвоен номер' — backfill_attempts создаёт
-    # такой при любой ручной ДТ в Sheets, для легаси-HAWB (выпущенных до
-    # подключения агента) это вводило бы в заблуждение. 'Присвоен номер'
-    # ставим только когда таможня реально прислала CMN.11337/11001
-    # (kind=registered) или другое значимое сообщение.
+    # Расширяем поиск: либо FK hawb=hawb, либо msg.raw_xml упоминает
+    # hawb_number И msg.cargo=hawb.mawb. Это нужно для multi-HAWB ДТ:
+    # CMN.11350 может быть привязан только к одной HAWB (matched), но
+    # упоминает всех siblings в raw_xml.
+    from django.db.models import Q
+    cond = Q(hawb=hawb)
+    if hawb.mawb_id and hawb.hawb_number:
+        cond = cond | (Q(raw_xml__icontains=hawb.hawb_number)
+                       & Q(cargo=hawb.mawb))
     msgs = AltaInboxMessage.objects.filter(
-        hawb=hawb,
+        cond,
     ).exclude(msg_kind__in=('info', 'svh_placed',
                             'svh_do1_registered', 'svh_do2_registered'))
     latest = msgs.order_by('-prepared_at', '-received_at').first()
