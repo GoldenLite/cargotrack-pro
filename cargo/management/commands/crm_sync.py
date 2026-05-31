@@ -172,15 +172,14 @@ class Command(BaseCommand):
 
         # Текущие значения колонок W, X, U из all_vals — для skip-if-equal.
         updates = []
-        rows_to_hide = []
+        rows_hide = []
+        rows_show = []
         n_changed_decl = 0
         n_changed_status = 0
         n_changed_request = 0
 
         for row_idx, hn in hawb_rows.items():
             h = db_map.get(hn)
-            if not h:
-                continue
             row_vals = all_vals[row_idx - 1] if row_idx - 1 < len(all_vals) else []
 
             cur_decl = (str(row_vals[col_decl - 1]).strip()
@@ -190,38 +189,46 @@ class Command(BaseCommand):
             cur_request = (str(row_vals[col_request - 1]).strip()
                            if col_request - 1 < len(row_vals) else '')
 
-            new_decl = (h.customs_declaration_number or '').strip()
-            new_status = compute_ed_status(h)
-            new_request = _customs_requests_text(h)
+            if h:
+                new_decl = (h.customs_declaration_number or '').strip()
+                new_status = compute_ed_status(h)
+                new_request = _customs_requests_text(h)
 
-            if cur_decl != new_decl:
-                updates.append({
-                    'range': f'{_col_letter(col_decl)}{row_idx}',
-                    'values': [[new_decl]],
-                })
-                n_changed_decl += 1
-            if cur_status != new_status:
-                updates.append({
-                    'range': f'{_col_letter(col_ed)}{row_idx}',
-                    'values': [[new_status]],
-                })
-                n_changed_status += 1
-            # Запрос таможни пишем только если в DB он непустой (не затираем
-            # ручные дополнения ВЭДа).
-            if new_request and cur_request != new_request:
-                updates.append({
-                    'range': f'{_col_letter(col_request)}{row_idx}',
-                    'values': [[new_request]],
-                })
-                n_changed_request += 1
+                if cur_decl != new_decl:
+                    updates.append({
+                        'range': f'{_col_letter(col_decl)}{row_idx}',
+                        'values': [[new_decl]],
+                    })
+                    n_changed_decl += 1
+                if cur_status != new_status:
+                    updates.append({
+                        'range': f'{_col_letter(col_ed)}{row_idx}',
+                        'values': [[new_status]],
+                    })
+                    n_changed_status += 1
+                # Запрос таможни пишем только если в DB он непустой
+                # (не затираем ручные дополнения ВЭДа).
+                if new_request and cur_request != new_request:
+                    updates.append({
+                        'range': f'{_col_letter(col_request)}{row_idx}',
+                        'values': [[new_request]],
+                    })
+                    n_changed_request += 1
+            else:
+                # HAWB нет в БД — критерий hide только по cur_decl (ручной ввод).
+                new_decl = cur_decl
+                new_status = cur_status
 
-            # Скрываем строку если decl присвоен ИЛИ статус выпуска разрешён.
+            # Hide-критерий: decl присвоен ИЛИ статус «Выпуск разрешен».
             if new_decl or 'Выпуск разрешен' in new_status:
-                rows_to_hide.append(row_idx)
+                rows_hide.append(row_idx)
+            else:
+                rows_show.append(row_idx)
 
         self.stdout.write(
             f'  diffs: decl={n_changed_decl} status={n_changed_status} '
-            f'request={n_changed_request}, hide={len(rows_to_hide)}')
+            f'request={n_changed_request}, '
+            f'hide={len(rows_hide)} show={len(rows_show)}')
 
         if opts['dry_run']:
             self.stdout.write('  --dry-run: skip writes')
@@ -231,17 +238,19 @@ class Command(BaseCommand):
         if updates:
             ws.batch_update(updates, value_input_option='RAW')
 
-        # Скрываем строки.
-        if not opts['no_hide'] and rows_to_hide:
-            self._hide_rows(ss, ws, rows_to_hide)
+        # Применяем hidden state: hide для одних, unhide для других.
+        if not opts['no_hide']:
+            if rows_hide:
+                self._set_hidden(ss, ws, rows_hide, hidden=True)
+            if rows_show:
+                self._set_hidden(ss, ws, rows_show, hidden=False)
 
         # Сортируем диапазон.
         if not opts['no_sort']:
             self._sort_by_arrival(ss, ws, col_arrival, last_col_letter)
 
-    def _hide_rows(self, ss, ws, row_indices: list[int]):
-        """Скрывает строки одним batchUpdate с диапазонами."""
-        # Группируем подряд идущие в один request.
+    def _set_hidden(self, ss, ws, row_indices: list[int], hidden: bool):
+        """Устанавливает hiddenByUser=hidden для рядов. Группирует в диапазоны."""
         sorted_rows = sorted(set(row_indices))
         requests = []
         i = 0
@@ -260,13 +269,16 @@ class Command(BaseCommand):
                         'startIndex': start - 1,  # 0-based
                         'endIndex': end,           # exclusive
                     },
-                    'properties': {'hiddenByUser': True},
+                    'properties': {'hiddenByUser': hidden},
                     'fields': 'hiddenByUser',
                 }
             })
         if requests:
-            ss.batch_update({'requests': requests})
-            self.stdout.write(f'  hidden {len(row_indices)} rows '
+            # Chunk по 100 requests чтобы не уперться в лимит Sheets API.
+            for i in range(0, len(requests), 100):
+                ss.batch_update({'requests': requests[i:i + 100]})
+            action = 'hidden' if hidden else 'shown'
+            self.stdout.write(f'  {action} {len(row_indices)} rows '
                               f'({len(requests)} ranges)')
 
     def _sort_by_arrival(self, ss, ws, col_arrival: int,
