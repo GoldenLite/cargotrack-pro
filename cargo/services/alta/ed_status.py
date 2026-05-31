@@ -240,11 +240,19 @@ def compute_ed_status(hawb) -> str:
         )
         has_outbox = outbox_qs.filter(hawb=hawb).exists()
         if not has_outbox:
-            for o in outbox_qs:
-                if hawb.hawb_number in (
-                        (o.parsed_meta or {}).get('hawbs') or []):
-                    has_outbox = True
-                    break
+            # Кеш: hawb_number → True. Считаем один раз на процесс.
+            # Без кеша для каждой HAWB без FK мы итерировали все ~10k
+            # outbox-наблюдений (~130M операций при batch-audit на 13k HAWB).
+            cache = getattr(compute_ed_status, '_outbox_hawb_cache', None)
+            if cache is None:
+                cache = set()
+                for o in outbox_qs.values_list('parsed_meta', flat=True):
+                    for hn in ((o or {}).get('hawbs') or []):
+                        if hn:
+                            cache.add(hn.strip())
+                compute_ed_status._outbox_hawb_cache = cache
+            if hawb.hawb_number in cache:
+                has_outbox = True
         if has_outbox:
             if (hawb.customs_declaration_number or '').strip():
                 main = 'Присвоен номер'
