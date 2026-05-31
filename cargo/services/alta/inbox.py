@@ -941,6 +941,7 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
         begin_batch_writeback()
 
     errors: list[str] = []
+    applied_hawbs: list[HouseWaybill] = []
 
     try:
         for cons in consignments:
@@ -985,6 +986,7 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                     if err:
                         errors.append(f'HAWB {h.hawb_number}: {err}')
                     else:
+                        applied_hawbs.append(h)
                         # Синхронизируем attempt для текущей ДТ.
                         cur_decl = (h.customs_declaration_number or '').strip()
                         if cur_decl and new_status in ('RELEASED', 'REJECTED'):
@@ -1016,6 +1018,36 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
     finally:
         if not in_bulk:
             end_batch_writeback()
+
+    # Финальный batch-writeback в Sheets для всех HAWB которые
+    # реально получили новый статус. Без этого multi-HAWB CMN.11350
+    # (10 consignments в одном сообщении) меняет DB но Sheets не
+    # обновляется — сигналы подавлены, явный вызов batch_write нужен.
+    if applied_hawbs and not in_bulk:
+        for h in applied_hawbs:
+            h.refresh_from_db(fields=[
+                'customs_declaration_number', 'filed_date',
+                'release_date', 'customs_status', 'logistics_status',
+            ])
+
+        def _bg_batch():
+            try:
+                from cargo.services.sheets.writeback import (
+                    batch_write_release_dates_for_hawbs,
+                    batch_write_filed_dates_for_hawbs,
+                    batch_write_declarations_for_hawbs,
+                    batch_write_ed_status_for_hawbs,
+                    batch_write_attempts_count_for_hawbs,
+                )
+                batch_write_release_dates_for_hawbs(applied_hawbs)
+                batch_write_filed_dates_for_hawbs(applied_hawbs)
+                batch_write_declarations_for_hawbs(applied_hawbs)
+                batch_write_attempts_count_for_hawbs(applied_hawbs)
+                batch_write_ed_status_for_hawbs(applied_hawbs)
+            except Exception:
+                logger.exception('consignment final writeback failed')
+        import threading as _th
+        _th.Thread(target=_bg_batch, daemon=True).start()
 
     return '; '.join(errors) if errors else None
 
