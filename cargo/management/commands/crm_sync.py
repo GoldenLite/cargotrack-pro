@@ -44,6 +44,7 @@ SPECIALIST_TABS = {
 # Ожидаемые заголовки в шапке (для поиска индекса колонки)
 HEADER_HAWB         = 'Номер накладной'
 HEADER_ARRIVAL_DATE = 'Дата прибытия в РФ'
+HEADER_WAREHOUSE    = 'СВХ'
 HEADER_REQUEST      = 'Запрос таможни'   # startswith match
 HEADER_DECL         = '№ Декларации на выпуск'
 HEADER_ED_STATUS    = 'Статус ЭД'
@@ -51,9 +52,22 @@ HEADER_ED_STATUS    = 'Статус ЭД'
 # Если шапка такая же как «обычный шаблон», fallback на жёсткие индексы (1-based).
 COL_HAWB         = 3
 COL_ARRIVAL_DATE = 5
+COL_WAREHOUSE    = 6
 COL_REQUEST      = 21
 COL_DECL         = 23
 COL_ED_STATUS    = 24
+
+
+def _format_date_only(dt) -> str:
+    """aware datetime → 'DD.MM.YYYY' в локальной TZ. None → ''."""
+    if not dt:
+        return ''
+    try:
+        from django.utils import timezone as _tz
+        local = _tz.localtime(dt) if _tz.is_aware(dt) else dt
+        return local.strftime('%d.%m.%Y')
+    except Exception:
+        return ''
 
 
 def _col_letter(idx: int) -> str:
@@ -122,12 +136,13 @@ class Command(BaseCommand):
             f'=== {ws.title}  ({ws.row_count}×{ws.col_count}) ==='))
 
         header = ws.row_values(1)
-        col_hawb     = _find_col(header, HEADER_HAWB,     fallback=COL_HAWB)
-        col_arrival  = _find_col(header, HEADER_ARRIVAL_DATE, fallback=COL_ARRIVAL_DATE)
-        col_request  = _find_col(header, HEADER_REQUEST, startswith=True,
-                                 fallback=COL_REQUEST)
-        col_decl     = _find_col(header, HEADER_DECL,     fallback=COL_DECL)
-        col_ed       = _find_col(header, HEADER_ED_STATUS, fallback=0)
+        col_hawb      = _find_col(header, HEADER_HAWB,         fallback=COL_HAWB)
+        col_arrival   = _find_col(header, HEADER_ARRIVAL_DATE, fallback=COL_ARRIVAL_DATE)
+        col_warehouse = _find_col(header, HEADER_WAREHOUSE,    fallback=COL_WAREHOUSE)
+        col_request   = _find_col(header, HEADER_REQUEST,      startswith=True,
+                                  fallback=COL_REQUEST)
+        col_decl      = _find_col(header, HEADER_DECL,         fallback=COL_DECL)
+        col_ed        = _find_col(header, HEADER_ED_STATUS,    fallback=0)
 
         # Добавляем колонку «Статус ЭД» если её нет.
         if not col_ed:
@@ -139,12 +154,13 @@ class Command(BaseCommand):
         self.stdout.write(
             f'  cols: HAWB={_col_letter(col_hawb)} '
             f'arrival={_col_letter(col_arrival)} '
+            f'warehouse={_col_letter(col_warehouse)} '
             f'request={_col_letter(col_request)} '
             f'decl={_col_letter(col_decl)} '
             f'ed_status={_col_letter(col_ed)}')
 
         # Читаем ВСЕ значения за один запрос — A1:последняя колонка.
-        last_col_letter = _col_letter(max(col_hawb, col_arrival,
+        last_col_letter = _col_letter(max(col_hawb, col_arrival, col_warehouse,
                                           col_request, col_decl, col_ed))
         all_vals = ws.get(f'A1:{last_col_letter}{ws.row_count}',
                           value_render_option='UNFORMATTED_VALUE')
@@ -170,13 +186,15 @@ class Command(BaseCommand):
         }
         self.stdout.write(f'  DB match: {len(db_map)}/{len(hawb_numbers)}')
 
-        # Текущие значения колонок W, X, U из all_vals — для skip-if-equal.
+        # Текущие значения колонок W, X, U, E, F из all_vals — для skip-if-equal.
         updates = []
         rows_hide = []
         rows_show = []
         n_changed_decl = 0
         n_changed_status = 0
         n_changed_request = 0
+        n_changed_arrival = 0
+        n_changed_warehouse = 0
 
         for row_idx, hn in hawb_rows.items():
             h = db_map.get(hn)
@@ -188,11 +206,23 @@ class Command(BaseCommand):
                           if col_ed - 1 < len(row_vals) else '')
             cur_request = (str(row_vals[col_request - 1]).strip()
                            if col_request - 1 < len(row_vals) else '')
+            cur_arrival = (str(row_vals[col_arrival - 1]).strip()
+                           if col_arrival - 1 < len(row_vals) else '')
+            cur_warehouse = (str(row_vals[col_warehouse - 1]).strip()
+                             if col_warehouse - 1 < len(row_vals) else '')
 
             if h:
                 new_decl = (h.customs_declaration_number or '').strip()
                 new_status = compute_ed_status(h)
                 new_request = _customs_requests_text(h)
+                # Дата прибытия = scan_into_bond на mawb-Cargo (ДО1).
+                # Лицензия СВХ = mawb.warehouse_license.
+                if h.mawb_id and h.mawb:
+                    new_arrival = _format_date_only(h.mawb.scan_into_bond)
+                    new_warehouse = (h.mawb.warehouse_license or '').strip()
+                else:
+                    new_arrival = ''
+                    new_warehouse = ''
 
                 if cur_decl != new_decl:
                     updates.append({
@@ -206,14 +236,26 @@ class Command(BaseCommand):
                         'values': [[new_status]],
                     })
                     n_changed_status += 1
-                # Запрос таможни пишем только если в DB он непустой
-                # (не затираем ручные дополнения ВЭДа).
+                # Запросы / дата прибытия / СВХ пишем только если в DB
+                # они непустые — не затираем ручные дополнения ВЭДа.
                 if new_request and cur_request != new_request:
                     updates.append({
                         'range': f'{_col_letter(col_request)}{row_idx}',
                         'values': [[new_request]],
                     })
                     n_changed_request += 1
+                if new_arrival and cur_arrival != new_arrival:
+                    updates.append({
+                        'range': f'{_col_letter(col_arrival)}{row_idx}',
+                        'values': [[new_arrival]],
+                    })
+                    n_changed_arrival += 1
+                if new_warehouse and cur_warehouse != new_warehouse:
+                    updates.append({
+                        'range': f'{_col_letter(col_warehouse)}{row_idx}',
+                        'values': [[new_warehouse]],
+                    })
+                    n_changed_warehouse += 1
             else:
                 # HAWB нет в БД — критерий hide только по cur_decl (ручной ввод).
                 new_decl = cur_decl
@@ -227,7 +269,8 @@ class Command(BaseCommand):
 
         self.stdout.write(
             f'  diffs: decl={n_changed_decl} status={n_changed_status} '
-            f'request={n_changed_request}, '
+            f'request={n_changed_request} arrival={n_changed_arrival} '
+            f'svh={n_changed_warehouse}, '
             f'hide={len(rows_hide)} show={len(rows_show)}')
 
         if opts['dry_run']:
