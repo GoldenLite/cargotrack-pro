@@ -168,6 +168,7 @@ class Command(BaseCommand):
                 hawb_number__in=hawb_numbers
             ).select_related('mawb').prefetch_related('customs_requests')
         }
+        self.stdout.write(f'  DB match: {len(db_map)}/{len(hawb_numbers)}')
 
         # Текущие значения колонок W, X, U из all_vals — для skip-if-equal.
         updates = []
