@@ -48,7 +48,7 @@ COL_ED_STATUS = 24
 
 HAWB_RE = re.compile(r'\b(\d{10,11})\b')
 # Декларация в outbox-XML это строка XXXXXXXX/DDMMYY/XXXXXXX (юзерский формат).
-DECL_LITERAL_RE = re.compile(r'\b(\d{8}/\d{6}/\d{7})\b')
+DECL_LITERAL_RE = re.compile(r'(\d{8}/\d{6}/[^\s<>"\']{6,8})')
 # В inbox-XML (CMN.11350 etc) декларация это ТРИ раздельных тега:
 #   <cat_ru:CustomsCode>10005020</cat_ru:CustomsCode>
 #   <cat_ru:RegistrationDate>2026-05-24</cat_ru:RegistrationDate>
@@ -56,7 +56,7 @@ DECL_LITERAL_RE = re.compile(r'\b(\d{8}/\d{6}/\d{7})\b')
 # Сборка: 10005020/240526/0018803.
 CUSTOMS_CODE_RE = re.compile(r'<[^>]*CustomsCode[^>]*>(\d{8})</')
 REG_DATE_RE = re.compile(r'<[^>]*RegistrationDate[^>]*>(\d{4})-(\d{2})-(\d{2})</')
-GTD_NUM_RE = re.compile(r'<[^>]*GTDNumber[^>]*>(\d{7})</')
+GTD_NUM_RE = re.compile(r'<[^>]*GTDNumber[^>]*>([^<]+)</')
 
 
 def _extract_decls(raw: str) -> set[str]:
