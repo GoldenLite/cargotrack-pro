@@ -309,11 +309,12 @@ class Command(BaseCommand):
 
             # Hide-критерий:
             # 1. ed_status='Выпуск разрешен' (наша автоматизация).
-            # 2. cur_decl уже стоит в W — ребята исторически вписывали
-            #    рег.номер только после выпуска, считаем выпущенным.
-            # Наша автоматизация decl в W пишет ТОЛЬКО при released,
-            # так что обе ветки сходятся: cur_decl non-empty = released.
-            if 'Выпуск разрешен' in new_status or cur_decl:
+            # 2. cur_decl стоит в W И cur_status пуст — ребята исторически
+            #    вписывали рег.номер только после выпуска, а статуса у них
+            #    не было. Если статус заполнен (мы записали 'Присвоен номер'
+            #    и т.п.), значит HAWB ещё в работе — НЕ скрываем.
+            is_legacy_released = bool(cur_decl) and not cur_status
+            if 'Выпуск разрешен' in new_status or is_legacy_released:
                 rows_hide.append(row_idx)
             else:
                 rows_show.append(row_idx)
