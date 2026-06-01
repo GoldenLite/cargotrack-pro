@@ -351,7 +351,8 @@ class Command(BaseCommand):
 
         # Сортируем диапазон.
         if not opts['no_sort']:
-            self._sort_by_arrival(ss, ws, col_arrival, last_col_letter)
+            self._sort_by_arrival(ss, ws, col_arrival, last_col_letter,
+                                  n_hawb_rows=len(hawb_rows))
 
     def _set_hidden(self, ss, ws, row_indices: list[int], hidden: bool):
         """Устанавливает hiddenByUser=hidden для рядов. Группирует в диапазоны."""
@@ -387,44 +388,72 @@ class Command(BaseCommand):
                               f'({len(requests)} ranges)')
 
     def _sort_by_arrival(self, ss, ws, col_arrival: int,
-                         last_col_letter: str):
-        """Sort B2:lastcol с двойным ключом:
-        1. arrival ASCENDING — даты по возрастанию, пустые ниже дат.
-        2. HAWB DESCENDING — среди пустых-arrival непустые HAWB идут
-           ПЕРЕД пустыми (которые «трейлеры» без данных).
+                         last_col_letter: str, n_hawb_rows: int):
+        """Two-pass sort. Single sort с двумя sortSpecs не гарантирует
+        нужный порядок (Google'овская обработка blanks внутри tied
+        primary keys варьируется). Делаем явно два прохода:
 
-        Итог: дата старая → дата новая → пустая arrival с HAWB → пустые
-        трейлеры в самом низу.
+        Pass 1: весь диапазон по HAWB ASC. Эффект — все строки с HAWB
+                идут сверху (в произвольном HAWB-ASC порядке), пустые
+                «трейлеры» падают вниз.
+        Pass 2: ТОЛЬКО строки 2..(n_hawb_rows+1) по [arrival ASC,
+                HAWB ASC]. Этот sub-range содержит ВСЕ строки с HAWB.
+                После сорта: даты сверху (старая→новая), пустые-arrival
+                с HAWB сразу под датами. Трейлеры неподвижны.
+
+        Итог: дата → пустая arrival с HAWB → пустые трейлеры.
         """
         end_col_idx = ord(last_col_letter[-1]) - ord('A') + 1
         if len(last_col_letter) > 1:
             end_col_idx += 26 * (ord(last_col_letter[0]) - ord('A') + 1)
-        sort_req = {
+        # Pass 1: HAWB ASC по всему диапазону.
+        req_pass1 = {
             'sortRange': {
                 'range': {
                     'sheetId': ws.id,
                     'startRowIndex': 1,        # row 2 (after header)
                     'endRowIndex': ws.row_count,
-                    'startColumnIndex': 0,     # column A
+                    'startColumnIndex': 0,
                     'endColumnIndex': end_col_idx,
                 },
                 'sortSpecs': [
                     {
-                        'dimensionIndex': col_arrival - 1,
-                        'sortOrder': 'ASCENDING',
-                    },
-                    {
-                        # Google в ASC empties в конце. Внутри блока
-                        # «empty arrival» это означает empty HAWB снизу
-                        # и непустые HAWB сверху — ровно то что нужно.
                         'dimensionIndex': COL_HAWB - 1,
                         'sortOrder': 'ASCENDING',
                     },
                 ],
             }
         }
-        _retry(ss.batch_update, {'requests': [sort_req]},
-               label=f'{ws.title} sort')
+        _retry(ss.batch_update, {'requests': [req_pass1]},
+               label=f'{ws.title} sort pass1')
+
+        # Pass 2: arrival ASC + HAWB ASC по top-N (rows with HAWB).
+        if n_hawb_rows > 0:
+            req_pass2 = {
+                'sortRange': {
+                    'range': {
+                        'sheetId': ws.id,
+                        'startRowIndex': 1,
+                        'endRowIndex': 1 + n_hawb_rows,
+                        'startColumnIndex': 0,
+                        'endColumnIndex': end_col_idx,
+                    },
+                    'sortSpecs': [
+                        {
+                            'dimensionIndex': col_arrival - 1,
+                            'sortOrder': 'ASCENDING',
+                        },
+                        {
+                            'dimensionIndex': COL_HAWB - 1,
+                            'sortOrder': 'ASCENDING',
+                        },
+                    ],
+                }
+            }
+            _retry(ss.batch_update, {'requests': [req_pass2]},
+                   label=f'{ws.title} sort pass2')
+
         self.stdout.write(
-            f'  sorted by {_col_letter(col_arrival)} ASC + '
-            f'{_col_letter(COL_HAWB)} ASC')
+            f'  sorted: pass1 HAWB ASC (whole), pass2 '
+            f'{_col_letter(col_arrival)} ASC + {_col_letter(COL_HAWB)} ASC '
+            f'(top {n_hawb_rows} rows)')
