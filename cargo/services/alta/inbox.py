@@ -400,6 +400,23 @@ def recompute_declaration(cargo: Optional[Cargo],
     if not latest:
         return []
 
+    # Защита от восстановления decl после REJECTED:
+    # если HAWB сейчас REJECTED и latest msg — старее самого свежего
+    # rejected/released/withdrawn для этой HAWB, sweeper пытается
+    # восстановить decl от старой подачи. Должен оставаться пустым
+    # пока не придёт CMN.11337 ОТ НОВОЙ переподачи.
+    cur_status = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
+        'customs_status', flat=True).first() or ''
+    if cur_status == 'REJECTED':
+        newer_final = AltaInboxMessage.objects.filter(
+            cond,
+            msg_kind__in=('released', 'rejected', 'withdrawn'),
+            prepared_at__gt=latest.prepared_at,
+        ).exists()
+        if newer_final:
+            # Latest msg исторически старше финала — skip восстановление.
+            return []
+
     if latest.msg_kind == 'withdrawn':
         target_decl = ''
     else:
