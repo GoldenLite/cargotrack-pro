@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 
 from django.core.management.base import BaseCommand
+import gspread.exceptions
 
 from cargo.models import HouseWaybill
 from cargo.services.alta.ed_status import compute_ed_status
@@ -56,6 +58,23 @@ COL_WAREHOUSE    = 6
 COL_REQUEST      = 21
 COL_DECL         = 23
 COL_ED_STATUS    = 24
+
+
+def _retry(fn, *args, label: str = '', **kwargs):
+    """Retry на 429/500/502/503 с backoff."""
+    backoff = [1, 2, 4, 8, 16, 32]
+    for attempt in range(len(backoff) + 1):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, 'status_code', None)
+            if status in (429, 500, 502, 503, 504) and attempt < len(backoff):
+                wait = backoff[attempt]
+                logger.warning('crm_sync %s API %s, retry in %ds (attempt %d)',
+                               label, status, wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            raise
 
 
 def _format_date_only(dt) -> str:
@@ -138,7 +157,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.NOTICE(
             f'=== {ws.title}  ({ws.row_count}×{ws.col_count}) ==='))
 
-        header = ws.row_values(1)
+        header = _retry(ws.row_values, 1, label=f'{ws.title} header')
         col_hawb      = _find_col(header, HEADER_HAWB,         fallback=COL_HAWB)
         col_arrival   = _find_col(header, HEADER_ARRIVAL_DATE, fallback=COL_ARRIVAL_DATE)
         col_warehouse = _find_col(header, HEADER_WAREHOUSE,    fallback=COL_WAREHOUSE)
@@ -151,7 +170,8 @@ class Command(BaseCommand):
         if not col_ed:
             col_ed = COL_ED_STATUS
             if not opts['dry_run']:
-                ws.update_cell(1, col_ed, HEADER_ED_STATUS)
+                _retry(ws.update_cell, 1, col_ed, HEADER_ED_STATUS,
+                       label=f'{ws.title} header X1')
             self.stdout.write(f'  + добавлен заголовок «Статус ЭД» в {_col_letter(col_ed)}1')
 
         self.stdout.write(
@@ -165,8 +185,10 @@ class Command(BaseCommand):
         # Читаем ВСЕ значения за один запрос — A1:последняя колонка.
         last_col_letter = _col_letter(max(col_hawb, col_arrival, col_warehouse,
                                           col_request, col_decl, col_ed))
-        all_vals = ws.get(f'A1:{last_col_letter}{ws.row_count}',
-                          value_render_option='UNFORMATTED_VALUE')
+        all_vals = _retry(
+            ws.get, f'A1:{last_col_letter}{ws.row_count}',
+            value_render_option='UNFORMATTED_VALUE',
+            label=f'{ws.title} get')
 
         # Карта {row_idx → hawb}
         hawb_rows = {}
@@ -209,10 +231,17 @@ class Command(BaseCommand):
                           if col_ed - 1 < len(row_vals) else '')
             cur_request = (str(row_vals[col_request - 1]).strip()
                            if col_request - 1 < len(row_vals) else '')
-            cur_arrival = (str(row_vals[col_arrival - 1]).strip()
-                           if col_arrival - 1 < len(row_vals) else '')
             cur_warehouse = (str(row_vals[col_warehouse - 1]).strip()
                              if col_warehouse - 1 < len(row_vals) else '')
+
+            # Arrival: UNFORMATTED_VALUE возвращает РЕАЛЬНУЮ дату как число
+            # (serial date 1900-base), а текстовую как строку. Детектируем
+            # text-stored, чтобы форсировать миграцию RAW→date-format.
+            raw_arrival = (row_vals[col_arrival - 1]
+                           if col_arrival - 1 < len(row_vals) else None)
+            is_text_arrival = isinstance(raw_arrival, str) and bool(raw_arrival.strip())
+            cur_arrival = (str(raw_arrival).strip()
+                           if raw_arrival not in (None, '') else '')
 
             if h:
                 new_decl = (h.customs_declaration_number or '').strip()
@@ -247,8 +276,13 @@ class Command(BaseCommand):
                         'values': [[new_request]],
                     })
                     n_changed_request += 1
-                # --force-arrival: миграция текстовых дат в date-format.
+                # Перезаписываем arrival если:
+                # - значение поменялось, ИЛИ
+                # - текущее в Sheets — текстовая строка (text-stored,
+                #   нужна авто-миграция в date-format), ИЛИ
+                # - явный --force-arrival.
                 if new_arrival and (cur_arrival != new_arrival
+                                    or is_text_arrival
                                     or opts.get('force_arrival')):
                     updates.append({
                         'range': f'{_col_letter(col_arrival)}{row_idx}',
@@ -286,7 +320,12 @@ class Command(BaseCommand):
         # USER_ENTERED парсит «09.05.2026» как дату (RAW сохранил бы как
         # текст с ведущим апострофом, и сортировка по дате не работала бы).
         if updates:
-            ws.batch_update(updates, value_input_option='USER_ENTERED')
+            # Чанкаем по 500 чтобы не перегружать batch_update.
+            for i in range(0, len(updates), 500):
+                chunk = updates[i:i + 500]
+                _retry(ws.batch_update, chunk,
+                       value_input_option='USER_ENTERED',
+                       label=f'{ws.title} batch {i//500 + 1}')
 
         # Применяем hidden state: hide для одних, unhide для других.
         if not opts['no_hide']:
@@ -326,7 +365,8 @@ class Command(BaseCommand):
         if requests:
             # Chunk по 100 requests чтобы не уперться в лимит Sheets API.
             for i in range(0, len(requests), 100):
-                ss.batch_update({'requests': requests[i:i + 100]})
+                _retry(ss.batch_update, {'requests': requests[i:i + 100]},
+                   label=f'{ws.title} hide/show')
             action = 'hidden' if hidden else 'shown'
             self.stdout.write(f'  {action} {len(row_indices)} rows '
                               f'({len(requests)} ranges)')
@@ -363,11 +403,13 @@ class Command(BaseCommand):
                 }],
             }
         }
-        ss.batch_update({'requests': [sort_req]})
+        _retry(ss.batch_update, {'requests': [sort_req]},
+               label=f'{ws.title} sort')
         self.stdout.write(f'  sorted by col {_col_letter(col_arrival)} ascending')
 
         # Перемещаем пустые-arrival ряды вверх.
-        arrival_col = ws.col_values(col_arrival)
+        arrival_col = _retry(ws.col_values, col_arrival,
+                             label=f'{ws.title} arrival col')
         # Считаем строки с HAWB-номером в col_hawb но пустой arrival.
         # Идём с конца — empty группируется внизу после sort'а.
         # Находим первую пустую снизу.
@@ -389,7 +431,8 @@ class Command(BaseCommand):
             return  # все строки имеют arrival
 
         # Находим самую нижнюю строку С HAWB номером.
-        hawb_col = ws.col_values(COL_HAWB)
+        hawb_col = _retry(ws.col_values, COL_HAWB,
+                          label=f'{ws.title} hawb col')
         last_hawb_row = 1
         for i in range(len(hawb_col) - 1, 0, -1):
             if (hawb_col[i] or '').strip():
@@ -410,6 +453,7 @@ class Command(BaseCommand):
                 'destinationIndex': 1,  # после шапки (row 2)
             }
         }
-        ss.batch_update({'requests': [move_req]})
+        _retry(ss.batch_update, {'requests': [move_req]},
+               label=f'{ws.title} move-up')
         n_moved = last_hawb_row - empty_start + 1
         self.stdout.write(f'  moved {n_moved} empty-arrival rows to top')
