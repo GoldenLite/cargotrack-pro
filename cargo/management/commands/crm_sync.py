@@ -106,6 +106,9 @@ class Command(BaseCommand):
                             help='Не скрывать выпущенные строки')
         parser.add_argument('--no-sort', action='store_true',
                             help='Не сортировать по дате прибытия')
+        parser.add_argument('--force-arrival', action='store_true',
+                            help='Перезаписать все даты прибытия (миграция '
+                                 'из RAW-текста в USER_ENTERED date format)')
 
     def handle(self, *args, **opts):
         client = get_client()
@@ -244,7 +247,9 @@ class Command(BaseCommand):
                         'values': [[new_request]],
                     })
                     n_changed_request += 1
-                if new_arrival and cur_arrival != new_arrival:
+                # --force-arrival: миграция текстовых дат в date-format.
+                if new_arrival and (cur_arrival != new_arrival
+                                    or opts.get('force_arrival')):
                     updates.append({
                         'range': f'{_col_letter(col_arrival)}{row_idx}',
                         'values': [[new_arrival]],
@@ -278,8 +283,10 @@ class Command(BaseCommand):
             return
 
         # Записываем диффы в Sheets одним batch.
+        # USER_ENTERED парсит «09.05.2026» как дату (RAW сохранил бы как
+        # текст с ведущим апострофом, и сортировка по дате не работала бы).
         if updates:
-            ws.batch_update(updates, value_input_option='RAW')
+            ws.batch_update(updates, value_input_option='USER_ENTERED')
 
         # Применяем hidden state: hide для одних, unhide для других.
         if not opts['no_hide']:
