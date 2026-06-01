@@ -2251,6 +2251,47 @@ class ImportedSheetRow(models.Model):
         return f'{self.source.name}#{self.source_row_index} [{self.get_match_status_display()}]'
 
 
+class CrmHawbIndex(models.Model):
+    """Индекс CRM-вкладок «Рабочее пространство СТО»: где какая HAWB лежит.
+
+    Используется incremental crm_sync для O(diff) обновлений вместо
+    полного re-scan'а 8 вкладок (8K+ рядов) каждые 5 мин.
+
+    Заполняется командой crm_reindex (полный скан), обновляется при
+    inc-sync (если ячейка изменилась). Если HAWB сменила вкладку
+    (юзер вручную переместил) — на следующем reindex обновится.
+
+    last_* поля хранят последнее СИНХРОНИЗИРОВАННОЕ значение —
+    inc-sync сравнивает текущее DB-значение с last_*, пишет diff,
+    обновляет last_*.
+    """
+    hawb_number    = models.CharField('HAWB', max_length=64, db_index=True)
+    tab_name       = models.CharField('Вкладка', max_length=64)
+    row_index      = models.PositiveIntegerField('№ строки', db_index=True)
+
+    last_decl      = models.CharField('Last decl', max_length=64, blank=True, default='')
+    last_status    = models.CharField('Last ed_status', max_length=128, blank=True, default='')
+    last_request   = models.TextField('Last request', blank=True, default='')
+    last_arrival   = models.CharField('Last arrival', max_length=16, blank=True, default='')
+    last_warehouse = models.CharField('Last warehouse', max_length=32, blank=True, default='')
+    last_hidden    = models.BooleanField('Скрыта', default=False)
+
+    last_seen_at   = models.DateTimeField('В Sheets увидели', auto_now_add=True)
+    last_synced_at = models.DateTimeField('Последний sync', null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'CRM-индекс HAWB'
+        verbose_name_plural = 'CRM-индекс HAWB'
+        unique_together = [('hawb_number', 'tab_name')]
+        indexes = [
+            models.Index(fields=['tab_name', 'row_index']),
+            models.Index(fields=['hawb_number']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.tab_name}#{self.row_index} {self.hawb_number}'
+
+
 class SheetImportRun(models.Model):
     """Журнал одного прогона импорта."""
     STATUS_CHOICES = [
