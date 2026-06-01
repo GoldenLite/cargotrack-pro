@@ -100,7 +100,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Done.'))
 
     def _reindex_tab(self, ws):
-        """После sort обновляем row_index в CrmHawbIndex для этой вкладки.
+        """После sort обновляем row_index в CrmHawbIndex для этой вкладки
+        и RE-HIDE ряды у которых last_hidden=True.
 
         НЕ перетираем last_* — только row_index. Last_* остаются как были,
         чтобы incremental на следующем тике продолжал писать только реальные
@@ -121,19 +122,77 @@ class Command(BaseCommand):
         # Bulk-update row_index у существующих записей.
         existing = list(CrmHawbIndex.objects.filter(tab_name=ws.title))
         to_update = []
+        rows_to_hide: list[int] = []
         for entry in existing:
             new_idx = new_positions.get(entry.hawb_number)
             if new_idx and new_idx != entry.row_index:
                 entry.row_index = new_idx
                 to_update.append(entry)
+            if entry.last_hidden and new_idx:
+                rows_to_hide.append(new_idx)
         if to_update:
             CrmHawbIndex.objects.bulk_update(
                 to_update, fields=['row_index'], batch_size=500)
             self.stdout.write(f'  {ws.title}: row_index updated for {len(to_update)}')
 
+        # RE-HIDE ряды которые были скрыты (по last_hidden).
+        if rows_to_hide:
+            self._apply_hide(ws, rows_to_hide)
+            self.stdout.write(f'  {ws.title}: re-hidden {len(rows_to_hide)} rows')
+
+    def _apply_hide(self, ws, rows: list[int]):
+        from collections import deque
+        sorted_rows = sorted(set(rows))
+        ranges = []
+        i = 0
+        while i < len(sorted_rows):
+            start = sorted_rows[i]
+            end = start
+            while i + 1 < len(sorted_rows) and sorted_rows[i + 1] == end + 1:
+                end = sorted_rows[i + 1]
+                i += 1
+            i += 1
+            ranges.append((start, end))
+        requests = [{
+            'updateDimensionProperties': {
+                'range': {
+                    'sheetId': ws.id,
+                    'dimension': 'ROWS',
+                    'startIndex': s - 1,
+                    'endIndex': e,
+                },
+                'properties': {'hiddenByUser': True},
+                'fields': 'hiddenByUser',
+            }
+        } for s, e in ranges]
+        # Chunk по 100 requests.
+        ss = ws.spreadsheet
+        for i in range(0, len(requests), 100):
+            _retry(ss.batch_update, {'requests': requests[i:i + 100]},
+                   label=f'{ws.title} rehide')
+
     def _sort_tab(self, ss, ws):
         n_hawb_rows = CrmHawbIndex.objects.filter(tab_name=ws.title).count()
         self.stdout.write(f'  {ws.title}: HAWB rows in index = {n_hawb_rows}')
+
+        # КРИТИЧНО: Google Sheets sortRange игнорирует HIDDEN ряды
+        # (hiddenByUser=True остаются на своих позициях, в сорт не
+        # включаются). Чтобы sort работал корректно — сначала UNHIDE
+        # всё, сортируем, потом RE-HIDE по индексу (last_hidden=True).
+        # Без unhide pass1 не утопит blank ряды вниз — они застрянут
+        # между hidden HAWB.
+        unhide_req = {
+            'updateDimensionProperties': {
+                'range': {
+                    'sheetId': ws.id,
+                    'dimension': 'ROWS',
+                    'startIndex': 1,
+                    'endIndex': ws.row_count,
+                },
+                'properties': {'hiddenByUser': False},
+                'fields': 'hiddenByUser',
+            }
+        }
 
         # Pass 1: HAWB ASC по всему диапазону → пустые-HAWB вниз.
         req_pass1 = {
@@ -151,8 +210,8 @@ class Command(BaseCommand):
                 ],
             }
         }
-        _retry(ss.batch_update, {'requests': [req_pass1]},
-               label=f'{ws.title} sort pass1')
+        _retry(ss.batch_update, {'requests': [unhide_req, req_pass1]},
+               label=f'{ws.title} unhide+pass1')
 
         # Pass 2: top N (только ряды с HAWB) по arrival ASC + HAWB ASC.
         if n_hawb_rows > 0:
@@ -177,3 +236,5 @@ class Command(BaseCommand):
                    label=f'{ws.title} sort pass2')
 
         # row_index в CrmHawbIndex обновится через _reindex_tab после.
+        # Hide перенесли в _reindex_tab — после обновления row_index
+        # знаем какие новые ряды надо скрыть.
