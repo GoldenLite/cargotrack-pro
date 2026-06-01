@@ -277,6 +277,17 @@ class Command(BaseCommand):
                         'values': [[new_decl]],
                     })
                     n_changed_decl += 1
+                # Если в БД decl пустой, а в Sheets cur_decl стоит —
+                # ОЧИЩАЕМ. Это пропагационный остаток от старой кривой
+                # propagate_cargo_release: rollback почистил DB, а
+                # Sheets-ячейка осталась с чужой ДТ и hide-критерий
+                # «есть decl + нет статуса = legacy» ложно скрывал ряд.
+                elif not new_decl and cur_decl:
+                    updates.append({
+                        'range': f'{_col_letter(col_decl)}{row_idx}',
+                        'values': [['']],
+                    })
+                    n_changed_decl += 1
                 if cur_status != new_status:
                     updates.append({
                         'range': f'{_col_letter(col_ed)}{row_idx}',
@@ -314,14 +325,29 @@ class Command(BaseCommand):
                 # HAWB нет в БД — статус берём из текущего значения.
                 new_status = cur_status
 
-            # Hide-критерий:
+            # Hide-критерий по post-sync state (will_decl/will_status).
+            # Для DB-tracked HAWB will_decl корректно отражает что будет в W
+            # после writeback (в т.ч. учитывает clear для пропагационных
+            # остатков). Для не-DB HAWB будем использовать cur-values.
+            if h:
+                if 'Выпуск разрешен' in new_status:
+                    will_decl = new_decl
+                elif not new_decl:
+                    will_decl = ''  # очистим пропагационный остаток
+                else:
+                    will_decl = cur_decl  # не пишем — сохраняем как есть
+                will_status = new_status
+            else:
+                will_decl = cur_decl
+                will_status = cur_status
+
             # 1. ed_status='Выпуск разрешен' (наша автоматизация).
-            # 2. cur_decl стоит в W И cur_status пуст — ребята исторически
+            # 2. will_decl стоит в W И will_status пуст — ребята исторически
             #    вписывали рег.номер только после выпуска, а статуса у них
             #    не было. Если статус заполнен (мы записали 'Присвоен номер'
             #    и т.п.), значит HAWB ещё в работе — НЕ скрываем.
-            is_legacy_released = bool(cur_decl) and not cur_status
-            if 'Выпуск разрешен' in new_status or is_legacy_released:
+            is_legacy_released = bool(will_decl) and not will_status
+            if 'Выпуск разрешен' in will_status or is_legacy_released:
                 rows_hide.append(row_idx)
             else:
                 rows_show.append(row_idx)
