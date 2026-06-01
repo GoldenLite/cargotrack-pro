@@ -168,28 +168,50 @@ class Command(BaseCommand):
             ).delete()
             self.stdout.write(f'  removed (no longer in tab): {len(removed)}')
 
-        # Upsert.
+        # Bulk upsert — избегаем update_or_create который дёргает
+        # select_for_update и лочит SQLite-WAL.
         now = djtz.now()
-        n_created = 0
-        n_updated = 0
-        for hn, d in found.items():
-            obj, created = CrmHawbIndex.objects.update_or_create(
-                hawb_number=hn,
-                tab_name=ws.title,
-                defaults={
-                    'row_index': d['row_index'],
-                    'last_decl': d['last_decl'][:64],
-                    'last_status': d['last_status'][:128],
-                    'last_request': d['last_request'],
-                    'last_arrival': d['last_arrival'][:16],
-                    'last_warehouse': d['last_warehouse'][:32],
-                    'last_seen_at': now,
-                },
-            )
-            if created:
-                n_created += 1
-            else:
-                n_updated += 1
+        existing = {
+            e.hawb_number: e for e in
+            CrmHawbIndex.objects.filter(tab_name=ws.title)
+        }
 
-        self.stdout.write(f'  created={n_created} updated={n_updated}')
+        to_create: list[CrmHawbIndex] = []
+        to_update: list[CrmHawbIndex] = []
+        for hn, d in found.items():
+            ex = existing.get(hn)
+            if ex is None:
+                to_create.append(CrmHawbIndex(
+                    hawb_number=hn,
+                    tab_name=ws.title,
+                    row_index=d['row_index'],
+                    last_decl=d['last_decl'][:64],
+                    last_status=d['last_status'][:128],
+                    last_request=d['last_request'],
+                    last_arrival=d['last_arrival'][:16],
+                    last_warehouse=d['last_warehouse'][:32],
+                ))
+            else:
+                ex.row_index = d['row_index']
+                ex.last_decl = d['last_decl'][:64]
+                ex.last_status = d['last_status'][:128]
+                ex.last_request = d['last_request']
+                ex.last_arrival = d['last_arrival'][:16]
+                ex.last_warehouse = d['last_warehouse'][:32]
+                ex.last_seen_at = now
+                to_update.append(ex)
+
+        if to_create:
+            CrmHawbIndex.objects.bulk_create(to_create, batch_size=500,
+                                             ignore_conflicts=True)
+        if to_update:
+            CrmHawbIndex.objects.bulk_update(
+                to_update,
+                fields=['row_index', 'last_decl', 'last_status',
+                        'last_request', 'last_arrival', 'last_warehouse',
+                        'last_seen_at'],
+                batch_size=500,
+            )
+
+        self.stdout.write(f'  created={len(to_create)} updated={len(to_update)}')
         return len(found)
