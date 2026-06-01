@@ -296,12 +296,13 @@ class Command(BaseCommand):
                     })
                     n_changed_warehouse += 1
             else:
-                # HAWB нет в БД — критерий hide только по cur_decl (ручной ввод).
-                new_decl = cur_decl
+                # HAWB нет в БД — статус берём из текущего значения.
                 new_status = cur_status
 
-            # Hide-критерий: decl присвоен ИЛИ статус «Выпуск разрешен».
-            if new_decl or 'Выпуск разрешен' in new_status:
+            # Hide-критерий: только финальный выпуск.
+            # decl-присвоен НЕ скрывает — у ребят ещё работа по HAWB
+            # (проверка, запросы, ответы) пока не пришёл CMN.11350 released.
+            if 'Выпуск разрешен' in new_status:
                 rows_hide.append(row_idx)
             else:
                 rows_show.append(row_idx)
@@ -373,17 +374,11 @@ class Command(BaseCommand):
 
     def _sort_by_arrival(self, ss, ws, col_arrival: int,
                          last_col_letter: str):
-        """Sort B2:lastcol по столбцу arrival (по возрастанию) + поднимаем
-        строки с пустой датой прибытия наверх (после шапки).
+        """Sort B2:lastcol по столбцу arrival (по возрастанию).
 
-        Google sortRange ASC кладёт пустые ячейки В САМЫЙ НИЗ, а юзер хочет
-        видеть новые накладные (без даты ДО1) НАВЕРХУ — они «теряются» внизу.
-
-        Алгоритм:
-        1. Sort range B2:lastcol по столбцу arrival ascending.
-        2. После sort'а строки с пустой arrival оказываются внизу в одном
-           подряд блоке. Находим начало этого блока и moveDimension вверх
-           сразу после шапки.
+        Google sortRange ASC ставит даты по возрастанию, затем пустые ячейки —
+        ровно то что нужно: даты наверху (старые → новые), пустые-arrival
+        с HAWB ниже дат (но до пустых-без-HAWB трейлеров).
         """
         end_col_idx = ord(last_col_letter[-1]) - ord('A') + 1
         if len(last_col_letter) > 1:
@@ -406,54 +401,3 @@ class Command(BaseCommand):
         _retry(ss.batch_update, {'requests': [sort_req]},
                label=f'{ws.title} sort')
         self.stdout.write(f'  sorted by col {_col_letter(col_arrival)} ascending')
-
-        # Перемещаем пустые-arrival ряды вверх.
-        arrival_col = _retry(ws.col_values, col_arrival,
-                             label=f'{ws.title} arrival col')
-        # Считаем строки с HAWB-номером в col_hawb но пустой arrival.
-        # Идём с конца — empty группируется внизу после sort'а.
-        # Находим первую пустую снизу.
-        empty_start = None
-        for i in range(len(arrival_col) - 1, 0, -1):
-            v = (arrival_col[i] or '').strip()
-            if v:
-                empty_start = i + 2  # row_idx (1-based, после v)
-                break
-        # Если все пустые — empty_start = 2. Если все заполнены — None.
-        if empty_start is None:
-            # все пустые — sort не нужен, выходим
-            return
-        # empty_start = первая пустая строка снизу.
-        # Но мы хотим строки С HAWB но без даты — это они «теряются».
-        # Без HAWB строки — пустые трейлеры, не трогаем.
-        # Проверим: реально ли это пустые-arrival ряды с HAWB?
-        if empty_start > ws.row_count:
-            return  # все строки имеют arrival
-
-        # Находим самую нижнюю строку С HAWB номером.
-        hawb_col = _retry(ws.col_values, COL_HAWB,
-                          label=f'{ws.title} hawb col')
-        last_hawb_row = 1
-        for i in range(len(hawb_col) - 1, 0, -1):
-            if (hawb_col[i] or '').strip():
-                last_hawb_row = i + 1
-                break
-        if empty_start > last_hawb_row:
-            return  # нет HAWB без даты — нечего поднимать
-
-        # Перемещаем строки empty_start..last_hawb_row в верх (после шапки).
-        move_req = {
-            'moveDimension': {
-                'source': {
-                    'sheetId': ws.id,
-                    'dimension': 'ROWS',
-                    'startIndex': empty_start - 1,  # 0-based
-                    'endIndex': last_hawb_row,       # exclusive
-                },
-                'destinationIndex': 1,  # после шапки (row 2)
-            }
-        }
-        _retry(ss.batch_update, {'requests': [move_req]},
-               label=f'{ws.title} move-up')
-        n_moved = last_hawb_row - empty_start + 1
-        self.stdout.write(f'  moved {n_moved} empty-arrival rows to top')
