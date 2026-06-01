@@ -149,9 +149,18 @@ class Command(BaseCommand):
                 else:
                     new_arrival = ''
                     new_warehouse = ''
+                db_tracked = True
             else:
-                # HAWB нет в БД — оставляем как было в Sheets.
-                continue
+                # HAWB нет в БД — ячейки не трогаем, но hide-критерий
+                # вычисляем по cur (last_*) значениям. Это ловит legacy:
+                # decl стоит в Sheets без статуса = старая ручная запись
+                # «выпущено».
+                new_decl = entry.last_decl
+                new_status = entry.last_status
+                new_request = entry.last_request
+                new_arrival = entry.last_arrival
+                new_warehouse = entry.last_warehouse
+                db_tracked = False
 
             row = entry.row_index
             tab = entry.tab_name
