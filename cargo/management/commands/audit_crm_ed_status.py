@@ -82,6 +82,9 @@ class Command(BaseCommand):
         parser.add_argument('--tab', help='Только эта вкладка')
         parser.add_argument('--fix', action='store_true',
                             help='Записать правильные значения в Sheets')
+        parser.add_argument('--fix-only', default='',
+                            help='CSV категорий для fix: '
+                                 'SHEET_EMPTY,DB_EMPTY,DIFFERENT')
         parser.add_argument('--examples', type=int, default=3,
                             help='Сколько примеров категории показать')
 
@@ -147,7 +150,7 @@ class Command(BaseCommand):
 
         stats = defaultdict(int)
         examples = defaultdict(list)
-        fixes = []  # [(row, expected)]
+        fixes_by_cat: dict[str, list] = defaultdict(list)
 
         for hn, (row_idx, cur_status) in hawb_rows.items():
             h = hawbs_db.get(hn)
@@ -160,24 +163,18 @@ class Command(BaseCommand):
                 expected = ''
             if expected == cur_status:
                 stats['MATCH'] += 1
-            elif not cur_status and expected:
-                stats['SHEET_EMPTY'] += 1
-                if len(examples['SHEET_EMPTY']) < opts['examples']:
-                    examples['SHEET_EMPTY'].append(
-                        f'{hn} row={row_idx}: sheet="" db={expected!r}')
-                fixes.append((row_idx, expected))
+                continue
+            if not cur_status and expected:
+                cat = 'SHEET_EMPTY'
             elif cur_status and not expected:
-                stats['DB_EMPTY'] += 1
-                if len(examples['DB_EMPTY']) < opts['examples']:
-                    examples['DB_EMPTY'].append(
-                        f'{hn} row={row_idx}: sheet={cur_status!r} db=""')
-                fixes.append((row_idx, expected))
+                cat = 'DB_EMPTY'
             else:
-                stats['DIFFERENT'] += 1
-                if len(examples['DIFFERENT']) < opts['examples']:
-                    examples['DIFFERENT'].append(
-                        f'{hn} row={row_idx}: sheet={cur_status!r} db={expected!r}')
-                fixes.append((row_idx, expected))
+                cat = 'DIFFERENT'
+            stats[cat] += 1
+            if len(examples[cat]) < opts['examples']:
+                examples[cat].append(
+                    f'{hn} row={row_idx}: sheet={cur_status!r} db={expected!r}')
+            fixes_by_cat[cat].append((row_idx, expected))
 
         for k, v in stats.items():
             grand_total[k] += v
@@ -186,15 +183,24 @@ class Command(BaseCommand):
             for e in ex:
                 self.stdout.write(f'    {cat} → {e}')
 
-        if opts['fix'] and fixes:
-            updates = [{
-                'range': f'{_col_letter(COL_ED_STATUS)}{row}',
-                'values': [[exp]],
-            } for row, exp in fixes]
-            CHUNK = 100
-            for i in range(0, len(updates), CHUNK):
-                _retry(ws.batch_update, updates[i:i + CHUNK],
-                       value_input_option='USER_ENTERED',
-                       label=f'{ws.title} fix {i//CHUNK + 1}')
-            self.stdout.write(f'  FIXED: {len(fixes)} cells')
-            grand_total['FIXED'] += len(fixes)
+        if opts['fix']:
+            # Какие категории fix'им
+            only = {s.strip() for s in (opts.get('fix_only') or '').split(',')
+                    if s.strip()}
+            apply_fixes = []
+            for cat, items in fixes_by_cat.items():
+                if only and cat not in only:
+                    continue
+                apply_fixes.extend(items)
+            if apply_fixes:
+                updates = [{
+                    'range': f'{_col_letter(COL_ED_STATUS)}{row}',
+                    'values': [[exp]],
+                } for row, exp in apply_fixes]
+                CHUNK = 100
+                for i in range(0, len(updates), CHUNK):
+                    _retry(ws.batch_update, updates[i:i + CHUNK],
+                           value_input_option='USER_ENTERED',
+                           label=f'{ws.title} fix {i//CHUNK + 1}')
+                self.stdout.write(f'  FIXED: {len(apply_fixes)} cells')
+                grand_total['FIXED'] += len(apply_fixes)
