@@ -414,8 +414,11 @@ class Command(BaseCommand):
                         'sortOrder': 'ASCENDING',
                     },
                     {
+                        # Google в ASC empties в конце. Внутри блока
+                        # «empty arrival» это означает empty HAWB снизу
+                        # и непустые HAWB сверху — ровно то что нужно.
                         'dimensionIndex': COL_HAWB - 1,
-                        'sortOrder': 'DESCENDING',
+                        'sortOrder': 'ASCENDING',
                     },
                 ],
             }
@@ -424,4 +427,4 @@ class Command(BaseCommand):
                label=f'{ws.title} sort')
         self.stdout.write(
             f'  sorted by {_col_letter(col_arrival)} ASC + '
-            f'{_col_letter(COL_HAWB)} DESC')
+            f'{_col_letter(COL_HAWB)} ASC')
