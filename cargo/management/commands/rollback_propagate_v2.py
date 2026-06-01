@@ -117,9 +117,13 @@ class Command(BaseCommand):
             if not h.hawb_number:
                 continue
             decl = (h.customs_declaration_number or '').strip()
-            # Если HAWB уже очищена — пропускаем
-            if h.customs_status != 'RELEASED' and not decl:
-                continue
+            # Auto-scan: пропускаем уже очищенные.
+            # Explicit list: НЕ пропускаем (юзер просит почистить Sheets-кэш
+            # и для уже очищенных в БД накладных, т.к. в Sheets могла
+            # остаться пропагированная инфа).
+            if not explicit:
+                if h.customs_status != 'RELEASED' and not decl:
+                    continue
             # Проверка: есть ли inbox-msg с raw_xml содержащим И HAWB И decl?
             if decl:
                 has_both = AltaInboxMessage.objects.filter(
