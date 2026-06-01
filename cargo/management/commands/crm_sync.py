@@ -374,11 +374,13 @@ class Command(BaseCommand):
 
     def _sort_by_arrival(self, ss, ws, col_arrival: int,
                          last_col_letter: str):
-        """Sort B2:lastcol по столбцу arrival (по возрастанию).
+        """Sort B2:lastcol с двойным ключом:
+        1. arrival ASCENDING — даты по возрастанию, пустые ниже дат.
+        2. HAWB DESCENDING — среди пустых-arrival непустые HAWB идут
+           ПЕРЕД пустыми (которые «трейлеры» без данных).
 
-        Google sortRange ASC ставит даты по возрастанию, затем пустые ячейки —
-        ровно то что нужно: даты наверху (старые → новые), пустые-arrival
-        с HAWB ниже дат (но до пустых-без-HAWB трейлеров).
+        Итог: дата старая → дата новая → пустая arrival с HAWB → пустые
+        трейлеры в самом низу.
         """
         end_col_idx = ord(last_col_letter[-1]) - ord('A') + 1
         if len(last_col_letter) > 1:
@@ -392,12 +394,20 @@ class Command(BaseCommand):
                     'startColumnIndex': 0,     # column A
                     'endColumnIndex': end_col_idx,
                 },
-                'sortSpecs': [{
-                    'dimensionIndex': col_arrival - 1,
-                    'sortOrder': 'ASCENDING',
-                }],
+                'sortSpecs': [
+                    {
+                        'dimensionIndex': col_arrival - 1,
+                        'sortOrder': 'ASCENDING',
+                    },
+                    {
+                        'dimensionIndex': COL_HAWB - 1,
+                        'sortOrder': 'DESCENDING',
+                    },
+                ],
             }
         }
         _retry(ss.batch_update, {'requests': [sort_req]},
                label=f'{ws.title} sort')
-        self.stdout.write(f'  sorted by col {_col_letter(col_arrival)} ascending')
+        self.stdout.write(
+            f'  sorted by {_col_letter(col_arrival)} ASC + '
+            f'{_col_letter(COL_HAWB)} DESC')
