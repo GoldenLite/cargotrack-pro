@@ -2318,7 +2318,10 @@ class CrmHawbIndex(models.Model):
     class Meta:
         verbose_name = 'CRM-индекс HAWB'
         verbose_name_plural = 'CRM-индекс HAWB'
-        unique_together = [('hawb_number', 'tab_name')]
+        # Дубликаты HAWB в одной вкладке разрешены — у юзера легаси
+        # ряды где одна HAWB фигурирует несколько раз. Каждый ряд
+        # обрабатывается независимо.
+        unique_together = [('hawb_number', 'tab_name', 'row_index')]
         indexes = [
             models.Index(fields=['tab_name', 'row_index']),
             models.Index(fields=['hawb_number']),

@@ -126,13 +126,27 @@ class Command(BaseCommand):
                           value_render_option='UNFORMATTED_VALUE',
                           label=f'{ws.title} get')
 
-        # Также вытаскиваем hidden state per row через batchGet metadata.
-        # Это дороже, чем просто значения, но даёт точный last_hidden.
-        # На первом этапе можем не дёргать — last_hidden=False default,
-        # incremental после первого прогона его перетрёт.
+        # Hidden state per row через Sheets metadata.
+        ss = ws.spreadsheet
+        meta = _retry(ss.fetch_sheet_metadata,
+                      params={
+                          'ranges': ws.title,
+                          'fields': 'sheets(properties(title),data(rowMetadata(hiddenByUser)))',
+                      },
+                      label=f'{ws.title} metadata')
+        hidden_arr = []
+        for sh in meta['sheets']:
+            if sh['properties']['title'] != ws.title:
+                continue
+            data = sh.get('data', [])
+            if data:
+                hidden_arr = [rm.get('hiddenByUser', False)
+                              for rm in data[0].get('rowMetadata', [])]
+                break
 
-        # Собираем HAWB → (row_idx, decl, status, request, arrival, warehouse)
-        found: dict[str, dict] = {}
+        # Собираем ВСЕ ряды с HAWB (включая дубликаты в одной вкладке).
+        # Ключ: (hawb, row_idx) — row_idx уникален.
+        found_rows: list[tuple[str, int, dict, bool]] = []
         for i, row in enumerate(all_vals[1:], start=2):
             if COL_HAWB - 1 >= len(row):
                 continue
@@ -146,79 +160,48 @@ class Command(BaseCommand):
 
             t_raw = (row[COL_T - 1] if COL_T - 1 < len(row) else None)
             t_val = bool(t_raw) if t_raw is not None else False
+            is_hidden = hidden_arr[i - 1] if i - 1 < len(hidden_arr) else False
 
-            found[hn] = {
-                'row_index': i,
+            found_rows.append((hn, i, {
                 'last_decl':      _cell(COL_DECL),
                 'last_status':    _cell(COL_ED_STATUS),
                 'last_request':   _cell(COL_REQUEST),
                 'last_arrival':   _cell(COL_ARRIVAL_DATE),
                 'last_warehouse': _cell(COL_WAREHOUSE),
                 'last_t':         t_val,
-            }
+            }, is_hidden))
 
-        self.stdout.write(f'  HAWB found: {len(found)}')
+        n_distinct = len({hn for hn, _, _, _ in found_rows})
+        self.stdout.write(
+            f'  HAWB rows: {len(found_rows)} (distinct: {n_distinct})')
 
         if opts['dry_run']:
             self.stdout.write('  --dry-run: skip writes')
-            return len(found)
+            return len(found_rows)
 
-        # Удаляем из индекса HAWB, которых уже нет в этой вкладке.
-        existing = set(CrmHawbIndex.objects.filter(tab_name=ws.title)
-                       .values_list('hawb_number', flat=True))
-        removed = existing - set(found.keys())
-        if removed:
-            CrmHawbIndex.objects.filter(
-                tab_name=ws.title, hawb_number__in=removed,
-            ).delete()
-            self.stdout.write(f'  removed (no longer in tab): {len(removed)}')
+        # Идемпотентный reindex: DELETE все entries вкладки, INSERT новые
+        # из текущего Sheets-state. last_hidden корректен из metadata,
+        # никакой incremental после не unhide'ит правильное состояние.
+        CrmHawbIndex.objects.filter(tab_name=ws.title).delete()
 
-        # Bulk upsert — избегаем update_or_create который дёргает
-        # select_for_update и лочит SQLite-WAL.
         now = djtz.now()
-        existing = {
-            e.hawb_number: e for e in
-            CrmHawbIndex.objects.filter(tab_name=ws.title)
-        }
-
         to_create: list[CrmHawbIndex] = []
-        to_update: list[CrmHawbIndex] = []
-        for hn, d in found.items():
-            ex = existing.get(hn)
-            if ex is None:
-                to_create.append(CrmHawbIndex(
+        for hn, row_idx, d, is_hidden in found_rows:
+            to_create.append(CrmHawbIndex(
                     hawb_number=hn,
                     tab_name=ws.title,
-                    row_index=d['row_index'],
+                    row_index=row_idx,
                     last_decl=d['last_decl'][:64],
                     last_status=d['last_status'][:128],
                     last_request=d['last_request'],
                     last_arrival=d['last_arrival'][:16],
                     last_warehouse=d['last_warehouse'][:32],
                     last_t=d['last_t'],
+                    last_hidden=is_hidden,
                 ))
-            else:
-                ex.row_index = d['row_index']
-                ex.last_decl = d['last_decl'][:64]
-                ex.last_status = d['last_status'][:128]
-                ex.last_request = d['last_request']
-                ex.last_arrival = d['last_arrival'][:16]
-                ex.last_warehouse = d['last_warehouse'][:32]
-                ex.last_t = d['last_t']
-                ex.last_seen_at = now
-                to_update.append(ex)
 
         if to_create:
-            CrmHawbIndex.objects.bulk_create(to_create, batch_size=500,
-                                             ignore_conflicts=True)
-        if to_update:
-            CrmHawbIndex.objects.bulk_update(
-                to_update,
-                fields=['row_index', 'last_decl', 'last_status',
-                        'last_request', 'last_arrival', 'last_warehouse',
-                        'last_t', 'last_seen_at'],
-                batch_size=500,
-            )
+            CrmHawbIndex.objects.bulk_create(to_create, batch_size=500)
 
-        self.stdout.write(f'  created={len(to_create)} updated={len(to_update)}')
-        return len(found)
+        self.stdout.write(f'  reset & created: {len(to_create)}')
+        return len(found_rows)

@@ -100,45 +100,105 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Done.'))
 
     def _reindex_tab(self, ws):
-        """После sort обновляем row_index в CrmHawbIndex для этой вкладки
-        и RE-HIDE ряды у которых last_hidden=True.
+        """После sort row_index'ы стейл, плюс sort мог изменить порядок
+        дубликатов. Делаем full reindex (delete + recreate) с учётом
+        реального hidden state из Sheets metadata.
 
-        НЕ перетираем last_* — только row_index. Last_* остаются как были,
-        чтобы incremental на следующем тике продолжал писать только реальные
-        diff'ы.
+        Затем RE-HIDE те ряды у которых после sort должен быть hidden
+        (по сохранённому ранее last_hidden ДО sort'а).
         """
-        rng = f'A1:C{ws.row_count}'
+        # Сохраняем последний-известный hidden state per (hawb, row_index)
+        # ДО полного reset'а индекса.
+        pre_sort = {
+            (e.hawb_number, e.row_index): e.last_hidden
+            for e in CrmHawbIndex.objects.filter(tab_name=ws.title)
+        }
+
+        # Read Sheets values + hidden metadata.
+        last_col = 24  # X
+        rng = f'A1:{chr(ord("A") + last_col - 1)}{ws.row_count}'
         all_vals = _retry(ws.get, rng,
                           value_render_option='UNFORMATTED_VALUE',
                           label=f'{ws.title} reindex get')
-        new_positions: dict[str, int] = {}
+
+        ss = ws.spreadsheet
+        meta = _retry(ss.fetch_sheet_metadata,
+                      params={
+                          'ranges': ws.title,
+                          'fields': 'sheets(properties(title),data(rowMetadata(hiddenByUser)))',
+                      },
+                      label=f'{ws.title} reindex meta')
+        hidden_arr = []
+        for sh in meta['sheets']:
+            if sh['properties']['title'] != ws.title:
+                continue
+            data = sh.get('data', [])
+            if data:
+                hidden_arr = [rm.get('hiddenByUser', False)
+                              for rm in data[0].get('rowMetadata', [])]
+                break
+
+        # Reset + recreate
+        CrmHawbIndex.objects.filter(tab_name=ws.title).delete()
+
+        def _cell(row, idx):
+            v = row[idx - 1] if idx - 1 < len(row) else ''
+            return str(v).strip() if v not in (None, '') else ''
+
+        to_create: list[CrmHawbIndex] = []
+        rows_to_hide: list[int] = []
+        # Для матчинга hidden state используем порядок появления HAWB
+        # (post-sort стабильный sortRange сохраняет внутри ties).
+        hawb_seq: dict[str, int] = {}
         for i, row in enumerate(all_vals[1:], start=2):
             if COL_HAWB - 1 >= len(row):
                 continue
             hn = str(row[COL_HAWB - 1]).strip()
-            if hn:
-                new_positions[hn] = i
+            if not hn:
+                continue
+            # Какой по счёту это hawb (для дублей)
+            seq = hawb_seq.get(hn, 0)
+            hawb_seq[hn] = seq + 1
 
-        # Bulk-update row_index у существующих записей.
-        existing = list(CrmHawbIndex.objects.filter(tab_name=ws.title))
-        to_update = []
-        rows_to_hide: list[int] = []
-        for entry in existing:
-            new_idx = new_positions.get(entry.hawb_number)
-            if new_idx and new_idx != entry.row_index:
-                entry.row_index = new_idx
-                to_update.append(entry)
-            if entry.last_hidden and new_idx:
-                rows_to_hide.append(new_idx)
-        if to_update:
-            CrmHawbIndex.objects.bulk_update(
-                to_update, fields=['row_index'], batch_size=500)
-            self.stdout.write(f'  {ws.title}: row_index updated for {len(to_update)}')
+            t_raw = (row[20 - 1] if 20 - 1 < len(row) else None)
+            t_val = bool(t_raw) if t_raw is not None else False
+            is_hidden = hidden_arr[i - 1] if i - 1 < len(hidden_arr) else False
 
-        # RE-HIDE ряды которые были скрыты (по last_hidden).
+            # Если pre_sort знал hidden state для какого-то row_index с
+            # этим HAWB — используем (тот ряд был помечен hide ранее).
+            # Берём seq-й по счёту из pre_sort entries для этого HAWB.
+            pre_for_hawb = sorted(
+                idx for (h, idx) in pre_sort
+                if h == hn and pre_sort[(h, idx)])
+            should_hide_by_pre = seq < len(pre_for_hawb)
+
+            final_hidden = is_hidden or should_hide_by_pre
+
+            to_create.append(CrmHawbIndex(
+                hawb_number=hn,
+                tab_name=ws.title,
+                row_index=i,
+                last_decl=_cell(row, 23)[:64],
+                last_status=_cell(row, 24)[:128],
+                last_request=_cell(row, 21),
+                last_arrival=_cell(row, 5)[:16],
+                last_warehouse=_cell(row, 6)[:32],
+                last_t=t_val,
+                last_hidden=final_hidden,
+            ))
+            if final_hidden and not is_hidden:
+                # pre_sort говорил hide, в реальном Sheets visible — re-hide
+                rows_to_hide.append(i)
+
+        if to_create:
+            CrmHawbIndex.objects.bulk_create(to_create, batch_size=500)
+            self.stdout.write(
+                f'  {ws.title}: reindex {len(to_create)} entries')
+
         if rows_to_hide:
             self._apply_hide(ws, rows_to_hide)
-            self.stdout.write(f'  {ws.title}: re-hidden {len(rows_to_hide)} rows')
+            self.stdout.write(
+                f'  {ws.title}: re-hidden {len(rows_to_hide)} rows')
 
     def _apply_hide(self, ws, rows: list[int]):
         from collections import deque
