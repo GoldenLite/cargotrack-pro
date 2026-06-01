@@ -144,13 +144,18 @@ class Command(BaseCommand):
 
         self.stdout.write(f'Specialist tabs: {len(target_ws)}')
 
-        for ws in target_ws:
+        for i, ws in enumerate(target_ws):
             try:
                 self._sync_tab(ss, ws, opts)
             except Exception as e:
                 logger.exception('crm_sync tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(
                     f'  {ws.title}: {e}'))
+            # Cool-down между tabs: Google имеет per-spreadsheet write
+            # peak limit, после большого batch'а возвращает 500/503 на
+            # последующие. 8-секундная пауза снимает hot-state.
+            if i + 1 < len(target_ws):
+                time.sleep(8)
 
     def _sync_tab(self, ss, ws, opts):
         self.stdout.write('')
@@ -256,7 +261,10 @@ class Command(BaseCommand):
                     new_arrival = ''
                     new_warehouse = ''
 
-                if cur_decl != new_decl:
+                # decl пишем только когда выпуск разрешён — у ребят ещё
+                # работа (запросы, ответы) пока не пришёл CMN.11350 released.
+                if ('Выпуск разрешен' in new_status
+                        and cur_decl != new_decl):
                     updates.append({
                         'range': f'{_col_letter(col_decl)}{row_idx}',
                         'values': [[new_decl]],
@@ -321,12 +329,14 @@ class Command(BaseCommand):
         # USER_ENTERED парсит «09.05.2026» как дату (RAW сохранил бы как
         # текст с ведущим апострофом, и сортировка по дате не работала бы).
         if updates:
-            # Чанкаем по 500 чтобы не перегружать batch_update.
-            for i in range(0, len(updates), 500):
-                chunk = updates[i:i + 500]
+            # Chunk 100 — большие batch'и триггерят per-spreadsheet
+            # peak write limit (Google потом 500/503 на последующие).
+            CHUNK = 100
+            for i in range(0, len(updates), CHUNK):
+                chunk = updates[i:i + CHUNK]
                 _retry(ws.batch_update, chunk,
                        value_input_option='USER_ENTERED',
-                       label=f'{ws.title} batch {i//500 + 1}')
+                       label=f'{ws.title} batch {i//CHUNK + 1}')
 
         # Применяем hidden state: hide для одних, unhide для других.
         if not opts['no_hide']:
