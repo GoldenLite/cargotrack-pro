@@ -100,19 +100,16 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Done.'))
 
     def _reindex_tab(self, ws):
-        """После sort row_index'ы стейл, плюс sort мог изменить порядок
-        дубликатов. Делаем full reindex (delete + recreate) с учётом
-        реального hidden state из Sheets metadata.
+        """После sort row_index'ы стейл. Делаем full reindex (delete +
+        recreate) с учётом реального hidden state из Sheets metadata.
 
-        Затем RE-HIDE те ряды у которых после sort должен быть hidden
-        (по сохранённому ранее last_hidden ДО sort'а).
+        Hide-state для каждого ряда вычисляем заново по DB (если HAWB
+        в БД) или по Sheets-state (если non-DB). Это избавляет от
+        проблемы матчинга pre-sort vs post-sort при дубликатах с
+        разными arrival dates — каждый ряд независимо вычисляет hide.
         """
-        # Сохраняем последний-известный hidden state per (hawb, row_index)
-        # ДО полного reset'а индекса.
-        pre_sort = {
-            (e.hawb_number, e.row_index): e.last_hidden
-            for e in CrmHawbIndex.objects.filter(tab_name=ws.title)
-        }
+        from cargo.models import HouseWaybill
+        from cargo.services.alta.ed_status import compute_ed_status
 
         # Read Sheets values + hidden metadata.
         last_col = 24  # X
@@ -138,56 +135,78 @@ class Command(BaseCommand):
                               for rm in data[0].get('rowMetadata', [])]
                 break
 
-        # Reset + recreate
-        CrmHawbIndex.objects.filter(tab_name=ws.title).delete()
-
         def _cell(row, idx):
             v = row[idx - 1] if idx - 1 < len(row) else ''
             return str(v).strip() if v not in (None, '') else ''
 
+        # Pre-pass: собираем все HAWB на вкладке для bulk-load из БД.
+        hawb_set = set()
+        for row in all_vals[1:]:
+            if COL_HAWB - 1 >= len(row):
+                continue
+            hn = str(row[COL_HAWB - 1]).strip()
+            if hn:
+                hawb_set.add(hn)
+        hawbs_db = {
+            h.hawb_number: h for h in HouseWaybill.objects
+            .filter(hawb_number__in=list(hawb_set))
+            .select_related('mawb')
+        }
+
+        # Reset + recreate
+        CrmHawbIndex.objects.filter(tab_name=ws.title).delete()
+
         to_create: list[CrmHawbIndex] = []
         rows_to_hide: list[int] = []
-        # Для матчинга hidden state используем порядок появления HAWB
-        # (post-sort стабильный sortRange сохраняет внутри ties).
-        hawb_seq: dict[str, int] = {}
         for i, row in enumerate(all_vals[1:], start=2):
             if COL_HAWB - 1 >= len(row):
                 continue
             hn = str(row[COL_HAWB - 1]).strip()
             if not hn:
                 continue
-            # Какой по счёту это hawb (для дублей)
-            seq = hawb_seq.get(hn, 0)
-            hawb_seq[hn] = seq + 1
 
             t_raw = (row[20 - 1] if 20 - 1 < len(row) else None)
             t_val = bool(t_raw) if t_raw is not None else False
             is_hidden = hidden_arr[i - 1] if i - 1 < len(hidden_arr) else False
 
-            # Если pre_sort знал hidden state для какого-то row_index с
-            # этим HAWB — используем (тот ряд был помечен hide ранее).
-            # Берём seq-й по счёту из pre_sort entries для этого HAWB.
-            pre_for_hawb = sorted(
-                idx for (h, idx) in pre_sort
-                if h == hn and pre_sort[(h, idx)])
-            should_hide_by_pre = seq < len(pre_for_hawb)
+            cur_decl = _cell(row, 23)
+            cur_status = _cell(row, 24)
 
-            final_hidden = is_hidden or should_hide_by_pre
+            # Вычисляем will-state как в incremental: для DB-tracked
+            # используем DB compute, для non-DB — что в Sheets.
+            h = hawbs_db.get(hn)
+            if h:
+                new_decl = (h.customs_declaration_number or '').strip()
+                new_status = compute_ed_status(h) or ''
+                if 'Выпуск разрешен' in new_status:
+                    will_decl = new_decl
+                elif not new_decl:
+                    will_decl = ''
+                else:
+                    will_decl = cur_decl
+                will_status = new_status
+            else:
+                will_decl = cur_decl
+                will_status = cur_status
+
+            is_legacy_released = bool(will_decl) and not will_status
+            want_hidden = ('Выпуск разрешен' in will_status
+                           or is_legacy_released)
 
             to_create.append(CrmHawbIndex(
                 hawb_number=hn,
                 tab_name=ws.title,
                 row_index=i,
-                last_decl=_cell(row, 23)[:64],
-                last_status=_cell(row, 24)[:128],
+                last_decl=cur_decl[:64],
+                last_status=cur_status[:128],
                 last_request=_cell(row, 21),
                 last_arrival=_cell(row, 5)[:16],
                 last_warehouse=_cell(row, 6)[:32],
                 last_t=t_val,
-                last_hidden=final_hidden,
+                last_hidden=want_hidden,
             ))
-            if final_hidden and not is_hidden:
-                # pre_sort говорил hide, в реальном Sheets visible — re-hide
+            if want_hidden and not is_hidden:
+                # Должен быть hidden, в реальном Sheets visible — re-hide
                 rows_to_hide.append(i)
 
         if to_create:
