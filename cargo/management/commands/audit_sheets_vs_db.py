@@ -39,6 +39,17 @@ from cargo.services.sheets.writeback import (
     CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER,
     CARGOTRACK_ATTEMPTS_COUNT_HEADER,
     CARGOTRACK_ED_STATUS_HEADER,
+    EXPORT_DECLARATION_HEADER,
+    EXPORT_DECLARATION_FORM_HEADER,
+    EXPORT_DECLARANT_HEADER,
+    EXPORT_ED_STATUS_HEADER,
+    EXPORT_FILED_DATE_HEADER,
+    EXPORT_RELEASE_DATE_HEADER,
+    EXPORT_GOODS_COUNT_HEADER,
+    EXPORT_CUSTOMS_REQUESTS_HEADER,
+    EXPORT_CUSTOMS_REQUESTS_COUNT_HEADER,
+    EXPORT_ATTEMPTS_COUNT_HEADER,
+    EXPORT_TRANSPORT_DOC_HEADER,
     _local_date_str,
     _retry_api,
     _customs_requests_text,
@@ -111,6 +122,39 @@ def _customs_requests_count_audit(h):
     return _customs_requests_count(h)
 
 
+def _decl_form(h):
+    return (h.declaration_form or '').strip()
+
+
+def _declarant(h):
+    return (h.declarant_name or '').strip()
+
+
+def _transport_doc(h):
+    return (h.mawb.awb_number if h.mawb_id and h.mawb else '') or ''
+
+
+EXPORT_CHECKS = [
+    (EXPORT_DECLARATION_HEADER,        _decl,             'declaration'),
+    (EXPORT_DECLARATION_FORM_HEADER,   _decl_form,        'declaration_form'),
+    (EXPORT_DECLARANT_HEADER,          _declarant,        'declarant'),
+    (EXPORT_FILED_DATE_HEADER,         _filed,            'filed_date'),
+    (EXPORT_RELEASE_DATE_HEADER,       _release,          'release_date'),
+    (EXPORT_GOODS_COUNT_HEADER,        _goods_count,      'goods_count'),
+    (EXPORT_TRANSPORT_DOC_HEADER,      _transport_doc,    'transport_doc'),
+    (EXPORT_CUSTOMS_REQUESTS_HEADER,
+        lambda h: _customs_requests_text(h),  'customs_requests'),
+    (EXPORT_CUSTOMS_REQUESTS_COUNT_HEADER,
+        lambda h: str(_customs_requests_count(h) or ''), 'customs_requests_count'),
+    (EXPORT_ATTEMPTS_COUNT_HEADER,
+        lambda h: str(_attempts_count(h) or ''), 'attempts_count'),
+    (EXPORT_ED_STATUS_HEADER,
+        lambda h: __import__('cargo.services.alta.ed_status',
+                             fromlist=['compute_ed_status']).compute_ed_status(h),
+        'ed_status'),
+]
+
+
 CHECKS = [
     (CARGOTRACK_COL_HEADER,            _decl,             'declaration'),
     (CARGOTRACK_SVH_LICENSE_HEADER,    _lic,              'svh_license'),
@@ -173,11 +217,15 @@ class Command(BaseCommand):
                             help='Сохранить полный отчёт в CSV')
         parser.add_argument('--fix', action='store_true',
                             help='Записать правильные значения в Sheets')
+        parser.add_argument('--kind', default='general',
+                            choices=['general', 'export'],
+                            help='Тип SheetSource (general или export)')
 
     def handle(self, *args, **opts):
-        sources = list(SheetSource.objects.filter(kind='general', is_active=True))
+        kind = opts.get('kind') or 'general'
+        sources = list(SheetSource.objects.filter(kind=kind, is_active=True))
         if not sources:
-            self.stdout.write('Нет активных general-источников')
+            self.stdout.write(f'Нет активных {kind}-источников')
             return
 
         for source in sources:
@@ -186,12 +234,13 @@ class Command(BaseCommand):
             self._audit_source(source, opts)
 
     def _audit_source(self, source: SheetSource, opts: dict):
+        checks = EXPORT_CHECKS if source.kind == 'export' else CHECKS
         ws = _retry_api(open_worksheet, source, label='audit open')
         header = _retry_api(ws.row_values, source.header_row, label='audit header')
 
         # Считаем колонки нашими
         col_map = {}  # header_name → col_idx
-        for hdr, _, _ in CHECKS:
+        for hdr, _, _ in checks:
             if hdr in header:
                 col_map[hdr] = header.index(hdr) + 1
         if not col_map:
@@ -237,7 +286,7 @@ class Command(BaseCommand):
             if not h:
                 # HAWB в Sheets, но нет в БД → orphan-row, не интересует здесь
                 continue
-            for hdr, db_fn, label in CHECKS:
+            for hdr, db_fn, label in checks:
                 if hdr not in col_map:
                     continue
                 values = col_values.get(hdr, [])
