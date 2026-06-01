@@ -30,8 +30,20 @@ class Command(BaseCommand):
         last_nonblank = next((i for i, v in reversed(list(enumerate(before, start=2))) if v not in (None, '')), None)
         self.stdout.write(f'BEFORE: {dict(c)}, first_blank={first_blank}, last_nonblank={last_nonblank}')
 
-        # Запускаем pass 1
-        req = {
+        # Сначала UNHIDE все ряды, потом sort.
+        unhide_req = {
+            'updateDimensionProperties': {
+                'range': {
+                    'sheetId': ws.id,
+                    'dimension': 'ROWS',
+                    'startIndex': 1,
+                    'endIndex': ws.row_count,
+                },
+                'properties': {'hiddenByUser': False},
+                'fields': 'hiddenByUser',
+            }
+        }
+        sort_req = {
             'sortRange': {
                 'range': {
                     'sheetId': ws.id,
@@ -45,8 +57,8 @@ class Command(BaseCommand):
                 ],
             }
         }
-        self.stdout.write('Issuing pass1 sort...')
-        result = ss.batch_update({'requests': [req]})
+        self.stdout.write('Issuing UNHIDE + pass1 sort...')
+        result = ss.batch_update({'requests': [unhide_req, sort_req]})
         self.stdout.write(f'Response keys: {list(result.keys()) if isinstance(result, dict) else result}')
 
         # After
