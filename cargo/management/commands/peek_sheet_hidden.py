@@ -22,8 +22,7 @@ class Command(BaseCommand):
 
         # Запрашиваем sheets.get с rowMetadata.hiddenByUser
         rng = ws.title
-        meta = ss.client.http_client.fetch_sheet_metadata(
-            ss.id,
+        meta = ss.fetch_sheet_metadata(
             params={
                 'ranges': rng,
                 'fields': 'sheets(properties(sheetId,title),data(rowMetadata(hiddenByUser)))',
