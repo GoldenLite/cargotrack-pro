@@ -49,6 +49,7 @@ SPECIALIST_TABS = {
 COL_HAWB         = 3   # C
 COL_ARRIVAL_DATE = 5   # E
 COL_WAREHOUSE    = 6   # F
+COL_T            = 20  # T (checkbox «подано/в работе/выпущено»)
 COL_REQUEST      = 21  # U
 COL_DECL         = 23  # W
 COL_ED_STATUS    = 24  # X
@@ -143,6 +144,9 @@ class Command(BaseCommand):
                 v = (row[idx - 1] if idx - 1 < len(row) else '')
                 return str(v).strip() if v not in (None, '') else ''
 
+            t_raw = (row[COL_T - 1] if COL_T - 1 < len(row) else None)
+            t_val = bool(t_raw) if t_raw is not None else False
+
             found[hn] = {
                 'row_index': i,
                 'last_decl':      _cell(COL_DECL),
@@ -150,6 +154,7 @@ class Command(BaseCommand):
                 'last_request':   _cell(COL_REQUEST),
                 'last_arrival':   _cell(COL_ARRIVAL_DATE),
                 'last_warehouse': _cell(COL_WAREHOUSE),
+                'last_t':         t_val,
             }
 
         self.stdout.write(f'  HAWB found: {len(found)}')
@@ -190,6 +195,7 @@ class Command(BaseCommand):
                     last_request=d['last_request'],
                     last_arrival=d['last_arrival'][:16],
                     last_warehouse=d['last_warehouse'][:32],
+                    last_t=d['last_t'],
                 ))
             else:
                 ex.row_index = d['row_index']
@@ -198,6 +204,7 @@ class Command(BaseCommand):
                 ex.last_request = d['last_request']
                 ex.last_arrival = d['last_arrival'][:16]
                 ex.last_warehouse = d['last_warehouse'][:32]
+                ex.last_t = d['last_t']
                 ex.last_seen_at = now
                 to_update.append(ex)
 
@@ -209,7 +216,7 @@ class Command(BaseCommand):
                 to_update,
                 fields=['row_index', 'last_decl', 'last_status',
                         'last_request', 'last_arrival', 'last_warehouse',
-                        'last_seen_at'],
+                        'last_t', 'last_seen_at'],
                 batch_size=500,
             )
 

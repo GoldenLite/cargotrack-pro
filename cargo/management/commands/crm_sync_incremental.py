@@ -38,7 +38,7 @@ from django.utils import timezone as djtz
 import gspread.exceptions
 
 from cargo.models import CrmHawbIndex, HouseWaybill
-from cargo.services.alta.ed_status import compute_ed_status
+from cargo.services.alta.ed_status import compute_ed_status, compute_t_value
 from cargo.services.sheets.client import get_client
 from cargo.services.sheets.writeback import _customs_requests_text
 
@@ -52,6 +52,7 @@ CRM_ID = '1H7AdXuo_zalnalgrWfVhm0Lau1MdXtFuFbg5pPGfcfI'
 COL_HAWB         = 3   # C
 COL_ARRIVAL_DATE = 5   # E
 COL_WAREHOUSE    = 6   # F
+COL_T            = 20  # T (checkbox «подано/в работе/выпущено»)
 COL_REQUEST      = 21  # U
 COL_DECL         = 23  # W
 COL_ED_STATUS    = 24  # X
@@ -136,6 +137,7 @@ class Command(BaseCommand):
         n_diff_arrival = 0
         n_diff_warehouse = 0
         n_diff_hidden = 0
+        n_diff_t = 0
 
         for entry in qs.iterator(chunk_size=500):
             h = hawbs_db.get(entry.hawb_number)
@@ -149,6 +151,9 @@ class Command(BaseCommand):
                 else:
                     new_arrival = ''
                     new_warehouse = ''
+                # T checkbox: TRUE если в пайплайне таможни, FALSE при
+                # отказе/отзыве/не подано.
+                new_t = compute_t_value(h)
                 db_tracked = True
             else:
                 # HAWB нет в БД — ячейки не трогаем, но hide-критерий
@@ -160,6 +165,8 @@ class Command(BaseCommand):
                 new_request = entry.last_request
                 new_arrival = entry.last_arrival
                 new_warehouse = entry.last_warehouse
+                # Для non-DB не трогаем T (это вручную ставили).
+                new_t = entry.last_t
                 db_tracked = False
 
             row = entry.row_index
@@ -223,6 +230,17 @@ class Command(BaseCommand):
                 changed = True
                 n_diff_warehouse += 1
 
+            # T checkbox: пишем для DB-tracked HAWB всегда, для non-DB
+            # не трогаем (new_t = entry.last_t).
+            if db_tracked and new_t != entry.last_t:
+                updates_per_tab[tab].append({
+                    'range': f'{_col_letter(COL_T)}{row}',
+                    'values': [[new_t]],
+                })
+                entry.last_t = new_t
+                changed = True
+                n_diff_t += 1
+
             # hide-критерий по will-state:
             will_decl = entry.last_decl  # уже обновлён выше
             will_status = entry.last_status
@@ -245,7 +263,7 @@ class Command(BaseCommand):
         self.stdout.write(
             f'  diffs: decl={n_diff_decl} status={n_diff_status} '
             f'request={n_diff_request} arrival={n_diff_arrival} '
-            f'svh={n_diff_warehouse}, hidden={n_diff_hidden}')
+            f'svh={n_diff_warehouse} t={n_diff_t}, hidden={n_diff_hidden}')
 
         if opts['dry_run']:
             self.stdout.write('  --dry-run: skip writes')
@@ -295,7 +313,7 @@ class Command(BaseCommand):
                 idx_to_save,
                 fields=['last_decl', 'last_status', 'last_request',
                         'last_arrival', 'last_warehouse', 'last_hidden',
-                        'last_synced_at'],
+                        'last_t', 'last_synced_at'],
                 batch_size=500,
             )
             self.stdout.write(f'  index updated: {len(idx_to_save)} rows')

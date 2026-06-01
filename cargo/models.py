@@ -831,6 +831,23 @@ class HouseWaybill(models.Model):
         'Мест ДО1', null=True, blank=True,
         help_text='CargoPlace.PlaceNumber из <Goods> блока с этим HAWB в ДО-1.')
 
+    # ── СДЭК (доставка) — read-only трекинг ──
+    # Заказ СДЭК создаётся внешней системой с нашим hawb_number как im_number;
+    # статусы тянутся вебхуками ORDER_STATUS (см. cargo/services/cdek/).
+    # Это отдельный неймспейс — на logistics_status/customs_status НЕ влияет.
+    cdek_uuid        = models.CharField('CDEK UUID заказа', max_length=64,
+                                        blank=True, default='', db_index=True)
+    cdek_number      = models.CharField('Номер заказа СДЭК', max_length=32,
+                                        blank=True, default='', db_index=True)
+    cdek_status_code = models.CharField('Код статуса СДЭК', max_length=32,
+                                        blank=True, default='')
+    cdek_status_name = models.CharField('Статус СДЭК', max_length=128,
+                                        blank=True, default='')
+    cdek_status_date = models.DateTimeField('Дата статуса СДЭК',
+                                            null=True, blank=True)
+    cdek_synced_at   = models.DateTimeField('Синхронизация СДЭК',
+                                            null=True, blank=True)
+
     # ── Документы для таможенного оформления ──
     doc_invoice      = models.BooleanField('Инвойс', default=False)
     doc_packing_list = models.BooleanField('Упаковочный лист', default=False)
@@ -951,6 +968,23 @@ class HouseWaybill(models.Model):
             'REJECTED':      'danger',
         }
         return colors.get(self.customs_status, 'secondary')
+
+    @property
+    def cdek_status_display(self) -> str:
+        """Человекочитаемый статус СДЭК (имя из API, иначе код, иначе '—')."""
+        return self.cdek_status_name or self.cdek_status_code or '—'
+
+    @property
+    def cdek_status_color(self) -> str:
+        """Bootstrap-цвет бейджа статуса СДЭК. Чисто для отображения."""
+        code = (self.cdek_status_code or '').strip()
+        if code == 'DELIVERED':
+            return 'success'
+        if code in ('NOT_DELIVERED', 'INVALID'):
+            return 'danger'
+        if code:
+            return 'info'
+        return 'secondary'
 
     def change_logistics_status(self, new_status: str, user=None, comment: str = '') -> str | None:
         """Смена логистического статуса с автоматической логикой. Возвращает текст ошибки или None при успехе."""
@@ -2275,6 +2309,8 @@ class CrmHawbIndex(models.Model):
     last_arrival   = models.CharField('Last arrival', max_length=16, blank=True, default='')
     last_warehouse = models.CharField('Last warehouse', max_length=32, blank=True, default='')
     last_hidden    = models.BooleanField('Скрыта', default=False)
+    last_t         = models.BooleanField(
+        'T checkbox (подано/в работе/выпущено)', default=False)
 
     last_seen_at   = models.DateTimeField('В Sheets увидели', auto_now_add=True)
     last_synced_at = models.DateTimeField('Последний sync', null=True, blank=True)
@@ -2404,3 +2440,47 @@ class HawbWorkflowEvent(models.Model):
 
     def __str__(self) -> str:
         return f'{self.hawb.hawb_number} · {self.get_event_type_display()} · {self.occurred_at:%d.%m.%Y}'
+
+
+class CdekStatusEvent(models.Model):
+    """Событие статуса доставки СДЭК на таймлайне HAWB.
+
+    Каждый статус из истории заказа СДЭК материализуется как одна запись.
+    Идемпотентно по (hawb, status_code, occurred_at) — повторная доставка
+    того же вебхука не плодит дубли. Read-only: пишется только из
+    cargo/services/cdek/, на logistics/customs статусы не влияет.
+    """
+    SOURCE_CHOICES = [
+        ('webhook', 'Вебхук СДЭК'),
+        ('poll',    'Опрос API'),
+        ('manual',  'Вручную (кнопка)'),
+    ]
+
+    hawb        = models.ForeignKey(HouseWaybill, on_delete=models.CASCADE,
+                                    related_name='cdek_events')
+    status_code = models.CharField('Код статуса', max_length=32, db_index=True)
+    status_name = models.CharField('Статус', max_length=128, blank=True)
+    occurred_at = models.DateTimeField('Когда произошло', db_index=True)
+    city        = models.CharField('Город', max_length=128, blank=True)
+
+    cdek_uuid   = models.CharField('CDEK UUID заказа', max_length=64, blank=True, db_index=True)
+    cdek_number = models.CharField('Номер заказа СДЭК', max_length=32, blank=True)
+
+    source      = models.CharField('Источник', max_length=10,
+                                   choices=SOURCE_CHOICES, default='webhook')
+    raw         = models.JSONField('Сырой статус', default=dict, blank=True)
+    received_at = models.DateTimeField('Получено', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Статус доставки СДЭК'
+        verbose_name_plural = 'Статусы доставки СДЭК'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['hawb', 'status_code', 'occurred_at'],
+                name='cdekstatusevent_idem_uniq'),
+        ]
+        indexes = [models.Index(fields=['hawb', '-occurred_at'])]
+        ordering = ['-occurred_at']
+
+    def __str__(self) -> str:
+        return f'{self.hawb.hawb_number} · СДЭК {self.status_code} · {self.occurred_at:%d.%m.%Y}'

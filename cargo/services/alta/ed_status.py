@@ -288,3 +288,24 @@ def compute_ed_status(hawb) -> str:
     if main and flags:
         return main + '; ' + '; '.join(flags)
     return main or '; '.join(flags)
+
+
+# Negative phrases that imply NOT in customs pipeline (rejected/withdrawn).
+# Substring match — также ловит "Отказано в выпуске; Запрошены док-ты!" и т.п.
+_T_NEGATIVE_MARKERS = ('Отказ', 'Отзыв', 'Считается не поданной')
+
+
+def compute_t_value(hawb) -> bool:
+    """T checkbox в CRM-вкладке: TRUE когда HAWB подана/в процессе/выпущена,
+    FALSE когда отказ, отзыв или не подана.
+
+    Подход: используем compute_ed_status как primary signal (он robust
+    к withdrawn-кейсу и empty customs_status + filed_date set). Любая
+    непустая фраза БЕЗ negative-маркера = TRUE.
+    """
+    ed = compute_ed_status(hawb) or ''
+    if not ed.strip():
+        return False
+    if any(m in ed for m in _T_NEGATIVE_MARKERS):
+        return False
+    return True
