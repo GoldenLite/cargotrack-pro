@@ -326,15 +326,22 @@ class Command(BaseCommand):
 
     def _sort_by_arrival(self, ss, ws, col_arrival: int,
                          last_col_letter: str):
-        """Sort B2:lastcol по столбцу arrival (по возрастанию).
+        """Sort B2:lastcol по столбцу arrival (по возрастанию) + поднимаем
+        строки с пустой датой прибытия наверх (после шапки).
 
-        ФИО специалиста (A) обычно содержит имя — оставляем по логике (закреплённая).
-        Сортируем со строки 2 (после шапки).
+        Google sortRange ASC кладёт пустые ячейки В САМЫЙ НИЗ, а юзер хочет
+        видеть новые накладные (без даты ДО1) НАВЕРХУ — они «теряются» внизу.
+
+        Алгоритм:
+        1. Sort range B2:lastcol по столбцу arrival ascending.
+        2. После sort'а строки с пустой arrival оказываются внизу в одном
+           подряд блоке. Находим начало этого блока и moveDimension вверх
+           сразу после шапки.
         """
         end_col_idx = ord(last_col_letter[-1]) - ord('A') + 1
         if len(last_col_letter) > 1:
             end_col_idx += 26 * (ord(last_col_letter[0]) - ord('A') + 1)
-        request = {
+        sort_req = {
             'sortRange': {
                 'range': {
                     'sheetId': ws.id,
@@ -349,5 +356,53 @@ class Command(BaseCommand):
                 }],
             }
         }
-        ss.batch_update({'requests': [request]})
+        ss.batch_update({'requests': [sort_req]})
         self.stdout.write(f'  sorted by col {_col_letter(col_arrival)} ascending')
+
+        # Перемещаем пустые-arrival ряды вверх.
+        arrival_col = ws.col_values(col_arrival)
+        # Считаем строки с HAWB-номером в col_hawb но пустой arrival.
+        # Идём с конца — empty группируется внизу после sort'а.
+        # Находим первую пустую снизу.
+        empty_start = None
+        for i in range(len(arrival_col) - 1, 0, -1):
+            v = (arrival_col[i] or '').strip()
+            if v:
+                empty_start = i + 2  # row_idx (1-based, после v)
+                break
+        # Если все пустые — empty_start = 2. Если все заполнены — None.
+        if empty_start is None:
+            # все пустые — sort не нужен, выходим
+            return
+        # empty_start = первая пустая строка снизу.
+        # Но мы хотим строки С HAWB но без даты — это они «теряются».
+        # Без HAWB строки — пустые трейлеры, не трогаем.
+        # Проверим: реально ли это пустые-arrival ряды с HAWB?
+        if empty_start > ws.row_count:
+            return  # все строки имеют arrival
+
+        # Находим самую нижнюю строку С HAWB номером.
+        hawb_col = ws.col_values(COL_HAWB)
+        last_hawb_row = 1
+        for i in range(len(hawb_col) - 1, 0, -1):
+            if (hawb_col[i] or '').strip():
+                last_hawb_row = i + 1
+                break
+        if empty_start > last_hawb_row:
+            return  # нет HAWB без даты — нечего поднимать
+
+        # Перемещаем строки empty_start..last_hawb_row в верх (после шапки).
+        move_req = {
+            'moveDimension': {
+                'source': {
+                    'sheetId': ws.id,
+                    'dimension': 'ROWS',
+                    'startIndex': empty_start - 1,  # 0-based
+                    'endIndex': last_hawb_row,       # exclusive
+                },
+                'destinationIndex': 1,  # после шапки (row 2)
+            }
+        }
+        ss.batch_update({'requests': [move_req]})
+        n_moved = last_hawb_row - empty_start + 1
+        self.stdout.write(f'  moved {n_moved} empty-arrival rows to top')
