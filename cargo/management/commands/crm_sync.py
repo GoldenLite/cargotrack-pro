@@ -120,6 +120,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--tab', help='Только этот tab (название)')
+        parser.add_argument('--exclude', help='Исключить tab (CSV)')
         parser.add_argument('--dry-run', action='store_true')
         parser.add_argument('--no-hide', action='store_true',
                             help='Не скрывать выпущенные строки')
@@ -134,11 +135,17 @@ class Command(BaseCommand):
         ss = client.open_by_key(CRM_ID)
         self.stdout.write(f'Spreadsheet: {ss.title}')
 
+        excluded = set()
+        if opts.get('exclude'):
+            excluded = {s.strip() for s in opts['exclude'].split(',') if s.strip()}
+
         target_ws = []
         for ws in ss.worksheets():
             if ws.title not in SPECIALIST_TABS:
                 continue
             if opts['tab'] and ws.title != opts['tab']:
+                continue
+            if ws.title in excluded:
                 continue
             target_ws.append(ws)
 
