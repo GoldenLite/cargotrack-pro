@@ -307,10 +307,13 @@ class Command(BaseCommand):
                 # HAWB нет в БД — статус берём из текущего значения.
                 new_status = cur_status
 
-            # Hide-критерий: только финальный выпуск.
-            # decl-присвоен НЕ скрывает — у ребят ещё работа по HAWB
-            # (проверка, запросы, ответы) пока не пришёл CMN.11350 released.
-            if 'Выпуск разрешен' in new_status:
+            # Hide-критерий:
+            # 1. ed_status='Выпуск разрешен' (наша автоматизация).
+            # 2. cur_decl уже стоит в W — ребята исторически вписывали
+            #    рег.номер только после выпуска, считаем выпущенным.
+            # Наша автоматизация decl в W пишет ТОЛЬКО при released,
+            # так что обе ветки сходятся: cur_decl non-empty = released.
+            if 'Выпуск разрешен' in new_status or cur_decl:
                 rows_hide.append(row_idx)
             else:
                 rows_show.append(row_idx)
