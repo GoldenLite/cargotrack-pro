@@ -47,7 +47,34 @@ COL_DECL = 23
 COL_ED_STATUS = 24
 
 HAWB_RE = re.compile(r'\b(\d{10,11})\b')
-DECL_RE = re.compile(r'\b(\d{8}/\d{6}/\d{7})\b')
+# Декларация в outbox-XML это строка XXXXXXXX/DDMMYY/XXXXXXX (юзерский формат).
+DECL_LITERAL_RE = re.compile(r'\b(\d{8}/\d{6}/\d{7})\b')
+# В inbox-XML (CMN.11350 etc) декларация это ТРИ раздельных тега:
+#   <cat_ru:CustomsCode>10005020</cat_ru:CustomsCode>
+#   <cat_ru:RegistrationDate>2026-05-24</cat_ru:RegistrationDate>
+#   <cat_ru:GTDNumber>0018803</cat_ru:GTDNumber>
+# Сборка: 10005020/240526/0018803.
+CUSTOMS_CODE_RE = re.compile(r'<[^>]*CustomsCode[^>]*>(\d{8})</')
+REG_DATE_RE = re.compile(r'<[^>]*RegistrationDate[^>]*>(\d{4})-(\d{2})-(\d{2})</')
+GTD_NUM_RE = re.compile(r'<[^>]*GTDNumber[^>]*>(\d{7})</')
+
+
+def _extract_decls(raw: str) -> set[str]:
+    """Извлекает все возможные декларации из raw_xml."""
+    decls = set(DECL_LITERAL_RE.findall(raw))
+    codes = CUSTOMS_CODE_RE.findall(raw)
+    if not codes:
+        return decls
+    dates = REG_DATE_RE.findall(raw)
+    gtds = GTD_NUM_RE.findall(raw)
+    if not (dates and gtds):
+        return decls
+    for c in codes:
+        for y, m, d in dates:
+            date_fmt = f'{d}{m}{y[2:]}'  # DDMMYY
+            for g in gtds:
+                decls.add(f'{c}/{date_fmt}/{g}')
+    return decls
 
 
 def _retry(fn, *args, label: str = '', **kwargs):
@@ -102,7 +129,7 @@ class Command(BaseCommand):
             if not raw:
                 continue
             hawbs = set(HAWB_RE.findall(raw))
-            decls = set(DECL_RE.findall(raw))
+            decls = _extract_decls(raw)
             if not (hawbs and decls):
                 continue
             for h in hawbs:
