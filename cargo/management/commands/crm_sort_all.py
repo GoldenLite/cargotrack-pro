@@ -88,6 +88,9 @@ class Command(BaseCommand):
         for i, ws in enumerate(target):
             try:
                 self._sort_tab(ss, ws)
+                # После sort row_index'ы в индексе протухли. Reindex
+                # читает текущее состояние и обновляет.
+                self._reindex_tab(ws)
             except Exception as e:
                 logger.exception('crm_sort tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(f'  {ws.title}: {e}'))
@@ -95,6 +98,38 @@ class Command(BaseCommand):
                 time.sleep(3)
 
         self.stdout.write(self.style.SUCCESS('Done.'))
+
+    def _reindex_tab(self, ws):
+        """После sort обновляем row_index в CrmHawbIndex для этой вкладки.
+
+        НЕ перетираем last_* — только row_index. Last_* остаются как были,
+        чтобы incremental на следующем тике продолжал писать только реальные
+        diff'ы.
+        """
+        rng = f'A1:C{ws.row_count}'
+        all_vals = _retry(ws.get, rng,
+                          value_render_option='UNFORMATTED_VALUE',
+                          label=f'{ws.title} reindex get')
+        new_positions: dict[str, int] = {}
+        for i, row in enumerate(all_vals[1:], start=2):
+            if COL_HAWB - 1 >= len(row):
+                continue
+            hn = str(row[COL_HAWB - 1]).strip()
+            if hn:
+                new_positions[hn] = i
+
+        # Bulk-update row_index у существующих записей.
+        existing = list(CrmHawbIndex.objects.filter(tab_name=ws.title))
+        to_update = []
+        for entry in existing:
+            new_idx = new_positions.get(entry.hawb_number)
+            if new_idx and new_idx != entry.row_index:
+                entry.row_index = new_idx
+                to_update.append(entry)
+        if to_update:
+            CrmHawbIndex.objects.bulk_update(
+                to_update, fields=['row_index'], batch_size=500)
+            self.stdout.write(f'  {ws.title}: row_index updated for {len(to_update)}')
 
     def _sort_tab(self, ss, ws):
         n_hawb_rows = CrmHawbIndex.objects.filter(tab_name=ws.title).count()
@@ -141,12 +176,4 @@ class Command(BaseCommand):
             _retry(ss.batch_update, {'requests': [req_pass2]},
                    label=f'{ws.title} sort pass2')
 
-        # ВАЖНО: после sort row_index'ы в CrmHawbIndex стейл!
-        # Нужно сразу перестроить индекс (просто пересчитать row_index
-        # для каждой HAWB по новому порядку). Делаем это inline, без
-        # повторного read Sheets — sort это ДЕТЕРМИНИРОВАННАЯ операция
-        # ОДНАКО мы не знаем какой порядок Google выбрал внутри ties.
-        # Безопаснее: после crm_sort_all запускать crm_reindex.
-        # Альтернатива: ставим флажок is_stale на index, incremental
-        # дальше не работает пока не reindex. На первой версии —
-        # оставляем reindex после sort_all.
+        # row_index в CrmHawbIndex обновится через _reindex_tab после.
