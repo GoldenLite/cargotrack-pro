@@ -186,9 +186,12 @@ class Command(BaseCommand):
                 will_decl = cur_decl
                 will_status = cur_status
 
+            # Финальные состояния: released/rejected/withdrawn/considered-not-submitted.
+            is_final = any(m in will_status for m in
+                           ('Выпуск разрешен', 'Отказ', 'Отзыв',
+                            'Считается не поданной'))
             is_legacy_released = bool(will_decl) and not will_status
-            want_hidden = ('Выпуск разрешен' in will_status
-                           or is_legacy_released)
+            want_hidden = is_final or is_legacy_released
 
             to_create.append(CrmHawbIndex(
                 hawb_number=hn,

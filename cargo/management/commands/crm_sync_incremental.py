@@ -244,9 +244,14 @@ class Command(BaseCommand):
             # hide-критерий по will-state:
             will_decl = entry.last_decl  # уже обновлён выше
             will_status = entry.last_status
+            # Финальные состояния — HAWB больше не в работе:
+            #   Выпуск разрешен / Отказано / Отзыв / Считается не поданной.
+            # Legacy: cur_decl без статуса — старая ручная запись «выпущено».
+            is_final = any(m in will_status for m in
+                           ('Выпуск разрешен', 'Отказ', 'Отзыв',
+                            'Считается не поданной'))
             is_legacy_released = bool(will_decl) and not will_status
-            want_hidden = ('Выпуск разрешен' in will_status
-                           or is_legacy_released)
+            want_hidden = is_final or is_legacy_released
             if want_hidden != entry.last_hidden:
                 if want_hidden:
                     hide_per_tab[tab].append(row)
