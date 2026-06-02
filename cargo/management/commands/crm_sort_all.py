@@ -153,9 +153,6 @@ class Command(BaseCommand):
             .select_related('mawb')
         }
 
-        # Reset + recreate
-        CrmHawbIndex.objects.filter(tab_name=ws.title).delete()
-
         to_create: list[CrmHawbIndex] = []
         rows_to_hide: list[int] = []
         for i, row in enumerate(all_vals[1:], start=2):
@@ -209,8 +206,28 @@ class Command(BaseCommand):
                 # Должен быть hidden, в реальном Sheets visible — re-hide
                 rows_to_hide.append(i)
 
+        # Atomic: delete + recreate в одной транзакции с retry на DB lock.
+        # Раньше delete был отдельно — при падении bulk_create на DB lock
+        # индекс оставался пустым.
         if to_create:
-            CrmHawbIndex.objects.bulk_create(to_create, batch_size=500)
+            from django.db import OperationalError, transaction
+            backoff = [1, 2, 4, 8, 16, 32, 60]
+            for attempt in range(len(backoff) + 1):
+                try:
+                    with transaction.atomic():
+                        CrmHawbIndex.objects.filter(
+                            tab_name=ws.title).delete()
+                        CrmHawbIndex.objects.bulk_create(
+                            to_create, batch_size=500)
+                    break
+                except OperationalError as e:
+                    if 'database is locked' in str(e) and attempt < len(backoff):
+                        wait = backoff[attempt]
+                        self.stdout.write(self.style.WARNING(
+                            f'  {ws.title}: DB lock, retry in {wait}s'))
+                        time.sleep(wait)
+                        continue
+                    raise
             self.stdout.write(
                 f'  {ws.title}: reindex {len(to_create)} entries')
 
