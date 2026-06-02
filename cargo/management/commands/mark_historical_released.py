@@ -21,10 +21,11 @@ from datetime import datetime, timezone
 
 from django.core.management.base import BaseCommand
 
-from cargo.models import HawbDeclarationAttempt, HouseWaybill
+from cargo.models import CrmHawbIndex, HawbDeclarationAttempt, HouseWaybill
 
 
-DECL_RE = re.compile(r'^(\d{8})/(\d{2})(\d{2})(\d{2})/([^\s]+)$')
+# 8-9 цифр customs code (некоторые ED-обмена шифры идут как 9 цифр).
+DECL_RE = re.compile(r'^(\d{8,9})/(\d{2})(\d{2})(\d{2})/([^\s]+)$')
 
 
 def _parse_decl_date(decl: str) -> datetime | None:
@@ -46,11 +47,21 @@ class Command(BaseCommand):
         parser.add_argument('--dry-run', action='store_true')
         parser.add_argument('--limit', type=int, default=0,
                             help='Safety: ограничить кол-во (0 = no limit)')
+        parser.add_argument('--all-db', action='store_true',
+                            help='Не фильтровать по CrmHawbIndex (default: '
+                                 'только HAWB на CRM-вкладках)')
 
     def handle(self, *args, **opts):
         qs = (HouseWaybill.objects
               .exclude(customs_declaration_number='')
               .filter(customs_status='', release_date__isnull=True))
+
+        if not opts['all_db']:
+            crm_hawbs = set(CrmHawbIndex.objects.values_list(
+                'hawb_number', flat=True).distinct())
+            self.stdout.write(f'HAWB на CRM-вкладках: {len(crm_hawbs)}')
+            qs = qs.filter(hawb_number__in=crm_hawbs)
+
         total = qs.count()
         self.stdout.write(f'Кандидатов: {total}')
 
