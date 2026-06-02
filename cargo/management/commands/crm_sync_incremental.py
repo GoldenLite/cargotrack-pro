@@ -173,10 +173,15 @@ class Command(BaseCommand):
             tab = entry.tab_name
             changed = False
 
-            # decl: пишем только при выпуске, иначе очищаем (пропагация
-            # cleanup, см. логику в crm_sync.py).
+            # decl: пишем только при «Выпуск разрешен». При отказе/отзыве
+            # стираем — рег.номер не валидный (декларация анулирована,
+            # переподача = новая ДТ). При пустом DB-decl тоже стираем
+            # (пропагация cleanup).
             if 'Выпуск разрешен' in new_status:
                 want_decl = new_decl
+            elif any(m in new_status for m in
+                     ('Отказ', 'Отзыв', 'Считается не поданной')):
+                want_decl = ''  # стираем рег.номер у отказа/отзыва
             elif not new_decl:
                 want_decl = ''
             else:
@@ -244,14 +249,12 @@ class Command(BaseCommand):
             # hide-критерий по will-state:
             will_decl = entry.last_decl  # уже обновлён выше
             will_status = entry.last_status
-            # Финальные состояния — HAWB больше не в работе:
-            #   Выпуск разрешен / Отказано / Отзыв / Считается не поданной.
+            # Скрываем только выпущенные (отказ/отзыв ребята продолжают
+            # видеть для работы — переподача и т.п.).
             # Legacy: cur_decl без статуса — старая ручная запись «выпущено».
-            is_final = any(m in will_status for m in
-                           ('Выпуск разрешен', 'Отказ', 'Отзыв',
-                            'Считается не поданной'))
             is_legacy_released = bool(will_decl) and not will_status
-            want_hidden = is_final or is_legacy_released
+            want_hidden = ('Выпуск разрешен' in will_status
+                           or is_legacy_released)
             if want_hidden != entry.last_hidden:
                 if want_hidden:
                     hide_per_tab[tab].append(row)

@@ -177,6 +177,9 @@ class Command(BaseCommand):
                 new_status = compute_ed_status(h) or ''
                 if 'Выпуск разрешен' in new_status:
                     will_decl = new_decl
+                elif any(m in new_status for m in
+                         ('Отказ', 'Отзыв', 'Считается не поданной')):
+                    will_decl = ''  # стираем рег.номер у отказа/отзыва
                 elif not new_decl:
                     will_decl = ''
                 else:
@@ -186,12 +189,10 @@ class Command(BaseCommand):
                 will_decl = cur_decl
                 will_status = cur_status
 
-            # Финальные состояния: released/rejected/withdrawn/considered-not-submitted.
-            is_final = any(m in will_status for m in
-                           ('Выпуск разрешен', 'Отказ', 'Отзыв',
-                            'Считается не поданной'))
+            # Скрываем только выпущенные (отказ/отзыв ребятам нужны).
             is_legacy_released = bool(will_decl) and not will_status
-            want_hidden = is_final or is_legacy_released
+            want_hidden = ('Выпуск разрешен' in will_status
+                           or is_legacy_released)
 
             to_create.append(CrmHawbIndex(
                 hawb_number=hn,
