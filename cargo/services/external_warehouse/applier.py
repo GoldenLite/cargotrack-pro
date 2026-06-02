@@ -92,8 +92,19 @@ def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> boo
     if date_str and not cargo.scan_into_bond:
         d = parse_date(date_str)
         if d:
-            # Time приходит как 00:00 — Sheets всё равно показывает только дату.
-            cargo.scan_into_bond = tz.make_aware(datetime.combine(d, dt_time(0, 0)))
+            # Гибрид: точная дата из moscow-cargo, время = момент обнаружения
+            # парсером (наш poll каждые 15 мин). Если do1_date = сегодня —
+            # используем tz.now() (близко к реальности при свежем размещении).
+            # Если do1_date раньше (узнали постфактум) — ставим 12:00 как
+            # нейтральное значение, чтобы не комбинировать чужой день с
+            # сегодняшним временем.
+            now = tz.now()
+            today_local = tz.localtime(now).date()
+            if d == today_local:
+                cargo.scan_into_bond = now
+            else:
+                cargo.scan_into_bond = tz.make_aware(
+                    datetime.combine(d, dt_time(12, 0)))
             updated.append('scan_into_bond')
 
     if not updated:
