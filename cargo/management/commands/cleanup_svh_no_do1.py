@@ -43,13 +43,23 @@ class Command(BaseCommand):
         parser.add_argument('--dry-run', action='store_true')
 
     def handle(self, *args, **opts):
-        # Партии с нашей лицензией где есть данные, но нет привязанного ДО1
+        # Партии с нашей лицензией где есть данные, но нет привязанного ДО1.
+        # ВАЖНО: эта команда заточена под Альту-СВХ (Внуково): чистит партии
+        # где есть svh-данные но нет CMN.13010 от Альты. Внешние источники
+        # (moscow_cargo / deklarant / ручной ввод) НЕ имеют AltaInboxMessage
+        # по определению — их сюда пускать нельзя.
         candidates = Cargo.objects.filter(
             warehouse_license=OUR_WAREHOUSE_LICENSE,
+        ).exclude(
+            svh_source__in=('deklarant', 'moscow_cargo', 'manual'),
         )
 
         orphans = []
         for c in candidates:
+            # Защитный пояс (defence-in-depth — на случай если выборка обошла
+            # exclude через .raw() или ImportError исторических миграций).
+            if c.svh_source in ('deklarant', 'moscow_cargo', 'manual'):
+                continue
             has_do1 = AltaInboxMessage.objects.filter(
                 cargo=c, msg_kind='svh_do1_registered',
             ).exists()

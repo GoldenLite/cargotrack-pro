@@ -197,6 +197,19 @@ class Cargo(models.Model):
     scan_out_of_bond = models.DateTimeField('Выезд со склада', null=True, blank=True)
     svh_do1_reg_number = models.CharField('Рег. номер ДО1', max_length=64, blank=True,
                                           help_text='10001020/220526/5005840 — из CMN.13029 (опись СВХ)')
+    # Маркер источника СВХ-данных (для аудита и арбитража провайдеров).
+    # Альта-СВХ — Внуково (CMN.13010), moscow_cargo — Шереметьево (внешний СВХ),
+    # deklarant — Дальний Восток / склад «Таможенный портал»,
+    # manual — юзер заполнил руками. Empty — ещё не определён.
+    SVH_SOURCE_CHOICES = [
+        ('', '—'),
+        ('alta', 'Альта-СВХ (Внуково)'),
+        ('moscow_cargo', 'Москва-Карго (Шереметьево)'),
+        ('deklarant', 'Декларант Плюс (Таможенный портал ДВ)'),
+        ('manual', 'Вручную'),
+    ]
+    svh_source = models.CharField('Источник СВХ-данных', max_length=20, blank=True,
+                                  db_index=True, choices=SVH_SOURCE_CHOICES, default='')
 
     # ── Таможня ──
     customs_declaration_number = models.CharField('Номер ТД', max_length=50, blank=True, db_index=True)
@@ -2487,3 +2500,54 @@ class CdekStatusEvent(models.Model):
 
     def __str__(self) -> str:
         return f'{self.hawb.hawb_number} · СДЭК {self.status_code} · {self.occurred_at:%d.%m.%Y}'
+
+
+# ============================================================================
+# DeklarantSession — QR-сессия к API «Декларант Плюс» (склад «Таможенный портал» ДВ)
+# ============================================================================
+
+class DeklarantSession(models.Model):
+    """Активная QR-сессия к https://mdt.deklarant.ru/api/ + склад-API.
+
+    Не имеет веб-пароля: вход только по QR с планшета. После сканирования
+    сессия возвращается в Content.{Session, Login, IsMobileUser} и
+    переиспользуется во всех запросах через заголовки login/sessionId/isMobileUser.
+
+    На VPS QR не отсканить — сессия создаётся командой `deklarant_login`
+    на машине с планшетом, потом переносится на прод (через RDP-перелогин
+    либо ручной перенос row). Активной может быть только одна (по факту;
+    программно не enforce).
+    """
+    login        = models.CharField('Login', max_length=128, blank=True)
+    session_id   = models.CharField('Session GUID', max_length=128)
+    is_mobile    = models.BooleanField('IsMobileUser', default=True)
+    is_active    = models.BooleanField('Активна', default=True, db_index=True)
+    created_at   = models.DateTimeField('Создана', auto_now_add=True)
+    last_used_at = models.DateTimeField('Последнее использование', null=True, blank=True)
+    last_error   = models.TextField('Последняя ошибка', blank=True)
+
+    class Meta:
+        verbose_name = 'Сессия Декларант Плюс'
+        verbose_name_plural = 'Сессии Декларант Плюс'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        flag = '●' if self.is_active else '○'
+        return f'{flag} {self.login or "?"} · {self.session_id[:8]}… · {self.created_at:%d.%m.%Y %H:%M}'
+
+    @classmethod
+    def get_active(cls):
+        """Возвращает самую свежую активную сессию или None."""
+        return cls.objects.filter(is_active=True).order_by('-created_at').first()
+
+    def mark_dead(self, error: str = '') -> None:
+        """Помечает сессию как мёртвую (401, истёкла, и т.п.)."""
+        self.is_active = False
+        if error:
+            self.last_error = error
+        self.save(update_fields=['is_active', 'last_error'])
+
+    def touch(self) -> None:
+        """Обновляет last_used_at — вызывать после успешного запроса."""
+        self.last_used_at = timezone.now()
+        self.save(update_fields=['last_used_at'])

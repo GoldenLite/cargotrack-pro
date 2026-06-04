@@ -167,6 +167,44 @@ CORS_ALLOW_CREDENTIALS = True
 # ── CSRF ────────────────────────────────────────────────────────────────────
 CSRF_TRUSTED_ORIGINS = env_csv('DJANGO_CSRF_TRUSTED_ORIGINS')
 
+# ── СДЭК (CDEK) — read-only трекинг статусов доставки ─────────────────────────
+# Заказ в СДЭК создаётся внешней системой с нашим hawb_number как im_number;
+# статусы приходят вебхуками ORDER_STATUS на публичный endpoint
+# /api/v1/cdek/webhook/<secret>/. См. cargo/services/cdek/.
+CDEK_ENABLED            = env_bool('CDEK_ENABLED', False)
+CDEK_API_BASE_URL       = (os.environ.get('CDEK_API_BASE_URL', '')
+                           or 'https://api.cdek.ru').rstrip('/')
+CDEK_CLIENT_ID          = os.environ.get('CDEK_CLIENT_ID', '')
+CDEK_CLIENT_SECRET      = os.environ.get('CDEK_CLIENT_SECRET', '')
+# Несекретный, но неугадываемый сегмент пути приёмника вебхуков.
+CDEK_WEBHOOK_SECRET     = os.environ.get('CDEK_WEBHOOK_SECRET', '')
+# Явный публичный https-URL приёмника (для регистрации подписки). Если пусто —
+# cdek_register_webhook соберёт из хоста + secret.
+CDEK_WEBHOOK_PUBLIC_URL = os.environ.get('CDEK_WEBHOOK_PUBLIC_URL', '')
+# Опциональный allowlist source-IP вебхуков (CSV). Пусто = не проверять.
+CDEK_WEBHOOK_ALLOWED_IPS = env_csv('CDEK_WEBHOOK_ALLOWED_IPS')
+# Опц.: при терминальном DELIVERED от СДЭК продвигать logistics_status в
+# DELIVERED (one-way, только из поздних статусов). По умолчанию выкл.
+CDEK_AUTO_ADVANCE_DELIVERED = env_bool('CDEK_AUTO_ADVANCE_DELIVERED', False)
+
+# ── «Декларант Плюс» — склад-API «Мой груз.ВХ» (Дальний Восток) ───────────────
+# Внешний СВХ-источник для грузов идущих через склад «Таможенный портал»
+# (Владивосток, ИНН 2536209470). Альта-СВХ обслуживает только Внуково,
+# moscow-cargo — Шереметьево (префиксы 784/555/826/537/880); deklarant
+# покрывает остальной ДВ-импорт. Доступ только через QR-сессию из БД
+# (DeklarantSession); подробности — DEKLARANT_INTEGRATION_HANDOFF.md.
+DEKLARANT_ENABLED         = env_bool('DEKLARANT_ENABLED', False)
+DEKLARANT_MDT_BASE        = (os.environ.get('DEKLARANT_MDT_BASE', '')
+                             or 'https://mdt.deklarant.ru').rstrip('/')
+DEKLARANT_REGION          = os.environ.get('DEKLARANT_REGION', '107')        # ДВТУ
+DEKLARANT_TARGET_WH_INN   = os.environ.get('DEKLARANT_TARGET_WH_INN', '2536209470')  # Таможенный портал
+# SSL verify для requests. mdt.deklarant.ru:48774 (нестандартный порт)
+# использует серт которого нет в certifi-bundle requests. urllib.request
+# работает через системный truststore (Windows certstore / Linux ca-certs).
+# Если включён verify=True и сертификат не валидируется — клиент падает.
+# Probe-скрипт использует urllib и потому проблем не имел.
+DEKLARANT_SSL_VERIFY      = env_bool('DEKLARANT_SSL_VERIFY', False)
+
 # ── Django REST Framework ───────────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [

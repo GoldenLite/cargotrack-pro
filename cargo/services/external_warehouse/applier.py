@@ -13,7 +13,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
+
+from django.db import transaction
 
 from cargo.models import Cargo
 
@@ -24,6 +27,12 @@ logger = logging.getLogger('cargo.external.moscow_cargo')
 # Грузы с этими префиксами размещаются на их СВХ; остальные — на наших.
 MOSCOW_CARGO_PREFIXES = ('784', '555', '826', '537', '880')
 
+# Классический IATA MAWB: XXX-XXXXXXXX (3 цифры, дефис, 8 цифр).
+# Этот regex автоматически отсекает moscow-cargo (784/555/826/537/880) и
+# обычные авиа-MAWB (Внуково/Шереметьево). Всё что НЕ совпало — кандидат
+# на ДВ (коносамент SNKO*, ESN*, CMR YILI-*, экспресс CDEK-*, и т.п.).
+_CLASSIC_MAWB_RE = re.compile(r'^\d{3}-\d{8}$')
+
 
 def is_moscow_cargo_candidate(cargo: Cargo) -> bool:
     """Подходит ли партия для проверки на Москва-Карго."""
@@ -31,6 +40,24 @@ def is_moscow_cargo_candidate(cargo: Cargo) -> bool:
     if len(awb) < 4 or awb[3] != '-':
         return False
     return awb[:3] in MOSCOW_CARGO_PREFIXES
+
+
+def is_far_east_candidate(cargo: Cargo) -> bool:
+    """Подходит ли партия для проверки на Декларант Плюс (Дальний Восток).
+
+    True если awb_number НЕ совпадает с классическим IATA MAWB-форматом
+    `XXX-XXXXXXXX`. Этот regex автоматически отсекает все moscow_cargo
+    префиксы и обычные авиа-MAWB Внуково/Шереметьево.
+
+    Дополнительные фильтры (shipment_type='IMPORT', stage, svh_source)
+    применяются в driver-query cron-команды sync_deklarant_svh, не здесь.
+    """
+    awb = (cargo.awb_number or '').strip().upper()
+    if not awb or len(awb) < 4:
+        return False
+    if _CLASSIC_MAWB_RE.match(awb):
+        return False
+    return True
 
 
 def _save_with_retry(cargo: Cargo, fields: list[str], attempts: int = 5) -> None:
@@ -150,6 +177,78 @@ def fetch_and_apply(cargo: Cargo,
         if not parsed:
             return None
         return apply_to_cargo(cargo, parsed)
+    finally:
+        if close_after:
+            client.close()
+
+
+def fetch_and_apply_deklarant(
+    cargo: Cargo,
+    client=None,
+    *,
+    writeback: bool = False,
+) -> Optional[bool]:
+    """Один шаг: fetch + apply для одной Cargo через Декларант Плюс.
+
+    Возвращает True/False/None:
+    - True  — данные пришли и что-то записали (svh_source='deklarant' проставлен)
+    - False — данные пришли но всё было уже заполнено (нечего писать)
+    - None  — на нашем складе ничего не нашли / ошибка сети
+              (DeklarantAuthError пробрасывается наверх — caller mark_dead + abort loop).
+
+    Особенности:
+    - Source-precedence guard: если cargo.svh_source != '' и != 'deklarant'
+      (alta / moscow_cargo / manual уже заполнили) — пропускаем без HTTP.
+    - apply-поля и svh_source сохраняются атомарно (transaction.atomic).
+    - writeback=False по умолчанию — caller (cron) делает batch в конце.
+    """
+    from cargo.services.external_warehouse.deklarant import (
+        DeklarantClient, DeklarantAuthError,
+    )
+
+    # Защита от перетирания данных другого источника
+    if cargo.svh_source and cargo.svh_source not in ('', 'deklarant'):
+        logger.debug('deklarant: skip %s, svh_source=%s already set',
+                     cargo.awb_number, cargo.svh_source)
+        return None
+
+    close_after = False
+    if client is None:
+        client = DeklarantClient.from_db()
+        if not client:
+            return None
+        close_after = True
+    try:
+        # DeklarantAuthError пробрасывается из fetch — НЕ глотаем здесь,
+        # caller обязан mark_dead session + abort.
+        parsed = client.fetch(cargo.awb_number)
+        if not parsed:
+            return None
+
+        with transaction.atomic():
+            changed = apply_to_cargo(cargo, parsed, writeback=False)
+            if changed and cargo.svh_source != 'deklarant':
+                cargo.svh_source = 'deklarant'
+                _save_with_retry(cargo, ['svh_source'])
+
+        if changed and writeback:
+            # Single-cargo writeback (для ручного fetch_deklarant --apply).
+            # В batch-cron используется sync_deklarant_svh → один общий
+            # batch_write_svh_for_cargos после loop.
+            import threading
+
+            def _bg_writeback():
+                try:
+                    from cargo.services.sheets.writeback import (
+                        write_svh_placement_for_cargo,
+                    )
+                    write_svh_placement_for_cargo(cargo)
+                except Exception:
+                    logger.exception('deklarant sheets writeback failed for %s',
+                                     cargo.awb_number)
+            threading.Thread(target=_bg_writeback, daemon=True).start()
+
+        return changed
     finally:
         if close_after:
             client.close()
