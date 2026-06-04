@@ -115,23 +115,41 @@ def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> boo
         cargo.svh_do1_reg_number = reg
         updated.append('svh_do1_reg_number')
 
-    date_str = parsed.get('do1_date') or ''
-    if date_str and not cargo.scan_into_bond:
-        d = parse_date(date_str)
-        if d:
-            # Гибрид: точная дата из moscow-cargo, время = момент обнаружения
-            # парсером (наш poll каждые 15 мин). Если do1_date = сегодня —
-            # используем tz.now() (близко к реальности при свежем размещении).
-            # Если do1_date раньше (узнали постфактум) — ставим 12:00 как
-            # нейтральное значение, чтобы не комбинировать чужой день с
-            # сегодняшним временем.
-            now = tz.now()
-            today_local = tz.localtime(now).date()
-            if d == today_local:
-                cargo.scan_into_bond = now
-            else:
-                cargo.scan_into_bond = tz.make_aware(
-                    datetime.combine(d, dt_time(12, 0)))
+    # Время размещения. Provider может вернуть:
+    # - do1_datetime: полный ISO с реальным временем регистрации (deklarant)
+    # - do1_date: только дата YYYY-MM-DD (moscow-cargo)
+    # Предпочитаем do1_datetime когда есть.
+    if not cargo.scan_into_bond:
+        from django.utils.dateparse import parse_datetime
+        dt_str = (parsed.get('do1_datetime') or '').strip()
+        date_str = (parsed.get('do1_date') or '').strip()
+        scan_value = None
+        if dt_str:
+            parsed_dt = parse_datetime(dt_str)
+            if parsed_dt:
+                if tz.is_naive(parsed_dt):
+                    # ISO без TZ: трактуем как локальную МСК — так Декларант
+                    # отдаёт время регистрации ДО1 (Europe/Moscow по умолчанию
+                    # для прибалтийских/московских складов; ДВ-склады могут
+                    # отдавать +07/+10, но в наблюдаемых ответах TZ был не
+                    # указан и время совпадало с МСК-видом портала).
+                    parsed_dt = tz.make_aware(parsed_dt)
+                scan_value = parsed_dt
+        if scan_value is None and date_str:
+            d = parse_date(date_str)
+            if d:
+                # Гибрид: точная дата из moscow-cargo, время = момент обнаружения
+                # парсером. Если do1_date = сегодня — используем tz.now()
+                # (близко к реальности при свежем размещении). Если раньше —
+                # 12:00 как нейтральное значение.
+                now = tz.now()
+                today_local = tz.localtime(now).date()
+                if d == today_local:
+                    scan_value = now
+                else:
+                    scan_value = tz.make_aware(datetime.combine(d, dt_time(12, 0)))
+        if scan_value is not None:
+            cargo.scan_into_bond = scan_value
             updated.append('scan_into_bond')
 
     if not updated:

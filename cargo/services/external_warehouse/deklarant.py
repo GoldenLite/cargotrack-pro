@@ -189,14 +189,19 @@ class DeklarantClient:
         `external_warehouse.applier.apply_to_cargo()`:
 
         {
-          'license':    '10702/130721/10189/6',           # WHCert (лицензия СВХ)
-          'reg_number': '10702020/310526/0113381',        # Registration.RegistrationNumber
-          'do1_date':   '2026-05-31',                     # DO1.DO1date (только дата)
-          'do1_number_internal': '0000156',               # внутренний № ДО1
-          'wh_name': 'ООО "ТАМОЖЕННЫЙ ПОРТАЛ"',           # для аудита
-          'wh_inn':  '2536209470',                        # для аудита
-          'do2_count': 4,                                 # сколько ДО2 (не пишем, для логирования)
+          'license':       '10702/130721/10189/6',        # WHCert (лицензия СВХ)
+          'reg_number':    '10702020/310526/0113381',     # Registration.RegistrationNumber
+          'do1_date':      '2026-05-31',                  # YYYY-MM-DD (для совместимости)
+          'do1_datetime':  '2026-05-31T15:58:00',         # ISO с реальным временем регистрации
+          'do1_number_internal': '0000156',
+          'wh_name':       'ООО "ТАМОЖЕННЫЙ ПОРТАЛ"',     # для аудита
+          'wh_inn':        '2536209470',                  # для аудита
+          'do2_count':     4,                             # для логирования
         }
+
+        Применение времени: applier предпочитает do1_datetime если есть,
+        иначе do1_date + 12:00. moscow-cargo возвращает только do1_date —
+        там реального времени нет.
 
         None если:
         - сетевая ошибка / не-200
@@ -264,6 +269,7 @@ class DeklarantClient:
                 'license':              license_,
                 'reg_number':           reg_number,
                 'do1_date':             do1_date,
+                'do1_datetime':         do1_date_raw,  # ISO с временем, applier ему предпочтёт
                 'do1_number_internal':  (do1.get('DO1number') or '').strip(),
                 'wh_name':              wh_info.get('WHName') or '',
                 'wh_inn':               wh_inn_resp,
