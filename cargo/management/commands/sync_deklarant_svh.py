@@ -4,11 +4,14 @@
 фильтром is_far_east_candidate() вместо хардкоженных префиксов.
 
 Driver-query:
-    stage IN ('ARRIVED', 'CUSTOMS')
-    AND svh_do1_reg_number = ''                       — ещё не нашли ДО1
+    svh_do1_reg_number = ''                           — ещё не нашли ДО1
     AND HAWB.shipment_type = 'IMPORT' (через FK)      — EXPORT не на ДВ
     AND svh_source NOT IN ('alta', 'moscow_cargo')    — не перетираем другие источники
     AND awb NE classic MAWB (regex \\d{3}-\\d{8})      — отсев Москвы/Шереметьево
+
+ВАЖНО: stage НЕ фильтруется — пользователь не двигает партии из DRAFT по
+ходу работы, поэтому фильтр по ARRIVED/CUSTOMS вырубал весь поток. Главные
+защитники — отсутствие svh_do1_reg_number и IMPORT-фильтр.
 
 Защиты:
 - DEKLARANT_ENABLED=False → early return (no-op в auto_sync).
@@ -121,8 +124,8 @@ class Command(BaseCommand):
 
         # 2. Driver-query: то что точно надо проверить.
         # shipment_type живёт на HouseWaybill, выходим через hawbs__shipment_type='IMPORT'.
+        # stage НЕ фильтруется (пояснение в docstring модуля).
         qs = (Cargo.objects
-              .filter(stage__in=('ARRIVED', 'CUSTOMS'))
               .filter(
                   Q(svh_do1_reg_number='') | Q(svh_do1_reg_number__isnull=True))
               .filter(hawbs__shipment_type='IMPORT')
@@ -141,13 +144,15 @@ class Command(BaseCommand):
                 break
 
         self.stdout.write(
-            f'Кандидаты: {len(candidates)} (ДВ, ARRIVED/CUSTOMS, IMPORT, '
+            f'Кандидаты: {len(candidates)} (без ДО1, IMPORT, '
             f'не alta/moscow_cargo, не классический MAWB)')
 
         if opts['dry_run']:
             for c in candidates[:30]:
                 self.stdout.write(
-                    f'  {c.awb_number}  (stage={c.stage}, svh_source={c.svh_source!r})')
+                    f'  {c.awb_number:<24}  stage={c.stage:<10}  '
+                    f'svh_source={c.svh_source!r}  '
+                    f'created={c.created_at:%d.%m.%Y}')
             if len(candidates) > 30:
                 self.stdout.write(f'  ... и ещё {len(candidates) - 30}')
             return
