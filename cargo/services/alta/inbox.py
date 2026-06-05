@@ -26,6 +26,15 @@ from cargo.models import AltaInboxMessage, Cargo, HawbWorkflowEvent, HouseWaybil
 logger = logging.getLogger('cargo.alta.inbox')
 
 
+def _autocreate_disabled() -> bool:
+    """Process-wide kill-switch для auto-create EXPORT HouseWaybill веток.
+    Включается env ALTA_INBOX_AUTOCREATE_DISABLED=1 на время backfill,
+    чтобы старые legacy raw_xml не плодили фейковые HAWB."""
+    import os
+    return os.environ.get('ALTA_INBOX_AUTOCREATE_DISABLED', '').strip().lower() \
+        in ('1', 'true', 'yes', 'on')
+
+
 # ─── маппинг MessageType на наш semantic kind ──
 # Из реальных .gz из C:\GTDSERV\ED\IN.
 MSG_KIND_MAP: dict[str, str] = {
@@ -54,6 +63,8 @@ MSG_KIND_MAP: dict[str, str] = {
                                         # CMN.11349, Position → конкретный товар → HAWB.
                                         # (Alta-ГТД часто переименовывает файл в Alta_MY11003,
                                         # но MessageType в теле всегда ED.11003.)
+    'MY.11003':  'customs_request',     # То же что ED.11003 но в новом формате XML
+                                        # Альта-ГТД 5.27+. MessageType явно MY.11003.
     'CMN.11337': 'registered',          # Извещение о регистрации ДТ (CMN.11337):
                                         # таможня присвоила номер декларации. parsed_meta
                                         # содержит CustomsCode/RegistrationDate/GTDNumber —
@@ -69,6 +80,10 @@ MSG_KIND_MAP: dict[str, str] = {
                                         # 'examination'). Refine на rejected/released
                                         # происходит в classify() если в parsed_meta
                                         # есть decision_code/design_code.
+    'CMN.11062': 'registration_rejected',  # Отказ в регистрации декларации
+                                            # (терминальное состояние подачи).
+                                            # Декларация НЕ зарегистрирована,
+                                            # рег.номер не присвоен.
 }
 
 # Лицензия нашего СВХ (СДЭК-ГЛОБАЛ). СВХ-сообщения с другими лицензиями
@@ -171,6 +186,8 @@ STATUS_FROM_KIND: dict[str, str] = {
     'rejected':    'REJECTED',
     'examination': 'EXAMINATION',
     'hold':        'HOLD',
+    'registration_rejected': 'REJECTED',  # отказ в регистрации = REJECTED
+                                          # (юзер видит как «Считается не поданной»)
 }
 
 # HawbWorkflowEvent.event_type для записи в таймлайн (event_type у нас
@@ -184,6 +201,7 @@ EVENT_TYPE_FROM_KIND: dict[str, str] = {
     'hold':        'CUSTOMS_REQUEST',
     'svh_placed':  'OTHER',
     'info':        'OTHER',
+    'registration_rejected': 'OTHER',
 }
 
 
@@ -286,6 +304,15 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
             if not is_export:
                 return (None, None)  # импорт/неизвестно → пропускаем
 
+            if _autocreate_disabled():
+                # Kill-switch для backfill: не создаём фейковые EXPORT HAWB
+                # по упоминаниям в старых raw_xml. Возвращаем (None, None),
+                # как будто HAWB не найден.
+                logger.info(
+                    'match: auto-create skipped (ALTA_INBOX_AUTOCREATE_DISABLED) '
+                    'for envelope %s, hawbs=%s', init, hawb_list)
+                return (None, None)
+
             for hn in hawb_list:
                 hn = str(hn).strip()
                 if not hn:
@@ -295,6 +322,7 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
                         hawb_number=hn,
                         shipment_type='EXPORT',
                         logistics_status='EXPORT_CUSTOMS',
+                        cdek_number='',
                     )
                     logger.info(
                         'match: auto-created HAWB %s (EXPORT) via initial_envelope %s',
@@ -401,13 +429,18 @@ def recompute_declaration(cargo: Optional[Cargo],
         return []
 
     # Защита от восстановления decl после REJECTED:
-    # если HAWB сейчас REJECTED и latest msg — старее самого свежего
-    # rejected/released/withdrawn для этой HAWB, sweeper пытается
-    # восстановить decl от старой подачи. Должен оставаться пустым
-    # пока не придёт CMN.11337 ОТ НОВОЙ переподачи.
+    # При REJECTED decl должен быть пустым (декларация анулирована).
+    # Восстанавливаем только если пришёл CMN.11337/11001 ОТ НОВОЙ переподачи
+    # (latest.msg_kind == 'registered' с новым GTDNumber).
     cur_status = HouseWaybill.objects.filter(pk=hawb.pk).values_list(
         'customs_status', flat=True).first() or ''
     if cur_status == 'REJECTED':
+        # Если latest сообщение — финал отказа/отзыва, decl не восстанавливаем
+        # и принудительно стираем (на случай если sweeper уже записал).
+        if latest.msg_kind in ('rejected', 'withdrawn'):
+            HouseWaybill.objects.filter(pk=hawb.pk).update(
+                customs_declaration_number='', filed_date=None)
+            return []
         newer_final = AltaInboxMessage.objects.filter(
             cond,
             msg_kind__in=('released', 'rejected', 'withdrawn'),
@@ -482,27 +515,49 @@ def _sync_decl_via_outbox(hawb: HouseWaybill, target_decl: str,
                           latest_msg) -> list[HouseWaybill]:
     """Пропагирует target_decl на siblings HAWB одной декларации.
 
-    Находит AltaOutboxObservation (CMN.11023/11335/11024/11349) у которого
-    в parsed_meta.hawbs есть hawb.hawb_number. Берёт ОСТАЛЬНЫЕ HAWB из этого
-    списка и проставляет им target_decl + filed_date (если пусто).
-    Регистрирует attempts.
+    Защита #1 (главная): если у latest_msg есть parsed_meta.initial_envelope,
+    ищем outbox СТРОГО по этому envelope_id (якорь от таможни на наш
+    конкретный CMN.11349/CMN.11023 этой подачи). Это исключает протекание
+    decl новой подачи на siblings другой (старой) подачи той же партии
+    через общий HAWB-пересечение.
+
+    Защита #2 (страховка): перед update sibling — пропускаем тех, кто уже
+    RELEASED с другим валидным decl (значит принадлежит другой подаче этой
+    партии, текущий target_decl не должен на него протечь).
 
     Возвращает список изменённых HAWB.
     """
     from cargo.models import AltaOutboxObservation
 
-    obs_list = AltaOutboxObservation.objects.filter(
-        msg_type__in=('CMN.11023', 'CMN.11335',
-                      'CMN.11024', 'CMN.11349'),
-    )
+    initial_env = ''
+    if latest_msg:
+        initial_env = ((latest_msg.parsed_meta or {})
+                       .get('initial_envelope') or '').strip()
+
     sibling_set: set = set()
-    for o in obs_list:
-        pm = o.parsed_meta or {}
-        hawbs = pm.get('hawbs') or []
-        if hawb.hawb_number in hawbs:
+    if initial_env:
+        # Защита #1: якорь по envelope_id — single hit на наш outbox.
+        obs = AltaOutboxObservation.objects.filter(
+            envelope_id=initial_env).first()
+        if obs:
+            pm = obs.parsed_meta or {}
+            hawbs = pm.get('hawbs') or []
             for hn in hawbs:
                 if hn != hawb.hawb_number:
                     sibling_set.add(hn)
+    else:
+        # Fallback: исторический поиск по hawbs membership.
+        obs_list = AltaOutboxObservation.objects.filter(
+            msg_type__in=('CMN.11023', 'CMN.11335',
+                          'CMN.11024', 'CMN.11349'),
+        )
+        for o in obs_list:
+            pm = o.parsed_meta or {}
+            hawbs = pm.get('hawbs') or []
+            if hawb.hawb_number in hawbs:
+                for hn in hawbs:
+                    if hn != hawb.hawb_number:
+                        sibling_set.add(hn)
     if not sibling_set:
         return []
 
@@ -522,9 +577,10 @@ def _sync_decl_via_outbox(hawb: HouseWaybill, target_decl: str,
     is_export_chain = (hawb.shipment_type or 'IMPORT').upper() == 'EXPORT'
 
     changed: list[HouseWaybill] = []
+    autocreate_off = _autocreate_disabled()
     for hn in sibling_set:
         sib = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
-        if not sib and is_export_chain:
+        if not sib and is_export_chain and not autocreate_off:
             # Auto-create отсутствующего sibling как EXPORT_CUSTOMS.
             try:
                 sib = HouseWaybill.objects.create(
@@ -539,12 +595,31 @@ def _sync_decl_via_outbox(hawb: HouseWaybill, target_decl: str,
                 logger.exception('sync_decl: create %s failed', hn)
                 continue
         if not sib:
+            # Kill-switch active или sibling не нашёлся и chain не EXPORT —
+            # просто пропускаем, не вылетаем.
             continue
         # Привязка к той же партии (если у sibling нет mawb, а у hawb есть)
         if hawb.mawb_id and not sib.mawb_id:
             HouseWaybill.objects.filter(pk=sib.pk).update(mawb_id=hawb.mawb_id)
         cur = (sib.customs_declaration_number or '').strip()
         if cur == target_decl:
+            continue
+        # Защита #2: не перезаписываем decl у sibling который УЖЕ RELEASED
+        # с другой валидной ДТ. Это значит он принадлежит к ДРУГОЙ подаче
+        # этой партии (которая выпущена), и текущий decl не должен на него
+        # протекать через общий HAWB-пересечение.
+        sib_data = HouseWaybill.objects.filter(pk=sib.pk).values(
+            'customs_status', 'customs_declaration_number',
+            'release_date').first()
+        if sib_data and sib_data['customs_status'] == 'RELEASED' \
+                and sib_data['release_date'] is not None \
+                and sib_data['customs_declaration_number'] \
+                and sib_data['customs_declaration_number'] != target_decl:
+            logger.info(
+                '_sync_decl_via_outbox: skipping sibling %s '
+                '(already RELEASED with different decl %s, target was %s)',
+                sib.hawb_number, sib_data['customs_declaration_number'],
+                target_decl)
             continue
         upd = {'customs_declaration_number': target_decl}
         if reg_date_dt and sib.filed_date is None:
@@ -1678,6 +1753,73 @@ def _writeback_customs_requests_for_hawb(hawb: HouseWaybill) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _apply_goods_count_from_cmn11010(
+    msg: AltaInboxMessage,
+    cargo,
+    hawb,
+) -> None:
+    """CMN.11010: <TotalGoodsNumber> → HouseWaybill.goods_count.
+
+    Multi-waybill: total один на всех HAWB декларации (НЕ делим).
+    Защита от cross-pollination: siblings берём только если их hawb_number
+    упомянут в raw_xml этого envelope (hard-anchor правило).
+    Idempotent: пропускаем HAWB где goods_count уже совпадает.
+    """
+    raw = msg.raw_xml or ''
+    if not raw:
+        return
+    from cargo.services.alta.xml_extract import count_positions_cmn_11010
+    total = count_positions_cmn_11010(raw)
+    if not total:
+        return
+
+    targets: list = []
+    if hawb:
+        targets.append(hawb)
+    decl = ''
+    if hawb and (hawb.customs_declaration_number or '').strip():
+        decl = hawb.customs_declaration_number.strip()
+    if cargo and decl:
+        sib_qs = cargo.hawbs.filter(customs_declaration_number=decl)
+        if hawb:
+            sib_qs = sib_qs.exclude(pk=hawb.pk)
+        for sib in sib_qs:
+            if sib.hawb_number and sib.hawb_number in raw:
+                targets.append(sib)
+
+    if not targets:
+        return
+
+    affected = []
+    for h in targets:
+        if h.goods_count == total:
+            continue
+        HouseWaybill.objects.filter(pk=h.pk).update(goods_count=total)
+        affected.append(h)
+
+    if not affected:
+        return
+    logger.info('CMN.11010 goods_count=%s: updated %d HAWBs (msg #%s)',
+                total, len(affected), msg.pk)
+    try:
+        from cargo.services.sheets.writeback import (
+            batch_write_goods_count_for_hawbs, signals_suppressed,
+        )
+        if signals_suppressed():
+            return
+        for h in affected:
+            h.refresh_from_db(fields=['goods_count'])
+
+        def _bg():
+            try:
+                batch_write_goods_count_for_hawbs(affected)
+            except Exception:
+                logger.exception('CMN.11010 goods_count writeback failed')
+        threading.Thread(target=_bg, daemon=True).start()
+    except Exception:
+        logger.exception('CMN.11010 goods_count writeback dispatch failed')
+
+
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
@@ -1779,6 +1921,17 @@ def dispatch(msg: AltaInboxMessage) -> None:
         else:
             msg.status_applied = True
             emit_event(msg, cargo, hawb)
+            # CMN.11010: проставляем HouseWaybill.goods_count из
+            # TotalGoodsNumber. Узкий тип — 11309/11350 имеют другую
+            # XML-структуру и сюда не попадают.
+            if msg.msg_type == 'CMN.11010':
+                try:
+                    _apply_goods_count_from_cmn11010(msg, cargo, hawb)
+                except Exception:
+                    logger.exception(
+                        'CMN.11010 goods_count apply failed for msg #%s',
+                        msg.pk,
+                    )
         msg.save(update_fields=['status_applied', 'parsed_meta'])
     else:
         msg.save(update_fields=['msg_kind', 'cargo', 'hawb',

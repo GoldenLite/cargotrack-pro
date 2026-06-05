@@ -770,6 +770,41 @@ def count_positions_cmn_11023(xml_text: str) -> int:
     return total
 
 
+# ─── Счётчик товарных позиций в CMN.11010 (входящий release) ──────────
+#
+# CMN.11010 (ED_Container «Выпуск разрешен») содержит явный
+# <TotalGoodsNumber> на уровне декларации = число товаров. Это
+# ground truth от таможни, общий счётчик ВСЕМ HAWB декларации
+# (multi-waybill release: total один, делить не нужно).
+#
+# count_positions_cmn_11023 для CMN.11010 не годится: внутри товара
+# может быть несколько <GoodsGroupDescription> (группы описания одного
+# товара) — парсер 11023 их считает как позиции и даёт overcount.
+
+_TOTAL_GOODS_NUMBER_RE = re.compile(
+    r'<(?:[\w-]+:)?TotalGoodsNumber\b[^>]*>(\d+)</(?:[\w-]+:)?TotalGoodsNumber>',
+)
+
+
+def count_positions_cmn_11010(xml_text: str) -> int:
+    """Число товарных позиций в CMN.11010 (release-decision).
+
+    Источники в порядке приоритета:
+      1. <TotalGoodsNumber> — явное значение от таможни.
+      2. Количество <ESADout_CUGoods> блоков — fallback, каждый блок = 1 товар.
+    Возвращает 0 если ничего не нашли (caller трактует как «нет данных»).
+    """
+    if not xml_text:
+        return 0
+    m = _TOTAL_GOODS_NUMBER_RE.search(xml_text)
+    if m:
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            pass
+    return len(_GOODS_ITEM_BLOCK_RE.findall(xml_text))
+
+
 def count_positions_per_hawb_cmn_11349(xml_text: str) -> dict:
     """Per-HAWB словарь {hawb_number: количество позиций} для CMN.11349.
 
@@ -1067,25 +1102,38 @@ def parse_providing_indication_list(xml_text: str) -> dict:
     return out
 
 
-# Транспортный документ (DocKindCode=02099). Тот же паттерн что у HAWB-pair,
-# только проверяем код 02099 а не 02021.
-_TRANSPORT_PAIR_RE = _HAWB_PAIR_RE  # тот же regex — фильтруем по коду в _hawb_and_transport_in_houseshipment
+# Транспортный документ лежит внутри <TransportDocumentDetails>...</TransportDocumentDetails>.
+# Внутри этого блока любой <PrDocumentNumber> гарантированно транспортный, независимо
+# от DocKindCode (02012 морской, 02013/02014 ж/д, 02015 CMR, 02099 AWB и т.п.).
+_TRANSPORT_DOC_BLOCK_RE = re.compile(
+    r'<(?:[\w-]+:)?TransportDocumentDetails\b[^>]*>(.*?)'
+    r'</(?:[\w-]+:)?TransportDocumentDetails>',
+    re.S,
+)
+_PR_DOC_NUMBER_RE = re.compile(
+    r'<(?:[\w-]+:)?PrDocumentNumber\b[^>]*>([^<]+)</(?:[\w-]+:)?PrDocumentNumber>'
+)
 
 
 def _hawb_and_transport_in_houseshipment(body: str) -> tuple[str, str]:
     """Из тела одного <HouseShipment> возвращает (hawb_number, transport_doc).
 
-    Используется для CMN.11335/11349 — там per-HAWB HouseShipment с двумя
-    PrDocumentNumber: один HAWB (02021), второй транспортный (02099).
+    Используется для CMN.11335/11349 — там per-HAWB HouseShipment с:
+      - HouseWaybillDetails.PrDocumentNumber (DocKindCode=02021) → HAWB
+      - TransportDocumentDetails.PrDocumentNumber (любой DocKindCode:
+        02012 морской, 02013/02014 ж/д, 02015 CMR, 02099 AWB и т.д.) → транспорт. док.
     """
     hawb = ''
-    transport = ''
     for nm, mode in _HAWB_PAIR_RE.findall(body):
-        m = mode.strip()
-        if m == '02021' and not hawb:
+        if mode.strip() == '02021' and not hawb:
             hawb = nm.strip()
-        elif m == '02099' and not transport:
-            transport = nm.strip()
+            break
+    transport = ''
+    td = _TRANSPORT_DOC_BLOCK_RE.search(body)
+    if td:
+        pn = _PR_DOC_NUMBER_RE.search(td.group(1))
+        if pn:
+            transport = pn.group(1).strip()
     return hawb, transport
 
 
@@ -1174,12 +1222,17 @@ def parse_cmn_11024(xml_text: str) -> dict:
                 hawbs_seen.append(v)
     out['hawbs'] = hawbs_seen
 
-    # Транспортный документ (02099) — обычно один на всю декларацию.
+    # Транспортный документ — обычно один на всю декларацию. Берём первый
+    # <PrDocumentNumber> из любого <TransportDocumentDetails> блока, не фильтруя
+    # по DocKindCode: внутри этого блока он гарантированно транспортный
+    # (02012 морской, 02013/02014 ж/д, 02015 CMR, 02099 AWB и т.д.).
     transport_doc = ''
-    for nm, mode in _HAWB_PAIR_RE.findall(xml_text):
-        if mode.strip() == '02099':
-            transport_doc = nm.strip()
-            break
+    for td in _TRANSPORT_DOC_BLOCK_RE.finditer(xml_text):
+        pn = _PR_DOC_NUMBER_RE.search(td.group(1))
+        if pn:
+            transport_doc = pn.group(1).strip()
+            if transport_doc:
+                break
     if transport_doc and hawbs_seen:
         for h in hawbs_seen:
             out['transport_per_hawb'][h] = transport_doc
