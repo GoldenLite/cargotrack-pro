@@ -1,15 +1,19 @@
 """Удаление HAWB из CRM-вкладок специалистов («Рабочее пространство СТО»)
 для случаев, когда таможенное оформление делает клиент сам.
 
-Источник истины — таблица «Сводная ВЭД» (SheetSource.kind='crm'), столбец
-«ФИО Специалист по ВЭД». Значение появляется через импорт из ВЭД-менеджерской
-таблицы; когда там стоит «ТО КЛИЕНТ» — мы не ведём оформление, накладную
-оформляет сам клиент → строка не должна висеть в рабочих пространствах
-специалистов.
+Источник истины — вкладка «Парсинг (СВОДНАЯ ВЭД)» в CRM-spreadsheet
+(SheetSource.kind='crm', tab_name='Парсинг (СВОДНАЯ ВЭД)'). Столбец A
+содержит «Номер заказа» (HAWB), столбец B — «ФИО специалиста». Когда там
+стоит «ТО КЛИЕНТ» — мы не ведём оформление, накладную делает сам клиент →
+строка не должна висеть в рабочих пространствах специалистов.
 
 Поведение:
-- Driver-query: ImportedSheetRow(source.kind='crm').data['ФИО Специалист
-  по ВЭД'].strip().upper() == 'ТО КЛИЕНТ'.
+- Driver-query: ImportedSheetRow(source.tab_name='Парсинг (СВОДНАЯ ВЭД)')
+  где data['ФИО специалиста'].strip().upper() == 'ТО КЛИЕНТ'.
+- HAWB читаем напрямую из data['Номер заказа'] (matcher на эту вкладку
+  не настроен — алиасы в mapping.py не добавлены).
+- Дубль-строки в Парсинге: если ХОТЯ БЫ ОДНА копия HAWB имеет 'ТО КЛИЕНТ' —
+  удаляем (set по hawb_number).
 - Защита: значение должно быть **явно** 'ТО КЛИЕНТ' (не пусто/None).
 - Для каждой найденной HAWB:
     1. JSON-snapshot всех CrmHawbIndex (tab/row/data) → файл в tmp/
@@ -44,7 +48,9 @@ from cargo.models import CrmHawbIndex, ImportedSheetRow
 logger = logging.getLogger('cargo.delete_to_client_hawbs')
 
 
-TARGET_KEY = 'ФИО Специалист по ВЭД'
+SOURCE_TAB_NAME = 'Парсинг (СВОДНАЯ ВЭД)'
+TARGET_KEY = 'ФИО специалиста'   # столбец B в Парсинге
+HAWB_KEY = 'Номер заказа'        # столбец A в Парсинге
 TARGET_VALUE = 'ТО КЛИЕНТ'
 
 # Lockfile рядом с auto_sync.lock
@@ -116,22 +122,31 @@ class Command(BaseCommand):
             _release_lock()
 
     def _run(self, do_apply: bool, limit: int):
-        # 1. Driver-query.
-        candidates: list[str] = []
+        # 1. Driver-query — только из «Парсинг (СВОДНАЯ ВЭД)».
+        # Дубль-строки одного HAWB допустимы; берём через set по номеру.
+        # HAWB читаем из data['Номер заказа'] (matcher на эту вкладку не
+        # настроен — hawb_number_norm пустой).
+        candidates_set: set[str] = set()
         for r in ImportedSheetRow.objects.filter(
-                source__kind='crm').only('data', 'hawb_number_norm'):
+                source__kind='crm',
+                source__tab_name=SOURCE_TAB_NAME,
+                source__is_active=True,
+        ).only('data'):
             d = r.data or {}
             if not isinstance(d, dict):
                 continue
             val = str(d.get(TARGET_KEY) or '').strip().upper()
             if val != TARGET_VALUE:
                 continue
-            hn = (r.hawb_number_norm or '').strip()
-            if not hn:
+            hn = str(d.get(HAWB_KEY) or '').strip()
+            # HAWB-номер должен выглядеть как минимум как 10-значный
+            # (нормальный авиа-номер). Защита от мусора в столбце A.
+            if not hn or not hn.isdigit() or len(hn) < 8:
                 continue
-            candidates.append(hn)
-            if limit and len(candidates) >= limit:
+            candidates_set.add(hn)
+            if limit and len(candidates_set) >= limit:
                 break
+        candidates: list[str] = sorted(candidates_set)
 
         if not candidates:
             self.stdout.write('  Кандидатов нет.')
