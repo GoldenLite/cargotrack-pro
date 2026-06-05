@@ -59,6 +59,9 @@ COL_ED_STATUS    = 24  # X
 
 
 def _retry(fn, *args, label: str = '', **kwargs):
+    import requests.exceptions as _rex
+    import urllib3.exceptions as _u3ex
+    import ssl as _ssl
     backoff = [1, 2, 4, 8, 16, 32]
     for attempt in range(len(backoff) + 1):
         try:
@@ -69,6 +72,18 @@ def _retry(fn, *args, label: str = '', **kwargs):
                 wait = backoff[attempt]
                 logger.warning('crm_inc %s API %s, retry in %ds',
                                label, status, wait)
+                time.sleep(wait)
+                continue
+            raise
+        except (_rex.SSLError, _rex.ConnectionError, _rex.ChunkedEncodingError,
+                _rex.Timeout, _u3ex.MaxRetryError, _u3ex.ProtocolError,
+                _ssl.SSLError, OSError) as e:
+            # Network/TLS flake — типично SSL: UNEXPECTED_EOF_WHILE_READING
+            # от sheets.googleapis.com. Backoff exponential как для API 5xx.
+            if attempt < len(backoff):
+                wait = backoff[attempt]
+                logger.warning('crm_inc %s network err %s: %s, retry in %ds',
+                               label, type(e).__name__, str(e)[:120], wait)
                 time.sleep(wait)
                 continue
             raise
@@ -173,19 +188,26 @@ class Command(BaseCommand):
             tab = entry.tab_name
             changed = False
 
-            # decl: пишем только при «Выпуск разрешен». При отказе/отзыве
-            # стираем — рег.номер не валидный (декларация анулирована,
-            # переподача = новая ДТ). При пустом DB-decl тоже стираем
-            # (пропагация cleanup).
+            # decl: в CRM-вкладке колонка W (рег.номер ДТ) показывает
+            # ФАКТ выпуска, а не факт наличия decl в БД. Поэтому пишем
+            # ТОЛЬКО при «Выпуск разрешен» (включая суффиксы вида
+            # «Выпуск разрешен (Корректировка!)» — substring-match).
+            # Все прочие непустые ed_status (Продлен, Идет проверка,
+            # Запрошены док-ты, Идет досмотр, Присвоен номер, Открытие
+            # процедуры, Отказано в выпуске, Отзыв, Считается не поданной)
+            # → стираем W: процедура не завершена выпуском.
+            # Исключение — пустой ed_status (legacy ряды без DB-следа,
+            # заведённые юзером вручную): не трогаем, чтобы не съесть
+            # ручной ввод.
+            # Memory: feedback_decl_only_on_released.
+            # В таблице «Общее» (общий лист) decl наоборот пишется как
+            # только появляется — это другой writeback path.
             if 'Выпуск разрешен' in new_status:
                 want_decl = new_decl
-            elif any(m in new_status for m in
-                     ('Отказ', 'Отзыв', 'Считается не поданной')):
-                want_decl = ''  # стираем рег.номер у отказа/отзыва
-            elif not new_decl:
-                want_decl = ''
+            elif not new_status:
+                want_decl = entry.last_decl  # legacy — не трогаем
             else:
-                want_decl = entry.last_decl  # не трогаем
+                want_decl = ''  # любой не-released статус → стираем
             if want_decl != entry.last_decl:
                 updates_per_tab[tab].append({
                     'range': f'{_col_letter(COL_DECL)}{row}',
