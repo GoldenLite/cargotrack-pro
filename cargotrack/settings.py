@@ -205,6 +205,14 @@ DEKLARANT_TARGET_WH_INN   = os.environ.get('DEKLARANT_TARGET_WH_INN', '253620947
 # Probe-скрипт использует urllib и потому проблем не имел.
 DEKLARANT_SSL_VERIFY      = env_bool('DEKLARANT_SSL_VERIFY', False)
 
+# ── Удаление «ТО КЛИЕНТ» строк из CRM-вкладок специалистов ────────────────────
+# Когда в Сводной ВЭД у HAWB в столбце «ФИО Специалист по ВЭД» стоит
+# «ТО КЛИЕНТ» — таможенное оформление делает клиент сам. Команда
+# delete_to_client_hawbs физически удаляет такие строки из CRM-вкладок
+# («Рабочее пространство СТО»). В «Общем» HAWB остаётся (по дизайну).
+# Snapshot перед удалением в backups/to_client_snapshots/.
+DELETE_TO_CLIENT_ENABLED  = env_bool('DELETE_TO_CLIENT_ENABLED', False)
+
 # ── Django REST Framework ───────────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [

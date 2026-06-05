@@ -95,6 +95,11 @@ class Command(BaseCommand):
                 # DEKLARANT_ENABLED=False. Гейт внутри команды, ~50 сек при
                 # throttle=0.5 и limit=100.
                 ('sync_deklarant_svh', {'limit': 100}),
+                # «ТО КЛИЕНТ» — физическое удаление строк из CRM-вкладок
+                # специалистов когда клиент сам оформляет растаможку.
+                # No-op если DELETE_TO_CLIENT_ENABLED=False. Snapshot
+                # в backups/to_client_snapshots перед каждым apply.
+                ('delete_to_client_hawbs', {'apply': True}),
                 # Reconcile статусов СДЭК (safety-net на пропущенные вебхуки).
                 # No-op если CDEK_ENABLED=false.
                 ('sync_cdek_statuses', {}),
