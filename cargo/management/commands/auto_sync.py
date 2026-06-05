@@ -89,6 +89,11 @@ class Command(BaseCommand):
         try:
             steps = [
                 ('import_sheets', {'source': 'general'}),
+                # Импорт CRM-источников (Сводная по СТО, Парсинг (СВОДНАЯ ВЭД)).
+                # Нужно для delete_to_client_hawbs — он читает из ImportedSheetRow
+                # для tab «Парсинг (СВОДНАЯ ВЭД)». Без этого свежие пометки
+                # «ТО КЛИЕНТ» от ВЭД-менеджеров не подхватываются.
+                ('import_sheets', {'source': 'crm'}),
                 ('relink_hawbs_from_tsd', {'all': True}),
                 ('refresh_moscow_cargo', {}),
                 # Декларант Плюс (ДВ-склад «Таможенный портал»). No-op если
