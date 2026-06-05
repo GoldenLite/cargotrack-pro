@@ -18,14 +18,19 @@ from typing import Optional
 # Маппинг msg_kind входящего → основная фраза статуса.
 # Приоритет: released/rejected/withdrawn > hold/examination > registered > info.
 KIND_TO_STATUS: dict[str, str] = {
-    'registered':       'Присвоен номер',
-    'examination':      'Идет досмотр (осмотр)',
-    'hold':             'Идет проверка',
-    'released':         'Выпуск разрешен',
-    'rejected':         'Отказано в выпуске',
-    'withdrawn':        'Отзыв',
-    'customs_request':  'Запрошены док-ты',
-    'info':             '',
+    'registered':            'Присвоен номер',
+    'examination':           'Идет досмотр (осмотр)',
+    'hold':                  'Идет проверка',
+    'released':              'Выпуск разрешен',
+    'rejected':              'Отказано в выпуске',
+    'withdrawn':             'Отзыв',
+    'customs_request':       'Запрошены док-ты',
+    'registration_rejected': 'Считается не поданной',  # CMN.11062 — отказ в
+                                                       # регистрации ДТ
+                                                       # (терминальное состояние
+                                                       # подачи, рег.номер не
+                                                       # присвоен)
+    'info':                  '',
 }
 
 # Цветовая палитра как в Альте — RGB (0..1) для gspread format.
@@ -120,9 +125,33 @@ DECISION_CODE_TO_STATUS: dict[str, str] = {
 }
 
 
-def _status_from_msg(msg) -> str:
-    """Извлекает наиболее точный статус для одного AltaInboxMessage."""
+def _status_from_msg(msg, hawb_number: str = '') -> str:
+    """Извлекает наиболее точный статус для одного AltaInboxMessage.
+
+    Multi-consignment защита: в CMN.11350 для multi-HAWB ДТ таможня
+    может выдать РАЗНЫЕ решения для разных накладных одной ДТ. Структура:
+        parsed_meta['decision_code'] = '10'   # top-level = первое решение
+        parsed_meta['consignments'] = [
+            {'decision_code': '10', 'waybills': ['10268642359']},
+            {'decision_code': '70', 'waybills': ['10271504146']},
+        ]
+    Если знаем hawb_number — сначала ищем per-consignment решение, чтобы
+    не пробросить top-level '10' (выпуск) на HAWB с решением '70' (продление).
+
+    Памятка из репо: feedback `multi_waybill_per_msg`.
+    """
     pm = msg.parsed_meta or {}
+    # 0. Multi-consignment: per-HAWB решение (защита от cross-pollination)
+    if hawb_number:
+        for cons in (pm.get('consignments') or []):
+            wbs = cons.get('waybills') or []
+            if hawb_number in wbs:
+                dc_c = (cons.get('decision_code') or '').strip()
+                if dc_c and dc_c in DECISION_CODE_TO_STATUS:
+                    return DECISION_CODE_TO_STATUS[dc_c]
+                # Match по waybills есть, но decision_code пустой/неизвестен
+                # → fallthrough к top-level (как раньше).
+                break
     # 1. DecisionCode/Design самые точные (в release-сообщениях)
     dc = (pm.get('decision_code') or '').strip()
     if dc and dc in DECISION_CODE_TO_STATUS:
@@ -196,7 +225,7 @@ def compute_ed_status(hawb) -> str:
                             'svh_do1_registered', 'svh_do2_registered'))
     latest = msgs.order_by('-prepared_at', '-received_at').first()
     if not main:
-        main = _status_from_msg(latest) if latest else ''
+        main = _status_from_msg(latest, hawb.hawb_number) if latest else ''
 
     # 1.6. Переподача после финального решения: если у HAWB есть outbox
     # CMN.11023/11349/11335/11024 с prepared_at ПОЗЖЕ финального
