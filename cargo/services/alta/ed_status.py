@@ -291,6 +291,19 @@ def compute_ed_status(hawb) -> str:
             else:
                 main = 'Открытие процедуры'
 
+    # 2.5. Sibling-кейс: нет inbox/outbox следа, но есть HawbDeclarationAttempt
+    # со status='FILED' для current_decl. Это означает что decl пробросился
+    # через _sync_decl_via_outbox с головной HAWB (и _register_attempt
+    # создал attempt без filed_date), а собственных событий Альты для этой
+    # sibling нет. Декларация фактически присвоена → возвращаем «Присвоен
+    # номер». Применяется только если main всё ещё пуст после inbox/outbox
+    # проверок (регрессия для других путей исключена).
+    if not main and cur_decl:
+        has_filed_attempt = hawb.declaration_attempts.filter(
+            declaration_number=cur_decl, status='FILED').exists()
+        if has_filed_attempt:
+            main = 'Присвоен номер'
+
     # 3. Накладные флаги. При финальных статусах (выпуск / отказ / отзыв /
     # «считается не поданной») запросы документов уже не актуальны и флаг
     # не добавляем — таможня закрыла процедуру.
