@@ -343,6 +343,21 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         if h:
             return (h.mawb, h)
 
+    # 2.8. consignments.waybills — для CMN.11350 (ExpressCargoDeclarationCustomMark).
+    # Когда сообщение пришло БЕЗ initial_envelope (например через
+    # db_reconcile из Postgres БД Альты или новый агент без envelope-wrap),
+    # waybill_number_raw пуст и шаги 1-2.7 матча не находят HAWB. При этом
+    # parsed_meta.consignments[*].waybills содержит точный список HAWB.
+    consignments_match = parsed.get('consignments') or []
+    for cons in consignments_match:
+        for hn in (cons.get('waybills') or []):
+            hn = str(hn).strip()
+            if not hn:
+                continue
+            h = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
+            if h:
+                return (h.mawb, h)
+
     # 3. По собранному номеру ДТ
     decl = _build_declaration_number(parsed)
     if decl:
