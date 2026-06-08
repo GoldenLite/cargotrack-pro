@@ -38,6 +38,7 @@ from urllib.parse import urljoin
 
 import urllib.error
 import urllib.request
+import zlib
 
 CONFIG_FILE = Path(__file__).resolve().parent / 'alta_agent.ini'
 LOG_FILE    = Path(__file__).resolve().parent / 'alta_agent.log'
@@ -127,6 +128,50 @@ def load_config() -> dict:
                 'endpoint':      sob.get('endpoint', '/api/v1/alta/outbox/').lstrip('/'),
             }
     cfg['svh_outbox'] = svh_outbox
+
+    # Опциональная db_reconcile-секция (опрос Postgres БД Альты и докачка
+    # пропущенных сообщений). Включается флагом enabled=true. Если psycopg2
+    # не установлен — поток сам обнаружит и тихо выйдет.
+    if cp.has_section('db_reconcile'):
+        sec = cp['db_reconcile']
+        cfg.update({
+            'db_reconcile_enabled':     sec.getboolean('enabled', fallback=False),
+            'reconcile_poll_interval':  sec.getint('poll_interval', fallback=600),
+            'reconcile_window_days':    sec.getint('window_days', fallback=2),
+            'reconcile_chunk':          sec.getint('chunk', fallback=2000),
+            'db_host':                  sec.get('db_host', fallback=''),
+            'db_port':                  sec.getint('db_port', fallback=5432),
+            'db_name':                  sec.get('db_name', fallback=''),
+            'db_user':                  sec.get('db_user', fallback=''),
+            'db_password':              sec.get('db_password', fallback=''),
+            'reconcile_msg_types':      sec.get('msg_types', fallback=''),
+        })
+    else:
+        cfg['db_reconcile_enabled'] = False
+
+    # Опциональная db_reconcile_svh-секция — опрос MS SQL Альта-СВХ сервера
+    # для CMN.13010/13029/13014/13021. Этот сервер живёт на другом IP, чем
+    # БД ДТ-сервера, и hot-folder для СВХ-входящих в нашу систему не настроен.
+    # Без этого reconcile-потока ДО1-регистрации не попадают в CargoTrack
+    # автоматически. Реализация через subprocess+PowerShell (System.Data.
+    # SqlClient встроен в Windows .NET), т.к. pip-доступ к PyPI заблокирован
+    # корпоративным firewall'ом — pymssql/pyodbc не поставить.
+    if cp.has_section('db_reconcile_svh'):
+        sec = cp['db_reconcile_svh']
+        cfg.update({
+            'db_reconcile_svh_enabled': sec.getboolean('enabled', fallback=False),
+            'svh_poll_interval':        sec.getint('poll_interval', fallback=600),
+            'svh_window_days':          sec.getint('window_days', fallback=7),
+            'svh_max_per_cycle':        sec.getint('max_per_cycle', fallback=200),
+            'svh_throttle_sec':         sec.getfloat('throttle_sec', fallback=0.2),
+            'svh_msg_types':            sec.get('msg_types',
+                fallback='CMN.13010,CMN.13029,CMN.13014,CMN.13021'),
+            # Креды берёт сам PowerShell-скрипт прямо из ini-файла — здесь
+            # их не дублируем чтобы не таскать пароли через Python-памятию.
+        })
+    else:
+        cfg['db_reconcile_svh_enabled'] = False
+
     return cfg
 
 
@@ -153,7 +198,7 @@ def http_request(method: str, url: str, token: str, *, data: bytes | None = None
     if data is not None:
         req.add_header('Content-Type', 'application/json')
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
         body = b''
@@ -502,7 +547,7 @@ def _post_inbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
     req.add_header('Content-Type', 'application/json')
     req.add_header('User-Agent', 'CargoTrack-AltaAgent-Inbox/1.0')
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         body = b''
@@ -828,7 +873,7 @@ def _post_outbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
     req.add_header('Content-Type', 'application/json')
     req.add_header('User-Agent', 'CargoTrack-AltaAgent-Outbox/1.0')
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         body = b''
@@ -1111,6 +1156,204 @@ def outbox_loop(cfg: dict) -> None:
         time.sleep(oc['poll_interval'])
 
 
+# ── DB RECONCILE (опрос Postgres Альты и докачка пропущенных) ─────────────
+# Альтовский inbox-watcher (вторая ветка выше) читает только файлы из
+# C:\GTDSERV\ED\IN. Если файл там по какой-то причине пропустили (агент
+# не работал, s3-скрипт удалил быстрее наc, проблемы с архивом, race) —
+# в нашем VPS дырка. Этот поток периодически опрашивает БД Альты-ГТД
+# (Postgres `alta.edmsgs`), узнаёт у VPS какие envelope_id у нас отсутствуют,
+# и докачивает их тела из `edmsgsxml` → отправляет на /api/v1/alta/inbox/.
+#
+# Безопасность: read-only сессия, autocommit, soft statement_timeout.
+# Креды и enabled-флаг — в [db_reconcile] alta_agent.ini.
+# psycopg2 опционален — если не установлен, поток тихо выходит.
+
+
+def _reconcile_one_cycle(pg: dict, base_url: str, token: str,
+                         msg_types: list, window_days: int,
+                         chunk: int) -> None:
+    """Один цикл сверки. Может бросать — caller ловит."""
+    import psycopg2  # noqa: F401 — caller already verified import works
+    conn = psycopg2.connect(**pg)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute(
+                """
+                SELECT envelopeid::text AS env, messagetype AS mt
+                FROM edmsgs
+                WHERE incoming = TRUE
+                  AND inoutdatetime > now() - (%s || ' days')::interval
+                  AND messagetype = ANY(%s)
+                """,
+                (str(window_days), msg_types),
+            )
+            heads = cur.fetchall()
+        logging.info(f'db_reconcile: PG heads={len(heads)} in window')
+
+        # POST /api/v1/alta/inbox/missing/ чанками — узнаём чего у нас нет
+        missing_envs: list = []
+        for i in range(0, len(heads), chunk):
+            batch = heads[i:i + chunk]
+            envs = [r[0] for r in batch]
+            req = urllib.request.Request(
+                f'{base_url}/api/v1/alta/inbox/missing/',
+                data=json.dumps({'envelope_ids': envs}).encode('utf-8'),
+                method='POST',
+            )
+            req.add_header('Authorization', f'Bearer {token}')
+            req.add_header('Content-Type', 'application/json')
+            req.add_header('User-Agent', 'CargoTrack-AltaAgent-DBReconcile/1.0')
+            try:
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    body = resp.read()
+                    payload = json.loads(body)
+                    missing_envs.extend(payload.get('missing', []))
+            except Exception:
+                logging.exception(
+                    f'db_reconcile: missing-check failed for batch {i}')
+                continue
+
+        if not missing_envs:
+            logging.info('db_reconcile: 0 missing — fully in sync')
+            return
+        logging.info(
+            f'db_reconcile: {len(missing_envs)} missing → fetching bodies'
+        )
+
+        # Тянем тела missing и шлём через стандартный /api/v1/alta/inbox/.
+        # _post_inbox читает cfg['inbox']['endpoint']/['token'], так что
+        # синтезируем минимальный cfg для него.
+        post_cfg = {
+            'base_url': base_url.rstrip('/') + '/',
+            'inbox': {
+                'endpoint': '/api/v1/alta/inbox/',
+                'token':    token,
+            },
+        }
+        sent = 0
+        with conn.cursor() as cur:
+            for env in missing_envs:
+                try:
+                    cur.execute(
+                        """
+                        SELECT e.messagetype, e.preparationdatetime,
+                               edmx.msg AS body, edmx.zip AS zip_flag
+                        FROM edmsgs e
+                        JOIN edmsgsxml edmx USING (envelopeid)
+                        WHERE e.envelopeid = %s
+                        """,
+                        (env,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        logging.warning(
+                            f'db_reconcile: envelope {env} body not found, skip'
+                        )
+                        continue
+                    mt, prep_dt, body, zip_flag = row
+                    if zip_flag == 1:
+                        xml_bytes = zlib.decompress(bytes(body))
+                    else:
+                        xml_bytes = bytes(body)
+                    xml_text = xml_bytes.decode('utf-8', errors='replace')
+
+                    payload = {
+                        'envelope_id': env,
+                        'msg_type':    mt,
+                        'prepared_at': prep_dt.isoformat() if prep_dt else None,
+                        'raw_xml':     xml_text,
+                        'parsed_meta': {'source': 'db_reconcile'},
+                    }
+                    status, resp_body = _post_inbox(post_cfg, payload)
+                    if status in (200, 409):
+                        sent += 1
+                    else:
+                        logging.warning(
+                            f'db_reconcile: POST {env}: HTTP {status} '
+                            f'body={resp_body[:200]!r}'
+                        )
+                except Exception:
+                    logging.exception(f'db_reconcile: send {env} crashed')
+        logging.info(
+            f'db_reconcile: cycle done, sent={sent}/{len(missing_envs)}'
+        )
+    finally:
+        conn.close()
+
+
+def db_reconcile_loop(cfg: dict) -> None:
+    """Сверщик: опрос Postgres Альты + докачка отсутствующих в CargoTrack.
+
+    Каждые reconcile_poll_interval (default 600s = 10 мин):
+    1. SELECT envelopeid,messagetype FROM edmsgs WHERE incoming
+       AND inoutdatetime > now() - reconcile_window_days
+       AND messagetype IN (фильтр-список из конфига)
+    2. POST envelope_ids в CargoTrack /api/v1/alta/inbox/missing/
+    3. Для каждого missing — SELECT msg FROM edmsgsxml WHERE envelopeid=X
+       → zlib.decompress → POST в /api/v1/alta/inbox/ (как агент делает с .gz).
+
+    Включается флагом cfg['db_reconcile_enabled']=true (по умолчанию false
+    чтобы не запускать на машинах без psycopg2 / без доступа к PG).
+    Креды в [db_reconcile] секции: host, port, dbname, user, password.
+
+    Безопасность: read-only сессия (SET TRANSACTION READ ONLY),
+    autocommit, soft timeout (statement_timeout=60s).
+    """
+    if not cfg.get('db_reconcile_enabled'):
+        logging.info('db_reconcile: disabled in config, skipping')
+        return
+
+    try:
+        import psycopg2  # noqa: F401
+    except ImportError:
+        logging.warning(
+            'db_reconcile: psycopg2 not installed, skipping. '
+            'pip install psycopg2-binary'
+        )
+        return
+
+    poll = int(cfg.get('reconcile_poll_interval', 600))
+    window_days = int(cfg.get('reconcile_window_days', 2))
+    msg_types_raw = cfg.get('reconcile_msg_types') or (
+        'CMN.11337,CMN.11314,CMN.11350,MY.11003,'
+        'ED.11003,ED.11010,CMN.11010,CMN.11001,'
+        'CMN.11002,CMN.11309,CMN.11310,ED.11002'
+    )
+    msg_types = [t.strip() for t in msg_types_raw.split(',') if t.strip()]
+    pg = {
+        'host':            cfg.get('db_host'),
+        'port':            int(cfg.get('db_port', 5432)),
+        'dbname':          cfg.get('db_name'),
+        'user':            cfg.get('db_user'),
+        'password':        cfg.get('db_password'),
+        'connect_timeout': 10,
+        'options':         '-c statement_timeout=60000',  # 60s
+    }
+    # base_url в нашем cfg хранится с trailing slash; для прямого склеивания
+    # с '/api/v1/alta/inbox/missing/' избавляемся от него.
+    base_url = cfg['base_url'].rstrip('/')
+    # Токен на /api/v1/alta/inbox/* — это ALTA_INBOX_TOKEN, т.е. cfg['inbox']['token'].
+    # Fallback на основной токен агента не подходит (другой scope на VPS).
+    inbox_cfg = cfg.get('inbox') or {}
+    token = inbox_cfg.get('token') or cfg.get('token', '')
+    chunk = int(cfg.get('reconcile_chunk', 2000))
+
+    logging.info(
+        f'db_reconcile: started, poll={poll}s window={window_days}d '
+        f'types={len(msg_types)} host={pg["host"]}'
+    )
+
+    while True:
+        try:
+            _reconcile_one_cycle(pg, base_url, token, msg_types,
+                                 window_days, chunk)
+        except Exception:
+            logging.exception('db_reconcile: cycle crash')
+        time.sleep(poll)
+
+
 def main() -> None:
     setup_logging()
     cfg = load_config()
@@ -1130,6 +1373,25 @@ def main() -> None:
         threading.Thread(target=svh_outbox_loop, args=(cfg,), daemon=True, name='svh-outbox-loop').start()
     else:
         logging.info('svh_outbox: section not configured in alta_agent.ini → SVH outbox loop disabled')
+
+    if cfg.get('db_reconcile_enabled'):
+        threading.Thread(target=db_reconcile_loop, args=(cfg,), daemon=True, name='db_reconcile').start()
+    else:
+        logging.info('db_reconcile: disabled (or section missing) in alta_agent.ini → reconcile loop disabled')
+
+    if cfg.get('db_reconcile_svh_enabled'):
+        try:
+            import agent_svh
+            threading.Thread(
+                target=agent_svh.svh_reconcile_loop,
+                args=(cfg, _post_inbox, http_request),
+                daemon=True,
+                name='svh-reconcile',
+            ).start()
+        except Exception as e:
+            logging.error(f'svh_reconcile: failed to start: {e}\n{traceback.format_exc()}')
+    else:
+        logging.info('db_reconcile_svh: disabled (or section missing) in alta_agent.ini → SVH reconcile loop disabled')
 
     # Outer guard: a crash inside the loop must not kill the agent silently.
     while True:
