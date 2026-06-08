@@ -862,6 +862,16 @@ def _writeback_hawbs(hawbs: list[HouseWaybill]) -> None:
         batch_write_declarations_for_hawbs(hawbs)
         batch_write_filed_dates_for_hawbs(hawbs)
         batch_write_ed_status_for_hawbs(hawbs)
+        # Параллельно — realtime в CRM-вкладки специалистов (decl, status,
+        # запросы). Без этого CRM узнавал только через cron каждые 5 мин,
+        # что давало 5-15 мин лаг или больше (на 429-волнах от Sheets API).
+        try:
+            from cargo.services.sheets.crm_realtime import (
+                batch_write_all_for_crm_hawbs,
+            )
+            batch_write_all_for_crm_hawbs(hawbs)
+        except Exception:
+            logger.exception('crm_realtime writeback failed (non-fatal)')
     except Exception:
         logger.exception('sheets writeback after declaration write failed')
 
@@ -1068,6 +1078,14 @@ def apply_status(msg: AltaInboxMessage,
                     batch_write_ed_status_for_hawbs,
                 )
                 batch_write_ed_status_for_hawbs(applied_hawbs)
+                # Realtime CRM-writeback — параллельно с «Общее».
+                try:
+                    from cargo.services.sheets.crm_realtime import (
+                        batch_write_all_for_crm_hawbs,
+                    )
+                    batch_write_all_for_crm_hawbs(applied_hawbs)
+                except Exception:
+                    logger.exception('crm_realtime writeback failed (non-fatal)')
             except Exception:
                 logger.exception('batch writeback after apply_status failed')
         threading.Thread(target=_bg_batch, daemon=True).start()
@@ -1238,6 +1256,14 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
                 batch_write_declarations_for_hawbs(applied_hawbs)
                 batch_write_attempts_count_for_hawbs(applied_hawbs)
                 batch_write_ed_status_for_hawbs(applied_hawbs)
+                # Realtime CRM-writeback — параллельно с «Общее».
+                try:
+                    from cargo.services.sheets.crm_realtime import (
+                        batch_write_all_for_crm_hawbs,
+                    )
+                    batch_write_all_for_crm_hawbs(applied_hawbs)
+                except Exception:
+                    logger.exception('crm_realtime (consignment) failed')
             except Exception:
                 logger.exception('consignment final writeback failed')
         import threading as _th
@@ -1823,6 +1849,15 @@ def _writeback_customs_requests_for_hawb(hawb: HouseWaybill) -> None:
             batch_write_customs_requests_for_hawbs([hawb])
             batch_write_customs_requests_count_for_hawbs([hawb])
             batch_write_ed_status_for_hawbs([hawb])
+            # Realtime CRM-writeback — ed_status + запросы в спец-вкладки.
+            try:
+                from cargo.services.sheets.crm_realtime import (
+                    batch_write_all_for_crm_hawbs,
+                )
+                batch_write_all_for_crm_hawbs([hawb])
+            except Exception:
+                logger.exception(
+                    'crm_realtime customs_request writeback failed')
         except ImportError:
             pass
         except Exception:
