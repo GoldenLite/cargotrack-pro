@@ -421,6 +421,23 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         if hawb:
             return (hawb.mawb, hawb)
 
+    # 5. Финальный fallback — поиск 10-значных HAWB-номеров напрямую в raw_xml.
+    # Применяется для классических ДТ-релизов (CMN.11010 от db_reconcile), где
+    # специализированный парсер не извлёк consignments/initial_envelope:
+    # parsed_meta минимальный, а HAWB-номера лежат в теле декларации внутри
+    # <PrDocumentNumber>...</PrDocumentNumber>. Berём первый существующий
+    # HAWB — для multi-HAWB релиза этого достаточно: recompute_declaration
+    # сама пересчитает siblings (project_decl_propagation).
+    raw_xml = (msg.raw_xml or '')
+    if raw_xml and (msg.msg_type or '') in ('CMN.11010', 'CMN.11309',
+                                              'CMN.11341', 'CMN.11337',
+                                              'CMN.11001', 'CMN.11350'):
+        import re as _re_raw
+        for hn in sorted(set(_re_raw.findall(r'(102\d{8})', raw_xml))):
+            h = HouseWaybill.objects.filter(hawb_number__iexact=hn).first()
+            if h:
+                return (h.mawb, h)
+
     return (None, None)
 
 
