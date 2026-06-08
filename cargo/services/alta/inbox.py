@@ -1990,6 +1990,14 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
                 mawb, cargo.pk, sorted(update_fields.keys()))
     msg.cargo = cargo
     msg.status_applied = True
+    # Триггерим Sheets «Общее» writeback по Cargo-уровневым полям
+    # (Дата размещения, Лицензия СВХ).
+    try:
+        cargo.refresh_from_db()
+        from cargo.services.sheets.writeback import write_svh_placement_for_cargo
+        write_svh_placement_for_cargo(cargo)
+    except Exception:
+        logger.exception('svh_do1 parsed: Sheets writeback failed (non-fatal)')
     return True
 
 
