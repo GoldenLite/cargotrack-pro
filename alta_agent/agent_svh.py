@@ -238,6 +238,107 @@ def svh_reconcile_one_cycle(cfg: dict, post_inbox_fn, http_request_fn) -> None:
                 posted_ok, posted_fail, max(0, len(missing) - max_per_cycle))
 
 
+def svh_do1_reconcile_one_cycle(cfg: dict, post_inbox_fn, http_request_fn) -> None:
+    """Тянет ED2WHDocInventory (parsed-таблица ДО1 в MS SQL Альты-СВХ) и
+    для записей с непустым nreg_tamnum (= ДО1 рег.номер) отправляет synthetic
+    CMN.13010-сообщение в наш VPS inbox API. Это закрывает gap когда
+    Декларант наполняет parsed-таблицу напрямую без CMN.13010-envelope в
+    ED2Msgs (типичный пример — Cargo 425-10390671 08.06.2026).
+
+    Django dispatch (_apply_svh_do1_from_parsed_table) ловит source=
+    'svh_do1_parsed_table' и прямо UPDATE'ит Cargo по MAWB. Без парсинга
+    XML.
+
+    Idempotent: envelope_id = svh-do1-{document_id}; повторная отправка
+    update_or_create'ит ту же запись.
+    """
+    base_url = cfg['base_url'].rstrip('/')
+    token = (cfg.get('inbox', {}) or {}).get('token') or cfg.get('token', '')
+    window_days = int(cfg.get('svh_window_days', 7))
+    throttle = float(cfg.get('svh_throttle_sec', 0.2))
+
+    code, rows = _run_ps(
+        ['-Op', 'list-do1', '-SinceDays', str(window_days)],
+        timeout=_LIST_TIMEOUT, op_label='list-do1'
+    )
+    if code != 0:
+        return
+    if not rows:
+        logger.info('svh_do1_reconcile: 0 rows in ED2WHDocInventory (window=%dd)',
+                    window_days)
+        return
+
+    posted_ok = 0
+    skipped = 0
+    failed = 0
+    for row in rows:
+        doc_id = (row.get('document_id') or '').strip()
+        mawb = (row.get('mawb') or '').strip()
+        reg = (row.get('nreg_tamnum') or '').strip()
+        if not (doc_id and mawb and reg):
+            skipped += 1
+            continue
+        envelope_id = f'svh-do1-{doc_id}'
+        # Дату ДО1 берём из nreg_tamnum (формат cc/ddmmyy/gtd → конвертируем
+        # в YYYY-MM-DD) если do1_date_present пуст.
+        reg_date = ''
+        if row.get('do1_date_present'):
+            reg_date = row['do1_date_present'][:10]  # 2026-06-05
+        else:
+            parts = reg.split('/')
+            if len(parts) == 3 and len(parts[1]) == 6:
+                d, m, y2 = parts[1][0:2], parts[1][2:4], parts[1][4:6]
+                reg_date = f'20{y2}-{m}-{d}'
+        payload = {
+            'envelope_id': envelope_id,
+            'msg_type': 'CMN.13010',
+            'prepared_at': row.get('do1_date_present') or row.get('in_date') or '',
+            'raw_xml': '',
+            'parsed_meta': {
+                'source': 'svh_do1_parsed_table',
+                'svh_mawb': mawb,
+                'svh_do1_reg_number': reg,
+                'svh_do1_reg_date': reg_date,
+                'svh_warehouse_license': row.get('nlic', ''),
+                'svh_ref_document_id': doc_id,
+                'scan_into_bond': row.get('do1_date_present') or '',
+                'mssql_reg_id': row.get('reg_id', ''),
+                'mssql_main_id': row.get('main_id', ''),
+                'mssql_ncar': row.get('ncar', ''),
+            },
+        }
+        try:
+            status, resp_body = post_inbox_fn(cfg, payload)
+        except Exception as e:
+            logger.warning('svh_do1: POST %s failed: %s', mawb, e)
+            failed += 1
+            time.sleep(throttle)
+            continue
+        if status == 200:
+            posted_ok += 1
+            logger.debug('svh_do1: mawb=%s reg=%s → HTTP 200', mawb, reg)
+        else:
+            failed += 1
+            logger.warning('svh_do1: mawb=%s → HTTP %s body=%s',
+                           mawb, status, (resp_body or b'')[:200])
+        time.sleep(throttle)
+
+    logger.info('svh_do1_reconcile: rows=%d posted=%d skipped=%d failed=%d',
+                len(rows), posted_ok, skipped, failed)
+
+
+def svh_do1_reconcile_loop(cfg: dict, post_inbox_fn, http_request_fn) -> None:
+    """Daemon-thread loop для parsed-таблицы ED2WHDocInventory."""
+    poll_interval = int(cfg.get('svh_poll_interval', 600))
+    logger.info('svh_do1_reconcile_loop start: poll_interval=%ds', poll_interval)
+    while True:
+        try:
+            svh_do1_reconcile_one_cycle(cfg, post_inbox_fn, http_request_fn)
+        except Exception:
+            logger.exception('svh_do1_reconcile cycle crashed')
+        time.sleep(poll_interval)
+
+
 def svh_reconcile_loop(cfg: dict, post_inbox_fn, http_request_fn) -> None:
     """Daemon-thread loop — runs cycle every poll_interval seconds."""
     poll_interval = int(cfg.get('svh_poll_interval', 600))

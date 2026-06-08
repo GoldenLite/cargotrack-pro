@@ -1933,9 +1933,79 @@ def _apply_goods_count_from_cmn11010(
         logger.exception('CMN.11010 goods_count writeback dispatch failed')
 
 
+def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
+    """Fast-path для CMN.13010-сообщений сгенерированных agent_svh из
+    parsed-таблицы ED2WHDocInventory MS SQL Альта-СВХ.
+
+    Эти сообщения имеют parsed_meta.source='svh_do1_parsed_table' и
+    содержат готовые поля svh_mawb, svh_do1_reg_number, svh_do1_reg_date,
+    svh_warehouse_license, scan_into_bond — нам не нужно парсить XML или
+    искать через RefDocumentID, прямо находим Cargo по MAWB и UPDATE'им.
+
+    Покрывает кейс когда CMN.13010-envelope в ED2Msgs отсутствует (Декларант
+    наполняет ED2WHDocInventory отдельным путём) — без этого Cargo.svh_do1_*
+    остаётся пустым несмотря на наличие ДО1 в Альте.
+
+    Возвращает True если применили (нужно ли save'ить).
+    """
+    pm = msg.parsed_meta or {}
+    if pm.get('source') != 'svh_do1_parsed_table':
+        return False
+    mawb = (pm.get('svh_mawb') or '').strip()
+    reg_number = (pm.get('svh_do1_reg_number') or '').strip()
+    if not mawb or not reg_number:
+        return False
+    cargo = Cargo.objects.filter(awb_number__iexact=mawb).first()
+    if not cargo:
+        logger.info('svh_do1 parsed: Cargo %s не найден — пропускаем', mawb)
+        msg.cargo = None
+        msg.status_applied = True
+        return True
+    # Идемпотент: если уже актуальное значение — не переписываем
+    if cargo.svh_do1_reg_number == reg_number:
+        msg.cargo = cargo
+        msg.status_applied = True
+        return True
+    update_fields = {}
+    update_fields['svh_do1_reg_number'] = reg_number[:64]
+    if pm.get('svh_do1_reg_date'):
+        try:
+            from django.utils.dateparse import parse_date
+            d = parse_date(pm['svh_do1_reg_date'])
+            if d:
+                update_fields['svh_do1_reg_date'] = d
+        except Exception:
+            pass
+    if pm.get('svh_warehouse_license') and not cargo.warehouse_license:
+        update_fields['warehouse_license'] = pm['svh_warehouse_license'][:64]
+    if pm.get('scan_into_bond') and not cargo.scan_into_bond:
+        try:
+            from django.utils.dateparse import parse_datetime
+            dt = parse_datetime(pm['scan_into_bond'])
+            if dt:
+                update_fields['scan_into_bond'] = dt
+        except Exception:
+            pass
+    if not cargo.svh_source:
+        update_fields['svh_source'] = 'alta_svh_parsed'
+    Cargo.objects.filter(pk=cargo.pk).update(**update_fields)
+    logger.info('svh_do1 parsed: Cargo %s (id=%s) updated: %s',
+                mawb, cargo.pk, sorted(update_fields.keys()))
+    msg.cargo = cargo
+    msg.status_applied = True
+    return True
+
+
 def dispatch(msg: AltaInboxMessage) -> None:
     """Главная точка входа: матчинг → recompute ДТ → статус → событие."""
     msg.msg_kind = classify(msg.msg_type, msg.parsed_meta)
+
+    # ── Fast-path для CMN.13010 из parsed-таблицы ED2WHDocInventory ──
+    # См. _apply_svh_do1_from_parsed_table docstring.
+    if msg.msg_type == 'CMN.13010' and _apply_svh_do1_from_parsed_table(msg):
+        msg.save(update_fields=['msg_kind', 'cargo',
+                                'status_applied', 'parsed_meta'])
+        return
 
     # ── Запрос документов (MY.11003) ──
     if msg.msg_kind == 'customs_request':

@@ -199,8 +199,46 @@ try {
             }
             $r.Close()
         }
+        'list-do1' {
+            # Tянем parsed-таблицу ED2WHDocInventory — там Декларант наполняет
+            # данные ДО1 регистрации напрямую (CMN.13010 в ED2Msgs может
+            # отсутствовать). Это закрывает gap который видно по 425-10390671.
+            $negDays = -[int]$SinceDays
+            $sql = "SELECT DocumentID, InDate, MsgDate, DO1DatePresent, nreg_tamnum, td, ntsd, nlic, ncar, reg_id, main_id FROM ED2WHDocInventory WHERE InDate > DATEADD(day, @win, GETDATE()) AND nreg_tamnum IS NOT NULL AND nreg_tamnum <> '' AND nlic IS NOT NULL"
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = $sql
+            $cmd.CommandTimeout = $QueryTimeoutSec
+            [void]$cmd.Parameters.AddWithValue('@win', $negDays)
+            $r = $cmd.ExecuteReader()
+            $count = 0
+            while ($r.Read()) {
+                $count++
+                # MAWB лежит в reg_id (например "425-10390671_" или
+                # "298-52164173," — с trailing punctuation от Декларанта).
+                $rawReg = "$($r['reg_id'])"
+                $mawb = ''
+                if ($rawReg -match '(\d{3}-\d{8})') {
+                    $mawb = $matches[1]
+                }
+                $obj = [PSCustomObject]@{
+                    document_id = "$($r['DocumentID'])"
+                    main_id = "$($r['main_id'])"
+                    in_date = if ($r['InDate'] -ne [DBNull]::Value) { ([datetime]$r['InDate']).ToString('yyyy-MM-ddTHH:mm:ss') } else { '' }
+                    do1_date_present = if ($r['DO1DatePresent'] -ne [DBNull]::Value) { ([datetime]$r['DO1DatePresent']).ToString('yyyy-MM-ddTHH:mm:ss') } else { '' }
+                    nreg_tamnum = "$($r['nreg_tamnum'])"
+                    td = "$($r['td'])"
+                    nlic = "$($r['nlic'])"
+                    ncar = "$($r['ncar'])"
+                    reg_id = $rawReg
+                    mawb = $mawb
+                }
+                $obj | ConvertTo-Json -Compress
+            }
+            $r.Close()
+            [Console]::Error.WriteLine("svh_query list-do1: $count rows")
+        }
         default {
-            Write-Error "Unknown --Op: $Op (expected list|fetch)"
+            Write-Error "Unknown --Op: $Op (expected list|fetch|list-do1)"
             exit 4
         }
     }

@@ -1388,6 +1388,15 @@ def main() -> None:
                 daemon=True,
                 name='svh-reconcile',
             ).start()
+            # Второй поток — для ED2WHDocInventory parsed-таблицы. Закрывает
+            # gap когда CMN.13010 envelope в ED2Msgs отсутствует (Декларант
+            # наполняет parsed-таблицу напрямую).
+            threading.Thread(
+                target=agent_svh.svh_do1_reconcile_loop,
+                args=(cfg, _post_inbox, http_request),
+                daemon=True,
+                name='svh-do1-reconcile',
+            ).start()
         except Exception as e:
             logging.error(f'svh_reconcile: failed to start: {e}\n{traceback.format_exc()}')
     else:
