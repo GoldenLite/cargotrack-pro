@@ -29,7 +29,10 @@ HAWB появилась в Sheets вручную — её в индексе не
 """
 from __future__ import annotations
 
+import datetime
 import logging
+import os
+import sys
 import time
 from collections import defaultdict
 
@@ -47,6 +50,44 @@ logger = logging.getLogger('cargo.crm_sync_inc')
 
 
 CRM_ID = '1H7AdXuo_zalnalgrWfVhm0Lau1MdXtFuFbg5pPGfcfI'
+
+# ── Lockfile (тот же паттерн что у auto_sync / delete_to_client_hawbs) ────
+# Защита от наложения двух прогонов: если cron-задача запускает нас каждые
+# 5 мин, но прошлый прогон ещё крутится (например залип на 429-retry
+# Sheets API) — новый запуск выходит без работы. Stale-лимит 30 мин:
+# если прошлый прогон висит дольше — его считаем мёртвым, перезахватываем.
+_LOCK_DIR = os.path.join(os.path.dirname(sys.executable), '..', '..', 'tmp')
+LOCK_PATH = os.path.join(os.path.abspath(_LOCK_DIR), 'crm_sync_incremental.lock')
+LOCK_STALE_AFTER_SEC = 30 * 60
+
+
+def _acquire_lock() -> bool:
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    if os.path.exists(LOCK_PATH):
+        try:
+            age = time.time() - os.path.getmtime(LOCK_PATH)
+        except OSError:
+            age = 0
+        if age < LOCK_STALE_AFTER_SEC:
+            return False
+        try:
+            os.remove(LOCK_PATH)
+        except OSError:
+            pass
+    try:
+        with open(LOCK_PATH, 'w') as f:
+            f.write(f'pid={os.getpid()} at={datetime.datetime.now().isoformat()}\n')
+        return True
+    except OSError:
+        return False
+
+
+def _release_lock() -> None:
+    try:
+        if os.path.exists(LOCK_PATH):
+            os.remove(LOCK_PATH)
+    except OSError:
+        pass
 
 # Стандартный шаблон CRM-tabs (см. crm_sync.py / crm_reindex.py).
 COL_HAWB         = 3   # C
@@ -117,9 +158,33 @@ class Command(BaseCommand):
         parser.add_argument('--dry-run', action='store_true')
         parser.add_argument('--no-hide', action='store_true',
                             help='Не менять hidden state')
+        parser.add_argument('--no-lock', action='store_true',
+                            help='Игнорировать lockfile (для отладки)')
 
     def handle(self, *args, **opts):
+        if not opts.get('no_lock'):
+            if not _acquire_lock():
+                self.stdout.write(self.style.WARNING(
+                    f'Предыдущий запуск ещё работает (lock занят: {LOCK_PATH}). '
+                    'Выхожу без работы.'))
+                return
+        try:
+            self._run(*args, **opts)
+        finally:
+            if not opts.get('no_lock'):
+                _release_lock()
+
+    # Soft deadline на ВЕСЬ прогон команды. Если за это время не уложились
+    # (обычно из-за стабильных 429 от Google Sheets API при конкуренции с
+    # auto_sync + agent realtime-writes) — выходим gracefully без записи
+    # индекса. Следующий cron-запуск (через 5 мин) перевычислит diff заново
+    # и попробует записать. Без этого крутится в _retry-цикле часами
+    # (08.06.2026 наблюдали 2ч55мин зависание).
+    MAX_TOTAL_SEC = 10 * 60
+
+    def _run(self, *args, **opts):
         t0 = time.time()
+        deadline = t0 + self.MAX_TOTAL_SEC
 
         qs = CrmHawbIndex.objects.all()
         if opts['tab']:
@@ -309,7 +374,14 @@ class Command(BaseCommand):
         ss = client.open_by_key(CRM_ID)
         ws_by_title = {ws.title: ws for ws in ss.worksheets()}
 
+        deadline_hit = False
         for tab, updates in updates_per_tab.items():
+            if time.time() > deadline:
+                deadline_hit = True
+                self.stdout.write(self.style.WARNING(
+                    f'  TIMEOUT after {self.MAX_TOTAL_SEC}s — '
+                    'skip remaining tabs; next cron run retries'))
+                break
             ws = ws_by_title.get(tab)
             if not ws:
                 self.stdout.write(self.style.WARNING(
@@ -322,8 +394,13 @@ class Command(BaseCommand):
                        label=f'{tab} batch {i//CHUNK + 1}')
             self.stdout.write(f'  {tab}: wrote {len(updates)} cells')
 
-        if not opts['no_hide']:
+        if not opts['no_hide'] and not deadline_hit:
             for tab in set(list(hide_per_tab.keys()) + list(show_per_tab.keys())):
+                if time.time() > deadline:
+                    deadline_hit = True
+                    self.stdout.write(self.style.WARNING(
+                        '  TIMEOUT during hide/show phase — skip remaining'))
+                    break
                 ws = ws_by_title.get(tab)
                 if not ws:
                     continue
@@ -337,8 +414,13 @@ class Command(BaseCommand):
                     self.stdout.write(
                         f'  {tab}: hide={len(rows_h)} show={len(rows_s)}')
 
-        # Bulk-save индекс.
-        if idx_to_save:
+        # Bulk-save индекс. Если deadline сработал — НЕ сохраняем, иначе
+        # для невышедших вкладок Sheets отстаёт от индекса → next run
+        # подумает что эти строки уже синхронизированы. Лучше пересчитать.
+        if deadline_hit:
+            self.stdout.write(self.style.WARNING(
+                f'  index update SKIPPED ({len(idx_to_save)} rows) due to timeout'))
+        elif idx_to_save:
             CrmHawbIndex.objects.bulk_update(
                 idx_to_save,
                 fields=['last_decl', 'last_status', 'last_request',
@@ -349,7 +431,8 @@ class Command(BaseCommand):
             self.stdout.write(f'  index updated: {len(idx_to_save)} rows')
 
         self.stdout.write(self.style.SUCCESS(
-            f'Done. Elapsed: {time.time()-t0:.1f}s'))
+            f'Done. Elapsed: {time.time()-t0:.1f}s'
+            + (' (timeout reached)' if deadline_hit else '')))
 
 
 def _build_dim_requests(sheet_id: int, row_indices: list[int],
