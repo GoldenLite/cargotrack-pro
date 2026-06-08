@@ -1966,28 +1966,25 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
         msg.cargo = cargo
         msg.status_applied = True
         return True
+    # Cargo model: svh_do1_reg_number + scan_into_bond + warehouse_license.
+    # Отдельного svh_do1_reg_date поля НЕТ — дату кладём в scan_into_bond.
     update_fields = {}
     update_fields['svh_do1_reg_number'] = reg_number[:64]
-    if pm.get('svh_do1_reg_date'):
-        try:
-            from django.utils.dateparse import parse_date
-            d = parse_date(pm['svh_do1_reg_date'])
-            if d:
-                update_fields['svh_do1_reg_date'] = d
-        except Exception:
-            pass
-    if pm.get('svh_warehouse_license') and not cargo.warehouse_license:
+    if pm.get('svh_warehouse_license') and not (cargo.warehouse_license or '').strip():
         update_fields['warehouse_license'] = pm['svh_warehouse_license'][:64]
     if pm.get('scan_into_bond') and not cargo.scan_into_bond:
         try:
             from django.utils.dateparse import parse_datetime
             dt = parse_datetime(pm['scan_into_bond'])
             if dt:
+                from django.utils import timezone as _tz
+                if _tz.is_naive(dt):
+                    dt = _tz.make_aware(dt, _tz.get_current_timezone())
                 update_fields['scan_into_bond'] = dt
         except Exception:
             pass
     if not cargo.svh_source:
-        update_fields['svh_source'] = 'alta_svh_parsed'
+        update_fields['svh_source'] = 'alta'
     Cargo.objects.filter(pk=cargo.pk).update(**update_fields)
     logger.info('svh_do1 parsed: Cargo %s (id=%s) updated: %s',
                 mawb, cargo.pk, sorted(update_fields.keys()))
