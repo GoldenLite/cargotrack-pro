@@ -22,6 +22,15 @@ from cargo.models import AltaOutboxObservation, Cargo, HouseWaybill
 logger = logging.getLogger('cargo.alta.outbox')
 
 
+def _autocreate_disabled() -> bool:
+    """Process-wide kill-switch для auto-create EXPORT HouseWaybill веток.
+    Включается env ALTA_INBOX_AUTOCREATE_DISABLED=1 на время backfill,
+    чтобы старые legacy raw_xml не плодили фейковые HAWB."""
+    import os
+    return os.environ.get('ALTA_INBOX_AUTOCREATE_DISABLED', '').strip().lower() \
+        in ('1', 'true', 'yes', 'on')
+
+
 def _find_cargo(common_wb: str) -> Optional[Cargo]:
     common_wb = (common_wb or '').strip()
     if not common_wb:
@@ -429,7 +438,7 @@ def _ensure_cargo_from_do1(obs: AltaOutboxObservation) -> Optional[Cargo]:
     if not mawb:
         return None
     try:
-        cargo = Cargo.objects.create(awb_number=mawb, stage='DRAFT')
+        cargo = Cargo.objects.create(awb_number=mawb, stage='DRAFT', svh_source='')
         logger.info('ED.DO1: auto-created Cargo %s (stage=DRAFT)', mawb)
         return cargo
     except Exception:
@@ -591,7 +600,7 @@ def _ensure_export_cargo(awb_number: str) -> Optional[Cargo]:
     if cargo:
         return cargo
     try:
-        cargo = Cargo.objects.create(awb_number=awb_number, stage='DRAFT')
+        cargo = Cargo.objects.create(awb_number=awb_number, stage='DRAFT', svh_source='')
         logger.info('export: auto-created Cargo %s', awb_number)
         return cargo
     except Exception:
@@ -613,11 +622,19 @@ def _ensure_export_hawb(hawb_number: str, cargo: Optional[Cargo]
         return None
     h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_number).first()
     if not h:
+        if _autocreate_disabled():
+            # Kill-switch для backfill: не создаём фейковую EXPORT HAWB.
+            # Возвращаем None — caller должен пропустить эту HAWB.
+            logger.info(
+                'export: auto-create skipped for %s '
+                '(ALTA_INBOX_AUTOCREATE_DISABLED)', hawb_number)
+            return None
         try:
             h = HouseWaybill.objects.create(
                 hawb_number=hawb_number,
                 shipment_type='EXPORT',
                 logistics_status='EXPORT_CUSTOMS',
+                cdek_number='',
             )
             logger.info('export: auto-created HAWB %s (EXPORT_CUSTOMS)',
                         hawb_number)
