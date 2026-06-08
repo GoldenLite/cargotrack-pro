@@ -46,6 +46,11 @@ MSG_KIND_MAP: dict[str, str] = {
     'CMN.11310': 'info',         # ACK / customs mark без явного решения
     'CMN.11350': 'released',     # ExpressCargoDeclarationCustomMark — отметка таможни.
                                  # DecisionCode 10=выпуск, 90=отказ. Уточняется в classify().
+    'CMN.11354': 'withdrawn',    # ExpressCargoDeclarationCustomMark — разрешение
+                                 # на отзыв ДТ (DecisionCode=40). Это ответ таможни
+                                 # на нашу CMN.11011 (запрос отзыва). HAWB не несёт,
+                                 # связка через initial_envelope → CMN.11011 outbox →
+                                 # mcd_id → CMN.11335 outbox с hawbs.
     'CMN.11314': 'info',         # Закрытие процедуры (DO1Close)
     'CMN.13021': 'info',         # DO1KeepLimits — лимит хранения / размещение на СВХ
     'CMN.13029': 'svh_placed',   # WHDocInventory — представление в таможню с MAWB.
@@ -97,6 +102,9 @@ OUR_WAREHOUSE_LICENSE = '10001/060324/10009/1'
 DECISION_CODE_KIND: dict[str, str] = {
     '10': 'released',
     '11': 'released',
+    '40': 'withdrawn',    # Разрешение на отзыв ДТ (CMN.11354 consignment-блок).
+                          # На CMN.11350 не встречается — Альта использует только
+                          # 10/11/70/90/91 для классических ДТ-решений.
     '70': 'hold',         # Запрос дополнительных документов и сведений
     '90': 'rejected',
     '91': 'rejected',
@@ -184,6 +192,9 @@ STATUS_FROM_KIND: dict[str, str] = {
     'registered':  'FILED',
     'released':    'RELEASED',
     'rejected':    'REJECTED',
+    'withdrawn':   'WITHDRAWN',  # отзыв декларации — инициатива нашего декларанта,
+                                 # CMN.11354 = разрешение таможни. Отличается от
+                                 # REJECTED (отказ — решение таможни).
     'examination': 'EXAMINATION',
     'hold':        'HOLD',
     'registration_rejected': 'REJECTED',  # отказ в регистрации = REJECTED
@@ -330,6 +341,41 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
                     return (None, new_h)
                 except Exception:
                     logger.exception('match: auto-create HAWB %s failed', hn)
+
+        # 2.6. Sibling-mcd_id — для CMN.11354 (разрешение отзыва).
+        # CMN.11354.initial_envelope ссылается на наш CMN.11011 outbox (запрос
+        # отзыва). У CMN.11011 raw_xml не сохраняется (legacy агент), поэтому
+        # hawbs там пуст. НО parsed_meta.mcd_id — это Master Customs Declaration
+        # ID, общий для всей ДТЭГ (CMN.11335 подача, CMN.11011 отзыв и др.).
+        # Через тот же mcd_id находим sibling CMN.11335 (наша ПТДЭГ-подача), у
+        # которой hawbs есть.
+        if obs:
+            ob_pm = obs.parsed_meta or {}
+            mcd_id = (ob_pm.get('mcd_id') or '').strip()
+            if mcd_id:
+                sib_qs = (AltaOutboxObservation.objects
+                          .filter(parsed_meta__mcd_id=mcd_id)
+                          .exclude(pk=obs.pk)
+                          .select_related('cargo', 'hawb'))
+                for sib in sib_qs:
+                    sib_hawbs = (sib.parsed_meta or {}).get('hawbs') or []
+                    for hn in sib_hawbs:
+                        hn = str(hn).strip()
+                        if not hn:
+                            continue
+                        h = HouseWaybill.objects.filter(
+                            hawb_number__iexact=hn).first()
+                        if h:
+                            return (h.mawb, h)
+                    # Если у sibling proставлен FK напрямую — тоже подходит.
+                    if sib.hawb:
+                        return (sib.hawb.mawb, sib.hawb)
+                    if sib.cargo and not sib.hawb:
+                        # Cargo есть, hawb нет — возвращаем только cargo.
+                        # apply_consignment_decisions сам разберётся per-HAWB
+                        # по mcd-связке когда waybills в сообщении пусты —
+                        # для withdrawn это значит «отзыв всей декларации».
+                        return (sib.cargo, None)
 
     # 2.7. providing_hawbs — для CMN.11001 (ProvidingIndicationList).
     # initial_envelope в нём отсутствует, но в теле явно перечислены HAWB
