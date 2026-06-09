@@ -3288,6 +3288,15 @@ def api_alta_inbox_post(request):
     if not envelope_id:
         return Response({'detail': 'envelope_id required'}, status=400)
 
+    # Тех.шум — мы не используем эти типы, не сохраняем (юзер давно просил).
+    # CMN.00003 — envelope ACK (29k/сутки), CMN.00006 — receipt ack,
+    # ED.11001/11002 — receipt confirmation. None из них не матчится с
+    # Cargo/HAWB, только засоряет БД и orphan-счётчик.
+    msg_type = (data.get('msg_type') or '').strip()
+    NOISE_TYPES = {'CMN.00003', 'CMN.00006', 'ED.11001', 'ED.11002'}
+    if msg_type in NOISE_TYPES:
+        return Response({'ok': True, 'note': 'noise type, skipped'})
+
     from .models import AltaInboxMessage
     from .services.alta.inbox import dispatch
 
