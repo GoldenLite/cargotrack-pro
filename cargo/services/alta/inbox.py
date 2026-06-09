@@ -349,14 +349,36 @@ def match(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[HouseWaybill
         # ID, общий для всей ДТЭГ (CMN.11335 подача, CMN.11011 отзыв и др.).
         # Через тот же mcd_id находим sibling CMN.11335 (наша ПТДЭГ-подача), у
         # которой hawbs есть.
+        #
+        # TIME-WINDOW: один mcd_id может покрывать НЕСКОЛЬКО подач (исходная
+        # ПТДЭГ → корректировка → пересборка). Берём ближайшую подачу до
+        # CMN.11354.prepared_at — это «действующая» на момент отзыва.
+        # Без time-window мы рисковали привязать withdrawn к HAWB из более
+        # поздней подачи (как было с 10263777240 в backfill 08.06).
         if obs:
             ob_pm = obs.parsed_meta or {}
             mcd_id = (ob_pm.get('mcd_id') or '').strip()
             if mcd_id:
-                sib_qs = (AltaOutboxObservation.objects
-                          .filter(parsed_meta__mcd_id=mcd_id)
-                          .exclude(pk=obs.pk)
-                          .select_related('cargo', 'hawb'))
+                sib_qs_all = list(AltaOutboxObservation.objects
+                                  .filter(parsed_meta__mcd_id=mcd_id)
+                                  .exclude(pk=obs.pk)
+                                  .select_related('cargo', 'hawb'))
+                msg_at = getattr(msg, 'prepared_at', None)
+                # Сортируем: сначала sibling'ов с prepared_at <= msg_at,
+                # по убыванию prepared_at (ближайший до). Затем — fallback'ы.
+                def _sib_priority(s):
+                    s_at = getattr(s, 'prepared_at', None)
+                    if msg_at and s_at:
+                        delta = (msg_at - s_at).total_seconds()
+                        if delta >= 0:
+                            # Подача ДО msg — приоритет 0, чем меньше delta
+                            # (т.е. ближе по времени к msg) тем выше.
+                            return (0, delta)
+                        # Подача ПОСЛЕ msg — приоритет 1 (низкий).
+                        return (1, -delta)
+                    # Нет prepared_at — самый низкий приоритет.
+                    return (2, 0)
+                sib_qs = sorted(sib_qs_all, key=_sib_priority)
                 for sib in sib_qs:
                     sib_hawbs = (sib.parsed_meta or {}).get('hawbs') or []
                     for hn in sib_hawbs:
