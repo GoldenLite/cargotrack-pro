@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     # ── REST API v1 ──
     path('api/v1/health/', views.api_health, name='api_health'),
+    path('api/v1/telegram/webhook/', views.api_telegram_webhook, name='api_telegram_webhook'),
     path('api/v1/cargo/', views.CargoListAPIView.as_view(), name='api_cargo_list'),
     path('api/v1/cargo/<str:awb_number>/', views.CargoDetailAPIView.as_view(), name='api_cargo_detail'),
     path('api/v1/hawbs/', views.HawbListAPIView.as_view(), name='api_hawb_list'),
@@ -102,6 +103,7 @@ urlpatterns = [
     path('hawb/<int:hawb_id>/send/alta/indpost/', views.hawb_send_alta_indpost, name='hawb_send_alta_indpost'),
     path('hawb/<int:hawb_id>/send/alta/waybill/', views.hawb_send_alta_waybill, name='hawb_send_alta_waybill'),
     path('hawb/<int:hawb_id>/send/alta/invoice/', views.hawb_send_alta_invoice, name='hawb_send_alta_invoice'),
+    path('hawb/<int:hawb_id>/refresh/cdek/',      views.hawb_refresh_cdek,      name='hawb_refresh_cdek'),
     path('cargo/<str:awb_number>/send/alta/',     views.cargo_send_alta_express, name='cargo_send_alta_express'),
     path('cargo/<str:awb_number>/send/alta/dt/',  views.cargo_send_alta_dt,      name='cargo_send_alta_dt'),
     path('alta/queue/',                           views.alta_queue_page,         name='alta_queue_page'),
@@ -113,7 +115,12 @@ urlpatterns = [
     path('api/v1/alta/queue/<int:item_id>/ack/',     views.api_alta_queue_ack,  name='api_alta_queue_ack'),
     path('api/v1/alta/queue/<int:item_id>/fail/',    views.api_alta_queue_fail, name='api_alta_queue_fail'),
     path('api/v1/alta/inbox/',                       views.api_alta_inbox_post, name='api_alta_inbox'),
+    path('api/v1/alta/inbox/missing/',               views.api_alta_inbox_missing, name='api_alta_inbox_missing'),
     path('api/v1/alta/outbox/',                      views.api_alta_outbox_post, name='api_alta_outbox'),
+    path('api/v1/alta/agent/download/',              views.api_alta_agent_download, name='api_alta_agent_download'),
+
+    # ── Вебхук СДЭК (ORDER_STATUS) ──
+    path('api/v1/cdek/webhook/<str:secret>/',        views.cdek_webhook,        name='cdek_webhook'),
 
     # ── Импорт из Google Sheets ──
     path('imports/sheets/',                            views.sheets_imports_page,  name='sheets_imports'),

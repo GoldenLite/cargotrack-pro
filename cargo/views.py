@@ -911,10 +911,15 @@ def hawb_detail(request, hawb_id: int):
         .filter(hawb=hawb)
         .order_by('-received_at')[:50]
     )
+    from django.conf import settings as _settings
+    cdek_enabled = getattr(_settings, 'CDEK_ENABLED', False)
+    cdek_events = list(hawb.cdek_events.all()[:50]) if cdek_enabled else []
     context = {
         'hawb': hawb,
         'goods': goods,
         'documents': documents,
+        'cdek_enabled': cdek_enabled,
+        'cdek_events': cdek_events,
         'checklist': checklist,
         'checklist_total': checklist_total,
         'checklist_received': checklist_received,
@@ -1570,6 +1575,77 @@ def api_health(request):
         'service': 'CargoTrack Pro',
         'version': '1.0',
     })
+
+
+@api_view(['POST'])
+@permission_classes([])
+def api_telegram_webhook(request):
+    """POST /api/v1/telegram/webhook/ — приём update от Telegram bot API.
+
+    Поддерживаемые команды:
+      /status, /health — health-status всех модулей через collect_status()
+      /start, /help    — справка
+
+    Защита: chat_id whitelist из settings.TELEGRAM_ALERT['chat_id']. Любой
+    update от других chat'ов отбрасывается.
+    """
+    from django.conf import settings
+    import logging, requests
+    logger = logging.getLogger('cargo.telegram.webhook')
+
+    cfg = getattr(settings, 'TELEGRAM_ALERT', None) or getattr(
+        settings, 'DEKLARANT_ALERT_TELEGRAM', None)
+    if not cfg:
+        return Response({'ok': True, 'note': 'no TELEGRAM_ALERT config'})
+
+    allowed_chat = str(cfg.get('chat_id', '')).strip()
+    bot_token = cfg.get('bot_token', '')
+    if not bot_token:
+        return Response({'ok': True, 'note': 'no bot_token'})
+
+    data = request.data or {}
+    msg = data.get('message') or data.get('edited_message') or {}
+    chat = msg.get('chat') or {}
+    chat_id = str(chat.get('id', ''))
+    text = (msg.get('text') or '').strip()
+
+    if not chat_id or not text:
+        return Response({'ok': True})
+    if allowed_chat and chat_id != allowed_chat:
+        logger.warning('telegram webhook: chat_id %s not in whitelist', chat_id)
+        return Response({'ok': True})
+
+    cmd = text.split()[0].lower().split('@')[0]
+    reply = ''
+    parse_mode = 'Markdown'
+
+    if cmd in ('/status', '/health'):
+        try:
+            from cargo.services.notify.status import collect_status
+            reply = collect_status()
+        except Exception as e:
+            logger.exception('collect_status failed')
+            reply = f'❌ collect_status error: {e}'
+            parse_mode = ''
+    elif cmd in ('/start', '/help'):
+        reply = ('🤖 *CargoTrack Alerts Bot*\n\n'
+                 'Команды:\n'
+                 '`/status` — статус всех модулей\n'
+                 '`/health` — то же что /status')
+    else:
+        return Response({'ok': True})  # неизвестная команда — молчим
+
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{bot_token}/sendMessage',
+            data={'chat_id': chat_id, 'text': reply,
+                  'parse_mode': parse_mode} if parse_mode else
+                 {'chat_id': chat_id, 'text': reply},
+            timeout=10,
+        )
+    except Exception:
+        logger.exception('telegram reply failed')
+    return Response({'ok': True})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2985,6 +3061,36 @@ def hawb_send_alta_invoice(request, hawb_id: int):
 
 @login_required
 @require_POST
+def hawb_refresh_cdek(request, hawb_id: int):
+    """Ручной on-demand fetch статуса СДЭК по im_number (=hawb_number)."""
+    from django.conf import settings
+    from .models import HouseWaybill
+    hawb = get_object_or_404(HouseWaybill, pk=hawb_id)
+    if not getattr(settings, 'CDEK_ENABLED', False):
+        messages.error(request, 'Интеграция СДЭК выключена (CDEK_ENABLED).')
+        return redirect('hawb_detail', hawb_id=hawb_id)
+    from .services.cdek import applier as cdek_applier
+    from .services.cdek.client import CdekConfigError
+    try:
+        res = cdek_applier.fetch_and_apply(hawb, source='manual')
+    except CdekConfigError as e:
+        messages.error(request, f'СДЭК не сконфигурирован: {e}')
+        return redirect('hawb_detail', hawb_id=hawb_id)
+    except Exception as e:
+        logger.exception('cdek manual refresh failed for HAWB %s', hawb_id)
+        messages.error(request, f'Ошибка обновления СДЭК: {e}')
+        return redirect('hawb_detail', hawb_id=hawb_id)
+    if res is None:
+        messages.info(request, f'Заказ СДЭК для {hawb.hawb_number} не найден.')
+    elif res:
+        messages.success(request, f'Статус СДЭК обновлён: {hawb.cdek_status_display}')
+    else:
+        messages.info(request, 'Статус СДЭК уже актуален.')
+    return redirect('hawb_detail', hawb_id=hawb_id)
+
+
+@login_required
+@require_POST
 def cargo_send_alta_express(request, awb_number: str):
     from .services.alta import queue as alta_queue
     cargo = get_object_or_404(Cargo, awb_number=awb_number)
@@ -3204,6 +3310,54 @@ def api_alta_inbox_post(request):
 @api_view(['POST'])
 @permission_classes([])
 @authentication_classes([])
+def api_alta_inbox_missing(request):
+    """POST /api/v1/alta/inbox/missing/
+
+    Body (JSON):
+      envelope_ids: list[str]  — массив envelope_id из БД Альты
+
+    Returns:
+      missing: list[str] — те envelope_id что отсутствуют в AltaInboxMessage
+
+    Используется db_reconcile-потоком агента для сверки: что у нас нет —
+    то агент потом дотянет POST /api/v1/alta/inbox/. Дедуп на envelope_id
+    обеспечен уникальным индексом AltaInboxMessage.envelope_id.
+
+    Лимит на один запрос: 5000 envelope_id (чтобы IN-выборка SQLite не
+    распухала). Агент пусть чанкует.
+    """
+    if not _check_alta_inbox_token(request):
+        return Response({'detail': 'Unauthorized'}, status=401)
+
+    data = request.data if hasattr(request, 'data') else {}
+    envs = data.get('envelope_ids') or []
+    if not isinstance(envs, list):
+        return Response({'detail': 'envelope_ids must be a list'}, status=400)
+    envs = [str(e).strip() for e in envs if e]
+    if not envs:
+        return Response({'missing': []})
+    if len(envs) > 5000:
+        return Response(
+            {'detail': 'max 5000 envelope_ids per request'}, status=400)
+
+    from .models import AltaInboxMessage
+    # Case-insensitive дедуп. Берём из БД через IN — но envelopeid в Альте
+    # бывают и в lowercase и в UPPERCASE. У нас хранится как пришло, без
+    # нормализации. Делаем сравнение по lower.
+    envs_set = {e.lower() for e in envs}
+    existing = set(
+        AltaInboxMessage.objects.filter(envelope_id__in=envs)
+        .values_list('envelope_id', flat=True))
+    # Дополнительно проверим lowercase-варианты (на случай если в БД
+    # хранится в одном регистре, а агент шлёт в другом).
+    existing_lower = {e.lower() for e in existing}
+    missing = [e for e in envs if e.lower() not in existing_lower]
+    return Response({'missing': missing})
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
 def api_alta_outbox_post(request):
     """POST /api/v1/alta/outbox/ — наблюдение исходящей копии Альты.
 
@@ -3289,6 +3443,99 @@ def api_alta_outbox_post(request):
         'cargo_id': obs.cargo_id,
         'hawb_id': obs.hawb_id,
     })
+
+
+@api_view(['GET'])
+@permission_classes([])
+@authentication_classes([])
+def api_alta_agent_download(request):
+    """GET /api/v1/alta/agent/download/ — отдаёт текущий alta_agent.py.
+
+    Используется как self-update: на рабочей VPS скачиваем фиксированную версию,
+    кладём поверх C:\\ALTA\\IN\\alta_agent\\alta_agent.py и рестартим
+    scheduled task. Файл публичный (исходный код агента не секретный).
+    """
+    from pathlib import Path
+    from django.http import FileResponse, HttpResponse
+    p = Path(__file__).resolve().parent.parent / 'alta_agent' / 'alta_agent.py'
+    if not p.exists():
+        return HttpResponse('agent file missing', status=404)
+    return FileResponse(
+        open(p, 'rb'),
+        as_attachment=True,
+        filename='alta_agent.py',
+        content_type='text/x-python',
+    )
+
+
+# ── СДЭК (CDEK) webhook receiver ─────────────────────────────────────────────
+
+def _check_cdek_webhook_secret(secret: str) -> bool:
+    """Сверяет secret из пути с settings.CDEK_WEBHOOK_SECRET (constant-time)."""
+    import hmac
+    from django.conf import settings
+    expected = (getattr(settings, 'CDEK_WEBHOOK_SECRET', '') or '').strip()
+    if not expected:
+        return False
+    return hmac.compare_digest((secret or '').strip().encode(), expected.encode())
+
+
+def _cdek_ip_allowed(request) -> bool:
+    """Опциональный allowlist source-IP. Пусто → не проверяем."""
+    from django.conf import settings
+    allowed = getattr(settings, 'CDEK_WEBHOOK_ALLOWED_IPS', None) or []
+    if not allowed:
+        return True
+    candidates = set()
+    remote = request.META.get('REMOTE_ADDR')
+    if remote:
+        candidates.add(remote.strip())
+    xff = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    if xff:
+        candidates.add(xff.split(',')[0].strip())
+    return bool(candidates & set(allowed))
+
+
+@api_view(['POST'])
+@permission_classes([])
+@authentication_classes([])
+def cdek_webhook(request, secret: str):
+    """POST /api/v1/cdek/webhook/<secret>/ — приёмник вебхуков СДЭК ORDER_STATUS.
+
+    Защита: фича-гейт + неугадываемый secret в пути + опц. IP-allowlist +
+    авторитетный до-запрос по uuid в dispatch (у вебхука нет подписи).
+
+    ВСЕГДА возвращает 200 на валидный secret (даже на дубль/несматченное/
+    внутреннюю ошибку), чтобы СДЭК не уходил в retry-шторм. Пропущенные
+    апдейты подбирает reconcile-команда sync_cdek_statuses.
+    """
+    from django.conf import settings
+    from .services.cdek import webhook as cdek_webhook_svc
+
+    # Неверный secret / выключено — 404 (не раскрываем существование endpoint).
+    if not getattr(settings, 'CDEK_ENABLED', False):
+        return Response(status=404)
+    if not _check_cdek_webhook_secret(secret):
+        return Response(status=404)
+    if not _cdek_ip_allowed(request):
+        logger.warning('cdek webhook: IP %s не в allowlist',
+                       request.META.get('REMOTE_ADDR'))
+        return Response(status=404)
+
+    data = request.data if hasattr(request, 'data') else {}
+    parsed = cdek_webhook_svc.parse_payload(data)
+    if not parsed:
+        # Не ORDER_STATUS (например PRINT_FORM) или мусор — принимаем молча.
+        return Response({'ok': True, 'ignored': True})
+
+    try:
+        result = cdek_webhook_svc.dispatch(parsed)
+    except Exception:
+        logger.exception('cdek webhook dispatch failed for uuid=%s',
+                         parsed.get('uuid'))
+        return Response({'ok': False})
+
+    return Response({'ok': True, **result})
 
 
 # ── HAWB-виджеты (для entity_type='hawb') ────────────────────────────────────
