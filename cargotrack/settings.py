@@ -274,3 +274,12 @@ if IS_PROD:
     if not os.environ.get('DJANGO_SECRET_KEY'):
         from django.core.exceptions import ImproperlyConfigured
         raise ImproperlyConfigured('DJANGO_SECRET_KEY обязателен в prod')
+
+
+# ── Локальные настройки (НЕ в git): TELEGRAM_ALERT, DEKLARANT_ALERT_TELEGRAM,
+# и другие per-deploy секреты. Файл cargotrack/local_settings.py создаётся
+# вручную на VPS, в .gitignore.
+try:
+    from .local_settings import *  # noqa: F401,F403
+except ImportError:
+    pass

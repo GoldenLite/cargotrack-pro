@@ -61,3 +61,4 @@ alta_agent/alta_agent.ini
 
 # Сервисные credentials и любые секреты — только локально
 secrets/
+cargotrack/local_settings.py
