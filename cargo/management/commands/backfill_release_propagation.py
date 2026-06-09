@@ -58,10 +58,13 @@ class Command(BaseCommand):
         }
         self.stdout.write(f'Найдено ДТ с released HAWB: {len(decl_to_release)}')
 
-        # 2. Найти siblings с теми же decl но release_date IS NULL
+        # 2. Найти siblings с теми же decl но release_date IS NULL.
+        # ВАЖНО: исключаем ДТЭГ/ПТДЭГ — у них per-HAWB решения, нельзя
+        # пропагировать одно release_date на всех (см. feedback_multi_waybill_per_msg).
         siblings = (HouseWaybill.objects
                     .filter(customs_declaration_number__in=list(decl_to_release.keys()))
                     .filter(release_date__isnull=True)
+                    .exclude(declaration_form__in=('ДТЭГ', 'ПТДЭГ'))
                     .order_by('id'))
         if opts['limit']:
             siblings = siblings[:opts['limit']]

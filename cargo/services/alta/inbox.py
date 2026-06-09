@@ -978,27 +978,33 @@ def apply_status(msg: AltaInboxMessage,
                 targets.extend(extra)
 
     # Шаг 3.5: пропагация на siblings с тем же customs_declaration_number
-    # ВНЕ зависимости от cargo (ДТЭГ может покрывать HAWB разных партий,
-    # или HAWB вообще без cargo — типично для EXPORT). raw_xml CMN.11350
-    # release часто КРАТКИЙ — не перечисляет HAWB, только декл.номер.
-    # Шаг 3 их пропускал → siblings оставались с release_date=None и
-    # ed_status='Присвоен номер' (баг от 09.06.2026 с ДТЭГ
-    # 10132220/050626/0020400, см. memory project_release_propagation).
-    # Жёсткий якорь — customs_declaration_number === тот же выпуск.
+    # ТОЛЬКО для классической ДТ (НЕ ДТЭГ/ПТДЭГ).
+    #
+    # ВАЖНО: ДТЭГ/ПТДЭГ — это per-HAWB решения таможни. Одна декларация
+    # покрывает несколько HAWB, но решение по КАЖДОЙ отдельное: одна
+    # выпущена, другая отказ, третья на досмотр. ПРОПАГИРОВАТЬ ОДИН
+    # release_date НА ВСЕХ siblings ДТЭГ — ОШИБКА (юзер указал 09.06.2026,
+    # см. feedback_multi_waybill_per_msg + project_release_propagation).
+    #
+    # Классическая ДТ (CMN.11023/11024) — одна декларация на одну партию,
+    # одно решение покрывает всех HAWB. Здесь пропагация корректна.
     if hawb and kind in ('released', 'rejected', 'examination', 'hold'):
+        decl_form = (hawb.declaration_form or '').strip().upper()
+        is_dteg = decl_form in ('ДТЭГ', 'ПТДЭГ')
         decl = (hawb.customs_declaration_number or '').strip()
-        if decl:
+        if decl and not is_dteg:
             existing_ids = {h.pk for h in targets}
             siblings = HouseWaybill.objects.filter(
                 customs_declaration_number=decl,
-            ).exclude(pk__in=existing_ids)
+            ).exclude(pk__in=existing_ids).exclude(
+                declaration_form__in=('ДТЭГ', 'ПТДЭГ'))  # двойная защита
             sibling_list = list(siblings)
             if sibling_list:
                 targets.extend(sibling_list)
                 logger.info(
                     'apply_status: пропагация %s на %d siblings ДТ=%s '
-                    '(matched=%s)', kind, len(sibling_list), decl,
-                    hawb.hawb_number)
+                    '(matched=%s, form=%s)', kind, len(sibling_list),
+                    decl, hawb.hawb_number, decl_form)
 
     # Pre-customs logistics states: HAWB ещё не дошёл до таможни в нашей логике.
     # Если CMN-выпуск приходит на такой HAWB — авто-бампим в IMPORT/EXPORT_CUSTOMS
