@@ -1579,6 +1579,35 @@ def api_health(request):
 
 
 @csrf_exempt
+@api_view(['GET'])
+@permission_classes([])
+@authentication_classes([])
+def api_status_text(request):
+    """GET /api/v1/status/text/?key=... — collect_status() как plain text.
+
+    Используется telegram_poll.py (standalone bot-клиент на ноуте юзера),
+    т.к. VPS-провайдер блокирует outbound к api.telegram.org. Бот сам
+    бегает к Telegram (с ноута оно работает) и за статусом ходит сюда.
+
+    Авторизация: ?key=<secret> из settings.STATUS_API_KEY (или TELEGRAM_ALERT.chat_id
+    как fallback shared secret).
+    """
+    from django.conf import settings
+    from django.http import HttpResponse
+    expected = (getattr(settings, 'STATUS_API_KEY', None)
+                or (getattr(settings, 'TELEGRAM_ALERT', None) or {}).get('chat_id', ''))
+    given = request.GET.get('key', '')
+    if not expected or str(given) != str(expected):
+        return HttpResponse('forbidden', status=403, content_type='text/plain')
+    try:
+        from cargo.services.notify.status import collect_status
+        return HttpResponse(collect_status(), content_type='text/plain; charset=utf-8')
+    except Exception as e:
+        return HttpResponse(f'collect_status error: {e}', status=500,
+                            content_type='text/plain; charset=utf-8')
+
+
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([])
 @authentication_classes([])

@@ -5,6 +5,7 @@ urlpatterns = [
     # ── REST API v1 ──
     path('api/v1/health/', views.api_health, name='api_health'),
     path('api/v1/telegram/webhook/', views.api_telegram_webhook, name='api_telegram_webhook'),
+    path('api/v1/status/text/', views.api_status_text, name='api_status_text'),
     path('api/v1/cargo/', views.CargoListAPIView.as_view(), name='api_cargo_list'),
     path('api/v1/cargo/<str:awb_number>/', views.CargoDetailAPIView.as_view(), name='api_cargo_detail'),
     path('api/v1/hawbs/', views.HawbListAPIView.as_view(), name='api_hawb_list'),
