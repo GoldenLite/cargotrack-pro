@@ -70,7 +70,22 @@ class Command(BaseCommand):
                 n_obs_no_parsed += 1
                 continue
             if not parsed['is_export']:
+                # IMPORT-ветка: только goods_count для существующих HAWB.
                 n_obs_skipped_not_export += 1
+                for hawb_num in (parsed.get('hawbs') or []):
+                    h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_num).first()
+                    if not h:
+                        continue
+                    per_hawb_count = (parsed.get('goods_count_per_hawb', {}).get(hawb_num)
+                                      or parsed.get('goods_count') or 0)
+                    if not per_hawb_count:
+                        continue
+                    if h.goods_count == per_hawb_count:
+                        continue
+                    if not opts['dry_run']:
+                        HouseWaybill.objects.filter(pk=h.pk).update(goods_count=per_hawb_count)
+                    affected_hawb_ids.add(h.pk)
+                    n_fields_updated += 1
                 continue
             n_obs_processed += 1
             decl_form = _DECL_FORM_BY_MSG_TYPE.get(obs.msg_type, '')
@@ -138,5 +153,16 @@ class Command(BaseCommand):
 
         self.stdout.write(f'Запускаю Sheets writeback для {len(affected_hawb_ids)} HAWB...')
         hawbs = list(HouseWaybill.objects.filter(pk__in=affected_hawb_ids))
-        _writeback_export_hawbs(hawbs)
+        export_hawbs = [h for h in hawbs if h.shipment_type == 'EXPORT']
+        import_hawbs = [h for h in hawbs if h.shipment_type == 'IMPORT']
+        if export_hawbs:
+            self.stdout.write(f'  EXPORT writeback: {len(export_hawbs)}')
+            _writeback_export_hawbs(export_hawbs)
+        if import_hawbs:
+            self.stdout.write(f'  IMPORT goods_count writeback: {len(import_hawbs)}')
+            try:
+                from cargo.services.sheets.writeback import batch_write_goods_count_for_hawbs
+                batch_write_goods_count_for_hawbs(import_hawbs)
+            except Exception:
+                logger.exception('IMPORT goods_count writeback failed')
         self.stdout.write(self.style.SUCCESS('Backfill done.'))

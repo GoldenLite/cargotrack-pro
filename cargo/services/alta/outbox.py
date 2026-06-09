@@ -649,6 +649,38 @@ def _ensure_export_hawb(hawb_number: str, cargo: Optional[Cargo]
     return h
 
 
+def _apply_import_goods_count(obs: AltaOutboxObservation, parsed: dict) -> None:
+    """IMPORT-ветка: UPDATE goods_count для существующих HAWB без auto-create.
+
+    Источники: CMN.11023, CMN.11024, CMN.11349 с CustomsProcedure/
+    DeclarationKindCode != 'ЭК'. parsed уже посчитан _parse_export_obs.
+    """
+    affected: list[HouseWaybill] = []
+    for hawb_num in parsed.get('hawbs') or []:
+        h = HouseWaybill.objects.filter(hawb_number__iexact=hawb_num).first()
+        if not h:
+            continue  # auto-create НЕ делаем для IMPORT
+        per_hawb_count = (parsed.get('goods_count_per_hawb', {}).get(hawb_num)
+                          or parsed.get('goods_count') or 0)
+        if not per_hawb_count:
+            continue
+        if h.goods_count and h.goods_count == per_hawb_count:
+            continue  # идемпотент
+        HouseWaybill.objects.filter(pk=h.pk).update(goods_count=per_hawb_count)
+        h.refresh_from_db(fields=['goods_count'])
+        affected.append(h)
+    if not affected:
+        return
+    logger.info('%s ИМ: applied goods_count to %d IMPORT HAWBs',
+                obs.msg_type, len(affected))
+    # Sheets «Общее» writeback — только колонка «Количество позиций».
+    try:
+        from cargo.services.sheets.writeback import batch_write_goods_count_for_hawbs
+        batch_write_goods_count_for_hawbs(affected)
+    except Exception:
+        logger.exception('import goods_count writeback failed')
+
+
 def _apply_export_outbox(obs: AltaOutboxObservation) -> None:
     """Обработка одного экспортного outbox-сообщения (CMN.11335/11349/11024).
 
@@ -664,7 +696,13 @@ def _apply_export_outbox(obs: AltaOutboxObservation) -> None:
     if not parsed:
         return  # raw_xml нет или unknown msg_type
     if not parsed['is_export']:
-        return  # ЭК не подтверждён — это импортное сообщение, не наш case
+        # IMPORT-ветка: обновляем ТОЛЬКО goods_count для существующих HAWB.
+        # НЕ создаём Cargo, НЕ ставим declaration_form='ДТ', НЕ трогаем
+        # declarant_name (для IMPORT эти поля приходят из своих путей).
+        # Закрывает gap 96% IMPORT HAWB без goods_count
+        # (см. project_goods_count_import_gap memory).
+        _apply_import_goods_count(obs, parsed)
+        return
 
     decl_form = _DECL_FORM_BY_MSG_TYPE.get(obs.msg_type, '')
     signatory = (parsed.get('signatory') or '').strip()

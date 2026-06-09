@@ -29,6 +29,17 @@ from .client import SheetsConfigError, open_worksheet
 
 logger = logging.getLogger('cargo.sheets.writeback')
 
+
+def _sheets_writeback_disabled() -> bool:
+    """Process-wide kill-switch для всех writeback-функций. Включается env
+    SHEETS_WRITEBACK_DISABLED=1 на время backfill, чтобы не триггерить
+    Google Sheets API. signals_suppressed() (thread-local) для этой цели
+    не подходит — daemon-треды стартуют с пустым TLS."""
+    import os
+    return os.environ.get('SHEETS_WRITEBACK_DISABLED', '').strip().lower() \
+        in ('1', 'true', 'yes', 'on')
+
+
 # ── Подавление сигналов writeback во время batch-операций ────────────
 # Когда apply_status в inbox.py обрабатывает multi-waybill релиз (49 HAWB
 # одной декларации), 49 × change_customs_status() = 49 post_save сигналов,
@@ -216,6 +227,8 @@ def _ensure_export_row(hawb: HouseWaybill) -> Optional[tuple[SheetSource, int]]:
     одного waitress-процесса) обе read'или ImportedSheetRow=None ДО append,
     затем оба делали append и получали 2 строки в Sheets для одной HAWB.
     """
+    if _sheets_writeback_disabled():
+        return None
     if not hawb.hawb_number:
         return None
     src = _get_export_source()
@@ -336,6 +349,8 @@ def ensure_export_rows_for_hawbs(hawbs: list) -> int:
 
     Возвращает кол-во HAWB которые получили строку (новую или существующую).
     """
+    if _sheets_writeback_disabled():
+        return 0
     exp = [h for h in hawbs
            if _kind_for_hawb(h) == 'export' and h.hawb_number]
     if not exp:
@@ -615,6 +630,8 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
 
     Возвращает кол-во записанных ячеек (для логирования).
     """
+    if _sheets_writeback_disabled():
+        return 0
     lic = (cargo.warehouse_license or '').strip()
     placed_dt = cargo.scan_into_bond
     do1_reg = (cargo.svh_do1_reg_number or '').strip()
@@ -731,6 +748,8 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
 
     Возвращает кол-во записанных ячеек.
     """
+    if _sheets_writeback_disabled():
+        return 0
     if not cargos:
         return 0
 
@@ -917,6 +936,8 @@ def _write_hawb_date(hawb: HouseWaybill, value, header_name: str,
     `export_header_name` (если задан — иначе пропускаем). Для импортных HAWB —
     `header_name` в kind='general'.
     """
+    if _sheets_writeback_disabled():
+        return False
     if not value:
         return False
 
@@ -979,6 +1000,8 @@ def write_filed_date_for_hawb(hawb: HouseWaybill) -> bool:
     Импорт → «CargoTrack: дата подачи» в «Общее».
     Экспорт → «Дата подачи» в «Экспортная статистика».
     """
+    if _sheets_writeback_disabled():
+        return False
     return _write_hawb_date(hawb, hawb.filed_date,
                             CARGOTRACK_FILED_DATE_HEADER, 'filed_date',
                             export_header_name=EXPORT_FILED_DATE_HEADER)
@@ -990,6 +1013,8 @@ def write_release_date_for_hawb(hawb: HouseWaybill) -> bool:
     Импортная HAWB → «CargoTrack: дата выпуска» в «Общее».
     Экспортная HAWB → «Дата выпуска» в «Экспортная статистика».
     """
+    if _sheets_writeback_disabled():
+        return False
     return _write_hawb_date(hawb, hawb.release_date,
                             CARGOTRACK_RELEASE_DATE_HEADER, 'release_date',
                             export_header_name=EXPORT_RELEASE_DATE_HEADER)
@@ -1019,6 +1044,8 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
     идут в kind='export', импортные — в kind='general'. Явное значение
     источника заставит ВСЕ HAWB искаться только в этом kind.
     """
+    if _sheets_writeback_disabled():
+        return 0
     if formatter is None:
         formatter = _local_date_str
     if not hawbs:
@@ -1177,7 +1204,19 @@ def _chunked_batch_update(ws, updates: list, log_label: str,
             try:
                 # RAW — Sheets хранит наши строки буквально (см. комментарий
                 # выше про USER_ENTERED и формат даты).
-                ws.batch_update(chunk, value_input_option='RAW')
+                # ВАЖНО: gspread.Worksheet.batch_update мутирует входные dict'ы
+                # in-place (range = absolute_range_name(title, range), см.
+                # worksheet.py:1357-1358). При retry на 503/429 второй вызов
+                # получит уже префиксированный range и добавит ещё один префикс:
+                # 'Tab'!A1 → 'Tab'!'Tab'!A1 → 'Tab'!'Tab'!'Tab'!A1 → 400 Invalid
+                # range. Передаём свежие копии каждый раз, чтобы исходный
+                # updates не портился между attempt'ами.
+                payload = [{'range': u['range'], 'values': u['values']}
+                           for u in chunk]
+                # USER_ENTERED (вместо RAW): Sheets парсит типы — "1" → число,
+                # "02.06.2026" → дата. Иначе все числа лежат как текст с
+                # префиксом ', нельзя SUM/AVG. Юзер заметил 09.06.2026.
+                ws.batch_update(payload, value_input_option='USER_ENTERED')
                 wrote += len(chunk)
                 logger.info('batch %s: wrote %d cells in %s (chunk %d/%d)',
                             log_label, len(chunk), source_name,
@@ -1205,6 +1244,8 @@ def batch_write_filed_dates_for_hawbs(hawbs: list) -> int:
 
     Для EXPORT-HAWB пишет в «Дата подачи» export-вкладки.
     """
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, 'filed_date',
         CARGOTRACK_FILED_DATE_HEADER, 'filed_date',
@@ -1216,6 +1257,8 @@ def batch_write_release_dates_for_hawbs(hawbs: list) -> int:
 
     Для EXPORT-HAWB пишет в «Дата выпуска» export-вкладки.
     """
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, 'release_date',
         CARGOTRACK_RELEASE_DATE_HEADER, 'release_date',
@@ -1255,6 +1298,8 @@ def _format_int(value) -> str:
 
 def batch_write_svh_do1_weight_for_hawbs(hawbs: list) -> int:
     """Batch writeback svh_do1_gross_weight в Sheets «вес ДО1»."""
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, 'svh_do1_gross_weight',
         CARGOTRACK_SVH_DO1_WEIGHT_HEADER, 'svh_do1_weight',
@@ -1265,6 +1310,8 @@ def batch_write_svh_do1_weight_for_hawbs(hawbs: list) -> int:
 
 def batch_write_svh_do1_places_for_hawbs(hawbs: list) -> int:
     """Batch writeback svh_do1_place_count в Sheets «мест ДО1»."""
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, 'svh_do1_place_count',
         CARGOTRACK_SVH_DO1_PLACES_HEADER, 'svh_do1_places',
@@ -1281,6 +1328,8 @@ def batch_write_goods_count_for_hawbs(hawbs: list) -> int:
     дата выпуска | ... . При повторных вызовах позиция берётся из шапки
     (юзер может потом её передвинуть — мы найдём по имени).
     """
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, 'goods_count',
         CARGOTRACK_GOODS_COUNT_HEADER, 'goods_count',
@@ -1303,8 +1352,13 @@ def _customs_requests_text(hawb) -> str:
 
     Группировка по дате (МСК), сортировка по времени внутри.
     """
+    # Сортировка с явным tie-break: внутри одной пачки (envelope_id) таможня
+    # дробит длинный текст на N запросов с одинаковым request_dt_msk и
+    # последовательным request_position. Без вторичных ключей SQLite на
+    # B-tree даёт reverse-id и текст склеивается в обратном порядке.
     requests = list(hawb.customs_requests.filter(
-        request_dt_msk__isnull=False).order_by('request_dt_msk'))
+        request_dt_msk__isnull=False).order_by(
+            'request_dt_msk', 'envelope_id', 'request_position', 'received_at'))
     if not requests:
         return ''
     from collections import OrderedDict
@@ -1333,6 +1387,8 @@ def _customs_requests_count(hawb) -> str:
 
 def batch_write_customs_requests_for_hawbs(hawbs: list) -> int:
     """Batch writeback колонки «Запросы таможни» (полный текст, multi-line)."""
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, '__customs_requests__',
         CARGOTRACK_CUSTOMS_REQUESTS_HEADER, 'customs_requests',
@@ -1344,6 +1400,8 @@ def batch_write_customs_requests_for_hawbs(hawbs: list) -> int:
 
 def batch_write_customs_requests_count_for_hawbs(hawbs: list) -> int:
     """Batch writeback колонки «Количество запросов»."""
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, '__customs_requests_count__',
         CARGOTRACK_CUSTOMS_REQUESTS_COUNT_HEADER, 'customs_requests_count',
@@ -1362,6 +1420,8 @@ def _attempts_count(hawb) -> str:
 
 def batch_write_attempts_count_for_hawbs(hawbs: list) -> int:
     """Batch writeback колонки «Переподачи»."""
+    if _sheets_writeback_disabled():
+        return 0
     return _batch_write_hawb_dates(
         hawbs, '__attempts_count__',
         CARGOTRACK_ATTEMPTS_COUNT_HEADER, 'attempts_count',
@@ -1388,6 +1448,8 @@ def batch_write_transport_doc_for_hawbs(hawbs: list) -> int:
     Для импортных HAWB пропускаем (для них «номер партии» уже пишет
     batch_write_cargo_mawb_for_hawbs в свою колонку).
     """
+    if _sheets_writeback_disabled():
+        return 0
     exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
     if not exp:
         return 0
@@ -1404,6 +1466,8 @@ def batch_write_declaration_form_for_hawbs(hawbs: list) -> int:
     """Batch writeback HAWB.declaration_form (ПТДЭГ/ДТЭГ/ДТ) в «Тип декларации» —
     только в export-вкладке.
     """
+    if _sheets_writeback_disabled():
+        return 0
     exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
     if not exp:
         return 0
@@ -1424,6 +1488,8 @@ def batch_write_declarant_for_hawbs(hawbs: list) -> int:
     Это позволяет юзеру вручную вписать ФИО для legacy-кейсов (когда
     raw_xml не пришёл) без риска что наш writeback его сотрёт.
     """
+    if _sheets_writeback_disabled():
+        return 0
     exp = [h for h in hawbs if _kind_for_hawb(h) == 'export'
            and (h.declarant_name or '').strip()]
     if not exp:
@@ -1450,6 +1516,8 @@ def batch_write_ed_status_for_hawbs(hawbs: list) -> int:
     Auto-routing: импортные HAWB → колонка «CargoTrack: статус ЭД» в
     таблице «Общее»; экспортные → «Статус ЭД» в «Экспортной статистике».
     """
+    if _sheets_writeback_disabled():
+        return 0
     if not hawbs:
         return 0
     imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
@@ -1488,6 +1556,8 @@ def _apply_ed_status_colors(hawbs: list) -> None:
     CARGOTRACK_ED_STATUS_HEADER в kind='general' (фон строки не трогаем,
     юзер сам формат держит).
     """
+    if _sheets_writeback_disabled():
+        return
     if not hawbs:
         return
     imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
@@ -1639,6 +1709,8 @@ LEGACY_HEADER_RENAMES = {
 
 def rename_legacy_headers() -> int:
     """Переименовывает заголовки на месте — сохраняет данные в столбце."""
+    if _sheets_writeback_disabled():
+        return 0
     if not LEGACY_HEADER_RENAMES:
         return 0
     total = 0
@@ -1695,6 +1767,8 @@ def drop_deprecated_columns() -> int:
     Идемпотентно — если колонки нет, ничего не делает. Возвращает кол-во
     удалённых колонок (для логирования в reparse).
     """
+    if _sheets_writeback_disabled():
+        return 0
     if not DEPRECATED_COLUMN_HEADERS:
         return 0
     sources = SheetSource.objects.filter(kind='general')
@@ -1750,6 +1824,8 @@ def batch_write_declarations_for_hawbs(hawbs: list, source_kind=None) -> int:
     (колонка «CargoTrack: ДТ»), экспортные — в kind='export' (колонка
     «Регистрационный номер ДТ» без префикса).
     """
+    if _sheets_writeback_disabled():
+        return 0
     if not hawbs:
         return 0
 
@@ -1846,6 +1922,8 @@ def write_declaration(hawb: HouseWaybill) -> bool:
     Возвращает True если что-то реально записали; False если no-op / нечего писать /
     ошибка. Никогда не падает — Exception ловятся и логируются.
     """
+    if _sheets_writeback_disabled():
+        return False
     decl = (hawb.customs_declaration_number or '').strip()
     if not decl:
         return False  # нечего писать
