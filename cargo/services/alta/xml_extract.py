@@ -653,6 +653,7 @@ def parse_do1_report(xml_text: str) -> dict:
         'mawb':          '',
         'hawbs':         [],
         'goods':         {},
+        'goods_count_per_hawb': {},  # per-HAWB N товарных позиций (для CT goods_count)
     }
     # MAWB — отдельный блок <MasterAirWayBill> без code
     m_awb = _MASTER_AWB_BLOCK_RE.search(xml_text)
@@ -690,6 +691,10 @@ def parse_do1_report(xml_text: str) -> dict:
         if cp:
             places_str = _first(cp.group(1), 'PlaceNumber').strip()
 
+        # Каждый <Goods> блок = 1 товарная позиция (несколько Goods на
+        # одну HAWB — несколько позиций декларации).
+        out['goods_count_per_hawb'][hawb] = (
+            out['goods_count_per_hawb'].get(hawb, 0) + 1)
         entry = out['goods'].setdefault(hawb, {'weight': Decimal('0'), 'places': 0})
         if weight_str:
             try:

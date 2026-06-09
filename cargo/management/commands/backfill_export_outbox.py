@@ -49,7 +49,8 @@ class Command(BaseCommand):
         days = opts['days']
         cutoff = timezone.now() - datetime.timedelta(days=days)
         qs = (AltaOutboxObservation.objects
-              .filter(msg_type__in=['CMN.11335','CMN.11349','CMN.11024'])
+              .filter(msg_type__in=['CMN.11335','CMN.11349','CMN.11024',
+                                    'CMN.11023','ED.DO1'])
               .filter(prepared_at__gte=cutoff)
               .order_by('-prepared_at'))
         total = qs.count()

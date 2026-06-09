@@ -556,6 +556,7 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
 
     from cargo.services.alta.xml_extract import (
         parse_cmn_11335, parse_cmn_11024, parse_cmn_11349_meta,
+        parse_do1_report,
     )
     if obs.msg_type == 'CMN.11335':
         r = parse_cmn_11335(raw_xml)
@@ -576,6 +577,19 @@ def _parse_export_obs(obs: AltaOutboxObservation) -> Optional[dict]:
             'goods_count_per_hawb': r['goods_count_per_hawb'],
             'goods_count':          0,
             'signatory':            r.get('signatory') or '',
+        }
+    if obs.msg_type == 'ED.DO1':
+        # ЦЭД-маршрут: исходящий ED.DO1 (наша регистрация на СВХ). Содержит
+        # per-HAWB Goods-блоки — каждый = 1 позиция декларации. Только IMPORT
+        # (ЦЭД-режим). goods_count_per_hawb сразу подаём в IMPORT-ветку.
+        r = parse_do1_report(raw_xml)
+        return {
+            'is_export':            False,
+            'hawbs':                r.get('hawbs') or [],
+            'transport_per_hawb':   {},
+            'goods_count_per_hawb': r.get('goods_count_per_hawb') or {},
+            'goods_count':          0,
+            'signatory':            '',
         }
     if obs.msg_type in ('CMN.11024', 'CMN.11023'):
         # CMN.11023 и CMN.11024 — обе на основе ESADout_CU. Парсер один.
