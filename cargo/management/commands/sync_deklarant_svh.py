@@ -56,6 +56,61 @@ LOCK_PATH = os.path.join(os.path.abspath(LOCK_DIR), 'sync_deklarant_svh.lock')
 LOCK_STALE_AFTER_SEC = 30 * 60
 
 
+def _alert_session_dead(reason: str) -> None:
+    """Алертит когда DeklarantSession помечается мёртвой.
+
+    Канал: settings.DEKLARANT_ALERT_TELEGRAM = {'bot_token': '...', 'chat_id': '...'}
+    Если в settings нет — тихо проходим (без падения). Django ERROR в логе пишется
+    в любом случае.
+
+    Это нужно чтобы юзер не ждал 3 дня как с протуханием 05.06→08.06.
+    """
+    logger.error('DEKLARANT SESSION DEAD: %s — нужен новый QR-логин', reason)
+    cfg = getattr(settings, 'DEKLARANT_ALERT_TELEGRAM', None)
+    if not cfg or not cfg.get('bot_token') or not cfg.get('chat_id'):
+        return
+    try:
+        import requests
+        msg = (f'⚠ CargoTrack: DeklarantSession DEAD\n\n'
+               f'Причина: {reason}\n\n'
+               f'Действие: ssh на VPS → manage.py deklarant_login → QR на телефоне.')
+        requests.post(
+            f'https://api.telegram.org/bot{cfg["bot_token"]}/sendMessage',
+            data={'chat_id': cfg['chat_id'], 'text': msg},
+            timeout=10,
+        )
+    except Exception:
+        logger.exception('DEKLARANT alert telegram failed (non-fatal)')
+
+
+def _heartbeat_session() -> bool:
+    """Дёшевый ping для поддержания TTL Декларант-сессии.
+
+    Вызывается когда candidates == 0 (иначе loop ниже сам обновляет last_used_at
+    на стороне Декларанта через fetch'и). Без heartbeat'а в тихие дни сессия
+    могла протухать от inactivity TTL.
+
+    Если session_ok() возвращает False — алертим и mark_dead.
+    """
+    session = DeklarantSession.get_active()
+    if not session:
+        return False
+    try:
+        with DeklarantClient.from_db() as probe:
+            if not probe:
+                return False
+            ok = probe.session_ok()
+            if not ok:
+                session.mark_dead('heartbeat: session_ok() == False')
+                _alert_session_dead('heartbeat: session_ok() == False')
+                return False
+            logger.info('deklarant heartbeat OK (TTL refreshed)')
+            return True
+    except Exception as e:
+        logger.warning('deklarant heartbeat probe failed: %s', e)
+        return False
+
+
 def _acquire_lock() -> bool:
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
     if os.path.exists(LOCK_PATH):
@@ -158,6 +213,8 @@ class Command(BaseCommand):
             return
 
         if not candidates:
+            # Heartbeat — даже без работы дёргаем session_ok чтобы держать TTL.
+            _heartbeat_session()
             return
 
         # 4. Сетевой санити: дешёвый session_ok ДО первого fetch.
@@ -169,6 +226,7 @@ class Command(BaseCommand):
                     return
                 if not probe.session_ok():
                     session.mark_dead('session_ok() returned False at sync start')
+                    _alert_session_dead('session_ok() returned False at sync start')
                     self.stdout.write(self.style.ERROR(
                         'session_ok() == False. Сессия помечена мёртвой. '
                         'Нужен новый QR-логин.'))
@@ -200,6 +258,7 @@ class Command(BaseCommand):
                     except DeklarantAuthError as e:
                         n_auth_error += 1
                         session.mark_dead(f'sync_deklarant_svh: {e}')
+                        _alert_session_dead(f'DeklarantAuthError on {cargo.awb_number}: {e}')
                         self.stdout.write(self.style.ERROR(
                             f'  {cargo.awb_number}: DeklarantAuthError, '
                             f'сессия помечена мёртвой. Abort loop.'))
