@@ -51,7 +51,7 @@ class Command(BaseCommand):
         qs = (AltaOutboxObservation.objects
               .filter(msg_type__in=['CMN.11335','CMN.11349','CMN.11024'])
               .filter(prepared_at__gte=cutoff)
-              .order_by('prepared_at'))
+              .order_by('-prepared_at'))
         total = qs.count()
         if opts['limit']:
             qs = qs[:opts['limit']]
