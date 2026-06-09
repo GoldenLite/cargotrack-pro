@@ -60,14 +60,18 @@ def collect_status() -> str:
     lines.append(f'   {_pick_emoji(out_sec, 1800, 7200)} Outbox: {out_txt} назад')
     lines.append('')
 
-    # Deklarant
+    # Deklarant — эмодзи по is_active (last_used_at touch'ится только при
+    # non-empty ответе, аккаунт l.andrei видит только свои заказы, всегда
+    # empty → last_used_at не обновляется при штатной работе).
     ds = DeklarantSession.objects.filter(is_active=True).order_by('-created_at').first()
     if ds:
-        used_txt, used_sec = _ago(ds.last_used_at)
-        emoji = _pick_emoji(used_sec, 86400, 86400 * 3)
-        lines.append(f'{emoji} *Deklarant Plus*')
+        created_txt, _ = _ago(ds.created_at)
+        lines.append(f'🟢 *Deklarant Plus*')
         lines.append(f'   Session id={ds.id} login={ds.login}')
-        lines.append(f'   Last used: {used_txt} назад')
+        lines.append(f'   Создана: {created_txt} назад')
+        if ds.last_used_at:
+            used_txt, _ = _ago(ds.last_used_at)
+            lines.append(f'   Last used: {used_txt} назад')
     else:
         lines.append(f'🔴 *Deklarant Plus* — нет активной сессии (нужен deklarant_login)')
     lines.append('')
