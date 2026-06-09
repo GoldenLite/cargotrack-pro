@@ -81,17 +81,15 @@ def collect_status() -> str:
     lines.append(f'   Последний row imported: {imp_txt} назад')
     lines.append('')
 
-    # Orphan / Unapplied
+    # Orphan / Unapplied — лимит окно 24ч чтобы запрос не делал full scan
+    # на 100k+ AltaInboxMessage (без индекса count()'ы SQLite секунды жуют).
+    cutoff_24h = timezone.now() - datetime.timedelta(hours=24)
     orph = AltaInboxMessage.objects.filter(
+        received_at__gte=cutoff_24h,
         status_applied=False, cargo__isnull=True, hawb__isnull=True).count()
-    unap = AltaInboxMessage.objects.filter(status_applied=False).count()
-    lines.append(f'{_pick_emoji(orph, 10, 100)} *Inbox orphan* (без match): {orph}')
-    lines.append(f'{_pick_emoji(unap, 10, 100)} *Inbox unapplied*: {unap}')
-    lines.append('')
-
-    # Totals
-    n_cargo = Cargo.objects.count()
-    n_hawb = HouseWaybill.objects.count()
-    lines.append(f'📦 Cargo: {n_cargo}  •  HAWB: {n_hawb}')
+    unap = AltaInboxMessage.objects.filter(
+        received_at__gte=cutoff_24h, status_applied=False).count()
+    lines.append(f'{_pick_emoji(orph, 10, 100)} *Inbox orphan 24ч*: {orph}')
+    lines.append(f'{_pick_emoji(unap, 10, 100)} *Inbox unapplied 24ч*: {unap}')
 
     return '\n'.join(lines)
