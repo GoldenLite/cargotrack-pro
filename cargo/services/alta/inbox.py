@@ -977,34 +977,15 @@ def apply_status(msg: AltaInboxMessage,
             if extra:
                 targets.extend(extra)
 
-    # Шаг 3.5: пропагация на siblings с тем же customs_declaration_number
-    # ТОЛЬКО для классической ДТ (НЕ ДТЭГ/ПТДЭГ).
-    #
-    # ВАЖНО: ДТЭГ/ПТДЭГ — это per-HAWB решения таможни. Одна декларация
-    # покрывает несколько HAWB, но решение по КАЖДОЙ отдельное: одна
-    # выпущена, другая отказ, третья на досмотр. ПРОПАГИРОВАТЬ ОДИН
-    # release_date НА ВСЕХ siblings ДТЭГ — ОШИБКА (юзер указал 09.06.2026,
-    # см. feedback_multi_waybill_per_msg + project_release_propagation).
-    #
-    # Классическая ДТ (CMN.11023/11024) — одна декларация на одну партию,
-    # одно решение покрывает всех HAWB. Здесь пропагация корректна.
-    if hawb and kind in ('released', 'rejected', 'examination', 'hold'):
-        decl_form = (hawb.declaration_form or '').strip().upper()
-        is_dteg = decl_form in ('ДТЭГ', 'ПТДЭГ')
-        decl = (hawb.customs_declaration_number or '').strip()
-        if decl and not is_dteg:
-            existing_ids = {h.pk for h in targets}
-            siblings = HouseWaybill.objects.filter(
-                customs_declaration_number=decl,
-            ).exclude(pk__in=existing_ids).exclude(
-                declaration_form__in=('ДТЭГ', 'ПТДЭГ'))  # двойная защита
-            sibling_list = list(siblings)
-            if sibling_list:
-                targets.extend(sibling_list)
-                logger.info(
-                    'apply_status: пропагация %s на %d siblings ДТ=%s '
-                    '(matched=%s, form=%s)', kind, len(sibling_list),
-                    decl, hawb.hawb_number, decl_form)
+    # ВНИМАНИЕ: пропагация release/rejected на siblings по
+    # customs_declaration_number — ЗАПРЕЩЕНА. ДТЭГ/ПТДЭГ имеют per-HAWB
+    # решения через consignment-блоки CMN-сообщения (DecisionCode 10=выпуск,
+    # 90=отказ, 70=продление), которые корректно обрабатывает
+    # apply_consignment_decisions. Классическая ДТ тоже строго per-HAWB —
+    # каждое CMN.11350 содержит свой раздел Consignment с собственным
+    # DecisionCode. Не нужно "помогать" таможне расширяя её решения на
+    # другие HAWB.
+    # См. memory feedback_multi_waybill_per_msg + project_release_propagation.
 
     # Pre-customs logistics states: HAWB ещё не дошёл до таможни в нашей логике.
     # Если CMN-выпуск приходит на такой HAWB — авто-бампим в IMPORT/EXPORT_CUSTOMS
