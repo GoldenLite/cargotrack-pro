@@ -1503,6 +1503,7 @@ def goods_approve(request):
 
 from rest_framework import generics, filters
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from .serializers import CargoListSerializer, CargoDetailSerializer, HouseWaybillSerializer
@@ -1577,8 +1578,10 @@ def api_health(request):
     })
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([])
+@authentication_classes([])
 def api_telegram_webhook(request):
     """POST /api/v1/telegram/webhook/ — приём update от Telegram bot API.
 
