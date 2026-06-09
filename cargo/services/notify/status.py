@@ -55,10 +55,9 @@ def collect_status() -> str:
         'prepared_at', flat=True).first()
     in_txt, in_sec = _ago(last_in)
     out_txt, out_sec = _ago(last_out)
-    worst = max(in_sec, out_sec)
-    lines.append(f'{_pick_emoji(worst, 300, 1800)} *Alta agent*')
-    lines.append(f'   Inbox последний: {in_txt} назад')
-    lines.append(f'   Outbox последний: {out_txt} назад')
+    lines.append(f'*Alta agent*')
+    lines.append(f'   {_pick_emoji(in_sec, 300, 1800)} Inbox: {in_txt} назад')
+    lines.append(f'   {_pick_emoji(out_sec, 1800, 7200)} Outbox: {out_txt} назад')
     lines.append('')
 
     # Deklarant
@@ -81,15 +80,19 @@ def collect_status() -> str:
     lines.append(f'   Последний row imported: {imp_txt} назад')
     lines.append('')
 
-    # Orphan / Unapplied — лимит окно 24ч чтобы запрос не делал full scan
-    # на 100k+ AltaInboxMessage (без индекса count()'ы SQLite секунды жуют).
+    # Orphan / Unapplied — за 24ч + исключаем технические типы (CMN.00003 —
+    # ACK envelope, никогда не матчится; ED.11001 — receipt confirmation; и др.).
+    # Эти типы legitimately orphan, не сигнализируют проблему.
     cutoff_24h = timezone.now() - datetime.timedelta(hours=24)
-    orph = AltaInboxMessage.objects.filter(
-        received_at__gte=cutoff_24h,
-        status_applied=False, cargo__isnull=True, hawb__isnull=True).count()
-    unap = AltaInboxMessage.objects.filter(
-        received_at__gte=cutoff_24h, status_applied=False).count()
-    lines.append(f'{_pick_emoji(orph, 10, 100)} *Inbox orphan 24ч*: {orph}')
-    lines.append(f'{_pick_emoji(unap, 10, 100)} *Inbox unapplied 24ч*: {unap}')
+    NOISE_TYPES = ('CMN.00003', 'CMN.00006', 'ED.11001', 'ED.11002')
+    orph = (AltaInboxMessage.objects
+            .filter(received_at__gte=cutoff_24h, status_applied=False,
+                    cargo__isnull=True, hawb__isnull=True)
+            .exclude(msg_type__in=NOISE_TYPES).count())
+    unap = (AltaInboxMessage.objects
+            .filter(received_at__gte=cutoff_24h, status_applied=False)
+            .exclude(msg_type__in=NOISE_TYPES).count())
+    lines.append(f'{_pick_emoji(orph, 100, 1000)} *Inbox orphan 24ч*: {orph} (без тех.шума)')
+    lines.append(f'{_pick_emoji(unap, 100, 1000)} *Inbox unapplied 24ч*: {unap}')
 
     return '\n'.join(lines)
