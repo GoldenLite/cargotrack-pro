@@ -977,6 +977,29 @@ def apply_status(msg: AltaInboxMessage,
             if extra:
                 targets.extend(extra)
 
+    # Шаг 3.5: пропагация на siblings с тем же customs_declaration_number
+    # ВНЕ зависимости от cargo (ДТЭГ может покрывать HAWB разных партий,
+    # или HAWB вообще без cargo — типично для EXPORT). raw_xml CMN.11350
+    # release часто КРАТКИЙ — не перечисляет HAWB, только декл.номер.
+    # Шаг 3 их пропускал → siblings оставались с release_date=None и
+    # ed_status='Присвоен номер' (баг от 09.06.2026 с ДТЭГ
+    # 10132220/050626/0020400, см. memory project_release_propagation).
+    # Жёсткий якорь — customs_declaration_number === тот же выпуск.
+    if hawb and kind in ('released', 'rejected', 'examination', 'hold'):
+        decl = (hawb.customs_declaration_number or '').strip()
+        if decl:
+            existing_ids = {h.pk for h in targets}
+            siblings = HouseWaybill.objects.filter(
+                customs_declaration_number=decl,
+            ).exclude(pk__in=existing_ids)
+            sibling_list = list(siblings)
+            if sibling_list:
+                targets.extend(sibling_list)
+                logger.info(
+                    'apply_status: пропагация %s на %d siblings ДТ=%s '
+                    '(matched=%s)', kind, len(sibling_list), decl,
+                    hawb.hawb_number)
+
     # Pre-customs logistics states: HAWB ещё не дошёл до таможни в нашей логике.
     # Если CMN-выпуск приходит на такой HAWB — авто-бампим в IMPORT/EXPORT_CUSTOMS
     # перед change_customs_status, чтобы тот авто-перевёл в READY_DELIVERY
