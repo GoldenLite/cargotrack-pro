@@ -220,6 +220,15 @@ class Command(BaseCommand):
         parser.add_argument('--kind', default='general',
                             choices=['general', 'export'],
                             help='Тип SheetSource (general или export)')
+        parser.add_argument('--force', action='store_true',
+                            help='Bypass freshness gate (для --fix). По умолчанию '
+                                 'если ImportedSheetRow устарел >5 мин — fail. '
+                                 'Защита от инцидента 09.06.2026 (--fix '
+                                 'писал в устаревшие row_index после ручной '
+                                 'сортировки юзера → данные съезжали).')
+        parser.add_argument('--max-stale-min', type=int, default=5,
+                            help='Max возраст import_sheets для --fix (минут, '
+                                 'default 5)')
 
     def handle(self, *args, **opts):
         kind = opts.get('kind') or 'general'
@@ -227,6 +236,36 @@ class Command(BaseCommand):
         if not sources:
             self.stdout.write(f'Нет активных {kind}-источников')
             return
+
+        # Safety gate против инцидента 09.06.2026: --fix без свежего
+        # import_sheets опирается на устаревшие row_index → пишет в чужие
+        # строки. Падаем рано, до любых API-вызовов.
+        if opts.get('fix') and not opts.get('force'):
+            from django.db.models import Max
+            from django.utils import timezone as _tz
+            import datetime as _dt
+            max_stale = int(opts.get('max_stale_min') or 5)
+            cutoff = _tz.now() - _dt.timedelta(minutes=max_stale)
+            for source in sources:
+                last = (ImportedSheetRow.objects
+                        .filter(source=source)
+                        .aggregate(m=Max('last_imported_at'))['m'])
+                if last is None:
+                    self.stdout.write(self.style.ERROR(
+                        f'  [{source.name}] нет ImportedSheetRow — запусти сначала '
+                        f'import_sheets'))
+                    return
+                if last < cutoff:
+                    age_min = int((_tz.now() - last).total_seconds() / 60)
+                    self.stdout.write(self.style.ERROR(
+                        f'  [{source.name}] последний import_sheets {age_min} мин '
+                        f'назад (> {max_stale} мин). row_index могут устареть, '
+                        f'--fix опасен.'))
+                    self.stdout.write(self.style.WARNING(
+                        f'  Запусти сначала: manage.py import_sheets --source {kind}'))
+                    self.stdout.write(self.style.WARNING(
+                        f'  Или повтори с --force (на свой риск)'))
+                    return
 
         for source in sources:
             self.stdout.write('')
