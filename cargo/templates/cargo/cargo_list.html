@@ -200,11 +200,21 @@
               </div>
             </th>
 
-            <th class="" draggable="true" data-col="10">
+            <th class="" draggable="true" data-col="10" title="Дата размещения на СВХ = момент регистрации ДО1">
               <div class="th-inner">
                 <span class="drag-handle">⠿</span>
                 <a href="?sort=scan_into_bond&dir={% if s == 'scan_into_bond' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&stage={{ fq }}&unreleased_hawb={{ fu }}">
-                  На СВХ с {% if s == 'scan_into_bond' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+                  Дата ДО1 {% if s == 'scan_into_bond' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+                </a>
+                <button class="filter-btn" type="button" title="Фильтр по столбцу">▼</button>
+              </div>
+            </th>
+
+            <th class="" draggable="true" data-col="10b" title="Регистрационный номер ДО1">
+              <div class="th-inner">
+                <span class="drag-handle">⠿</span>
+                <a href="?sort=svh_do1_reg_number&dir={% if s == 'svh_do1_reg_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&stage={{ fq }}&unreleased_hawb={{ fu }}">
+                  Рег.№ ДО1 {% if s == 'svh_do1_reg_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
                 </a>
                 <button class="filter-btn" type="button" title="Фильтр по столбцу">▼</button>
               </div>
@@ -297,6 +307,11 @@
             <td class="small">
               {% if cargo.scan_into_bond %}
                 {{ cargo.scan_into_bond|date:"d.m.Y" }}
+              {% else %}<span class="text-muted">—</span>{% endif %}
+            </td>
+            <td class="small font-monospace">
+              {% if cargo.svh_do1_reg_number %}
+                <span title="{{ cargo.svh_do1_reg_number }}">{{ cargo.svh_do1_reg_number }}</span>
               {% else %}<span class="text-muted">—</span>{% endif %}
             </td>
             <td>

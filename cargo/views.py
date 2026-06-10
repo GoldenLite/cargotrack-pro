@@ -221,7 +221,8 @@ def cargo_list(request):
     direction = request.GET.get('dir', 'desc')
     allowed_sorts = ['awb_number', 'stage', 'departure_date',
                      'flight_date', 'weight', 'pieces_declared',
-                     'warehouse_license', 'scan_into_bond', 'created_at']
+                     'warehouse_license', 'scan_into_bond',
+                     'svh_do1_reg_number', 'created_at']
     if sort in allowed_sorts:
         qs = qs.order_by(f'{"-" if direction == "desc" else ""}{sort}')
 
