@@ -402,7 +402,7 @@
 
             <!-- Тамож. статус -->
             <td style="min-width:130px">
-              {% if hawb.customs_status and hawb.is_on_customs %}
+              {% if hawb.customs_status %}
                 <span class="badge bg-{{ hawb.customs_status_color }} {% if hawb.customs_status_color == 'warning' %}text-dark{% endif %}"
                       style="font-size:10px;white-space:normal;line-height:1.4">
                   <i class="bi bi-shield-check me-1"></i>{{ hawb.customs_status_label }}
