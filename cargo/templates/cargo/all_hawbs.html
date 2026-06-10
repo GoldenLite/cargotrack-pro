@@ -209,10 +209,17 @@
               </a>
             </th>
 
-            <th class="th-hdr" draggable="true" data-col="14">
+            <th class="th-hdr" draggable="true" data-col="14" title="Логистический статус накладной (20 состояний от создания до доставки)">
               <a href="?sort=logistics_status&dir={% if s == 'logistics_status' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
-                Статус накладной
+                Лог. статус
                 {% if s == 'logistics_status' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="14b" title="Таможенный статус — активен пока накладная на таможне (EXPORT_CUSTOMS / IMPORT_CUSTOMS)">
+              <a href="?sort=customs_status&dir={% if s == 'customs_status' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Тамож. статус
+                {% if s == 'customs_status' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
               </a>
             </th>
 
@@ -385,19 +392,23 @@
               {{ hawb.customs_declaration_number|default:"—" }}
             </td>
 
-            <!-- Статус накладной -->
+            <!-- Лог. статус -->
             <td style="min-width:150px">
               <span class="badge bg-{{ hawb.status_color }} {% if hawb.status_color == 'warning' %}text-dark{% endif %}"
                     style="font-size:10px;white-space:normal;line-height:1.4">
                 {{ hawb.logistics_status_display }}
               </span>
+            </td>
+
+            <!-- Тамож. статус -->
+            <td style="min-width:130px">
               {% if hawb.customs_status and hawb.is_on_customs %}
-              <div class="mt-1">
                 <span class="badge bg-{{ hawb.customs_status_color }} {% if hawb.customs_status_color == 'warning' %}text-dark{% endif %}"
-                      style="font-size:9px">
+                      style="font-size:10px;white-space:normal;line-height:1.4">
                   <i class="bi bi-shield-check me-1"></i>{{ hawb.customs_status_label }}
                 </span>
-              </div>
+              {% else %}
+                <span class="text-muted">—</span>
               {% endif %}
             </td>
 
