@@ -614,7 +614,8 @@ def all_hawbs(request):
     allowed_sorts = [
         'hawb_number', 'cargo_type', 'shipment_type',
         'mawb__awb_number', 'mawb__flight_number', 'mawb__flight_date',
-        'mawb__departure_iata', 'scan_into_bond', 'mawb__warehouse_license',
+        'mawb__departure_iata', 'scan_into_bond',
+        'mawb__svh_do1_reg_number', 'mawb__warehouse_license',
         'customs_declaration_number', 'weight', 'pieces_declared',
         'logistics_status', 'customs_status',
     ]

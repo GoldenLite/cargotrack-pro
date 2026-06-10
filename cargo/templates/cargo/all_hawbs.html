@@ -161,10 +161,17 @@
               </a>
             </th>
 
-            <th class="th-hdr" draggable="true" data-col="7">
+            <th class="th-hdr" draggable="true" data-col="7" title="Дата размещения накладной на СВХ = момент регистрации ДО1">
               <a href="?sort=scan_into_bond&dir={% if s == 'scan_into_bond' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
-                Размещение на СВХ
+                Дата ДО1
                 {% if s == 'scan_into_bond' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
+              </a>
+            </th>
+
+            <th class="th-hdr" draggable="true" data-col="7b" title="Регистрационный номер ДО1 (из партии MAWB)">
+              <a href="?sort=mawb__svh_do1_reg_number&dir={% if s == 'mawb__svh_do1_reg_number' and d == 'asc' %}desc{% else %}asc{% endif %}&q={{ q }}&logistics_status={{ fs }}&cargo_type={{ ft }}&shipment_type={{ fsh }}&unreleased={{ fu }}">
+                Рег.№ ДО1
+                {% if s == 'mawb__svh_do1_reg_number' %}<i class="bi bi-caret-{% if d == 'asc' %}up{% else %}down{% endif %}-fill"></i>{% else %}<i class="bi bi-chevron-expand"></i>{% endif %}
               </a>
             </th>
 
@@ -273,10 +280,19 @@
               {% else %}—{% endif %}
             </td>
 
-            <!-- Размещение на СВХ -->
+            <!-- Дата ДО1 (HAWB.scan_into_bond) -->
             <td class="small">
               {% if hawb.scan_into_bond %}
                 {{ hawb.scan_into_bond|date:"d.m.Y H:i" }}
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+
+            <!-- Рег.№ ДО1 (через mawb) -->
+            <td class="small font-monospace">
+              {% if hawb.mawb and hawb.mawb.svh_do1_reg_number %}
+                <span title="{{ hawb.mawb.svh_do1_reg_number }}">{{ hawb.mawb.svh_do1_reg_number }}</span>
               {% else %}
                 <span class="text-muted">—</span>
               {% endif %}
