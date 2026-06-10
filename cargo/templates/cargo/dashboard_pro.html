@@ -118,9 +118,14 @@ body.edit-mode .widget-card { border-color: #93c5fd; }
 body.edit-mode .widget-header { cursor: grab; user-select: none; background: #eff6ff; }
 body.edit-mode .widget-header:active { cursor: grabbing; }
 body.edit-mode .widget-actions { cursor: default; }
-body.edit-mode .widget-edit-btns { display: flex !important; }
+body.edit-mode .widget-actions .btn-w.widget-edit-btns { display: inline-flex; }
 
-.widget-edit-btns { display: none; }
+/* Селектор должен совпадать по специфичности с .widget-actions .btn-w
+   (2 класса) — без этого предыдущее правило display:inline-flex побеждает
+   и кнопки видны на каждой плитке постоянно. Показываем только при hover
+   на карточку или в edit-mode (правило выше). */
+.widget-actions .btn-w.widget-edit-btns { display: none; }
+.widget-card:hover .widget-actions .btn-w.widget-edit-btns { display: inline-flex; }
 
 /* ── Stat widget ─────────────────────────────────────────────── */
 .stat-inner {

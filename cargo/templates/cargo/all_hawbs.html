@@ -15,11 +15,10 @@
   th.drag-over { outline: 2px dashed #2563eb; outline-offset: -2px; background: #eff6ff !important; }
   th.dragging { opacity: .4; }
   .drag-handle { color:#cbd5e1; font-size:10px; margin-right:3px; }
-  /* Масштабирование и перенос текста */
-  #hawbTable { table-layout:fixed; width:100%; }
-  #hawbTable th, #hawbTable td { overflow:hidden; word-break:break-word;
-                                  white-space:normal; vertical-align:middle; }
-  #hawbTable .th-hdr { white-space:normal; }
+  /* Наследуем стили таблицы из base.html .ct-table: width:max-content
+     + min-width:80px на th. Без table-layout:fixed заголовки не рвутся
+     по букве на узком viewport (16+ колонок). */
+  #hawbTable th, #hawbTable td { vertical-align:middle; }
 </style>
 {% endblock %}
 
@@ -30,6 +29,9 @@
   </h5>
   <div class="d-flex gap-2">
     <span class="badge bg-secondary fs-6">{{ total }}</span>
+    <button type="button" class="btn btn-sm btn-outline-secondary" title="Настройка столбцов">
+      <i class="bi bi-layout-three-columns"></i>
+    </button>
     <a href="{% url 'export_hawbs_excel' %}?q={{ q }}&logistics_status={{ filter_logistics }}&cargo_type={{ filter_type }}&shipment_type={{ filter_ship }}&unreleased={{ filter_unreleased }}"
        class="btn btn-sm btn-success">
       <i class="bi bi-file-earmark-excel me-1"></i>Excel

@@ -4,12 +4,10 @@
 
 {% block extra_head %}
 <style>
-  #cargoTable { table-layout: fixed; width: 100%; }
-  #cargoTable th, #cargoTable td {
-    overflow: hidden; word-break: break-word;
-    white-space: normal; vertical-align: middle;
-  }
-  .th-inner { display: flex; align-items: center; gap: 3px; }
+  /* table-layout: auto (default) + ширина по контенту — наследуем из base.html
+     .ct-table. Без этого заголовки рвутся по букве на узком viewport
+     (19 колонок не помещаются). */
+  #cargoTable th, #cargoTable td { vertical-align: middle; }
 </style>
 {% endblock %}
 

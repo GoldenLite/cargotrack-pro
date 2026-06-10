@@ -259,7 +259,11 @@
     .ct-table-wrap { overflow-x: auto; }
 
     .ct-table {
-      width: 100%;
+      /* width: 100% сжимает колонки игнорируя min-width на th. Меняем на
+         max-content: таблица растёт по фактическому контенту, контейнер
+         .ct-table-wrap делает overflow-x: auto. */
+      width: max-content;
+      min-width: 100%;
       border-collapse: collapse;
       font-size: 12px;
     }
@@ -277,20 +281,36 @@
       text-align: left;
       user-select: none;
       position: relative;
+      /* min-width — иначе на 16+ колонках браузер сжимает каждую до ширины
+         одного символа, заголовок разрывается по буквам вертикально. */
+      min-width: 80px;
     }
     .ct-table th:last-child { border-right: none; }
     .ct-table th a {
       color: #616161;
       text-decoration: none;
       display: inline-flex; align-items: center; gap: 3px;
+      white-space: nowrap;
     }
     .ct-table th a:hover { color: var(--cdek-blue); }
+
+    /* .th-inner — flex-обёртка drag-handle + текст + filter-btn внутри <th>.
+       Без display:flex дочерние элементы могут переноситься на новые строки
+       внутри ячейки. */
+    .ct-table .th-inner {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      min-width: max-content;
+    }
 
     .ct-table td {
       padding: 6px 10px;
       border-bottom: 1px solid #f0f0f0;
       vertical-align: middle;
       color: var(--cdek-text);
+      white-space: nowrap;
     }
     .ct-table tbody tr:hover { background: var(--cdek-row-hover); cursor: pointer; }
     .ct-table tbody tr:last-child td { border-bottom: none; }
@@ -536,6 +556,170 @@
 </div><!-- /app-shell -->
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- ── Column picker: универсальный для .ct-table с th[data-col] ── -->
+<style>
+  .ct-colpick-popover {
+    position: absolute;
+    z-index: 1050;
+    background: #fff;
+    border: 1px solid var(--cdek-border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.12);
+    min-width: 220px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 6px 0;
+    font-size: 12px;
+  }
+  .ct-colpick-popover .cp-head {
+    padding: 6px 12px 4px;
+    border-bottom: 1px solid #f0f0f0;
+    color: #6b7280;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .ct-colpick-popover .cp-head > span:first-child { white-space: nowrap; }
+  .ct-colpick-popover .cp-actions {
+    display: flex; gap: 10px; flex-shrink: 0;
+  }
+  .ct-colpick-popover .cp-actions a {
+    color: var(--cdek-blue);
+    text-decoration: none;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .ct-colpick-popover label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: var(--cdek-text);
+    margin: 0;
+  }
+  .ct-colpick-popover label:hover { background: var(--cdek-row-hover); }
+  .ct-colpick-popover input[type=checkbox] { margin: 0; }
+</style>
+<script>
+(function() {
+  // localStorage-ключ для каждой таблицы — по её id, чтобы cargo/hawb списки
+  // были независимы.
+  function storageKey(table) { return 'ctColpick:' + (table.id || 'default'); }
+
+  function loadHidden(table) {
+    try { return new Set(JSON.parse(localStorage.getItem(storageKey(table)) || '[]')); }
+    catch (e) { return new Set(); }
+  }
+  function saveHidden(table, set) {
+    localStorage.setItem(storageKey(table), JSON.stringify([...set]));
+  }
+
+  function colKey(th) { return th.dataset.col ?? th.dataset.colKey; }
+
+  function applyVisibility(table) {
+    const hidden = loadHidden(table);
+    const ths = [...table.querySelectorAll('thead th[data-col], thead th[data-col-key]')];
+    ths.forEach((th, idx) => {
+      const key = colKey(th);
+      const isHidden = hidden.has(key);
+      th.style.display = isHidden ? 'none' : '';
+      table.querySelectorAll('tbody tr').forEach(tr => {
+        const cell = tr.children[idx];
+        if (cell) cell.style.display = isHidden ? 'none' : '';
+      });
+    });
+  }
+
+  function getColumnTitle(th) {
+    // Берём текст из заголовка без drag-handle и filter-кнопки
+    const inner = th.querySelector('.th-inner') || th;
+    return inner.textContent.replace(/[⠿▼]/g, '').trim().split(/\s+/).slice(0, 4).join(' ') || `Колонка ${th.dataset.col}`;
+  }
+
+  function openPicker(btn, table) {
+    document.querySelectorAll('.ct-colpick-popover').forEach(p => p.remove());
+    const ths = [...table.querySelectorAll('thead th[data-col], thead th[data-col-key]')];
+    const hidden = loadHidden(table);
+    const pop = document.createElement('div');
+    pop.className = 'ct-colpick-popover';
+    pop.innerHTML = `
+      <div class="cp-head">
+        <span>Показывать столбцы</span>
+        <span class="cp-actions">
+          <a data-act="all">Все</a>
+          <a data-act="none">Ни одного</a>
+        </span>
+      </div>`;
+    ths.forEach(th => {
+      const key = colKey(th);
+      const lbl = document.createElement('label');
+      lbl.innerHTML = `<input type="checkbox" data-col="${key}" ${hidden.has(key) ? '' : 'checked'}><span>${getColumnTitle(th)}</span>`;
+      pop.appendChild(lbl);
+    });
+    document.body.appendChild(pop);
+    const r = btn.getBoundingClientRect();
+    pop.style.top = (window.scrollY + r.bottom + 4) + 'px';
+    pop.style.left = Math.max(8, window.scrollX + r.right - pop.offsetWidth) + 'px';
+
+    pop.addEventListener('change', e => {
+      const cb = e.target;
+      if (cb.tagName !== 'INPUT') return;
+      const k = cb.dataset.col;
+      const cur = loadHidden(table);
+      if (cb.checked) cur.delete(k); else cur.add(k);
+      saveHidden(table, cur);
+      applyVisibility(table);
+    });
+    pop.querySelector('[data-act="all"]').addEventListener('click', () => {
+      saveHidden(table, new Set());
+      pop.querySelectorAll('input').forEach(i => i.checked = true);
+      applyVisibility(table);
+    });
+    pop.querySelector('[data-act="none"]').addEventListener('click', () => {
+      const all = new Set(ths.map(colKey));
+      saveHidden(table, all);
+      pop.querySelectorAll('input').forEach(i => i.checked = false);
+      applyVisibility(table);
+    });
+
+    const closer = (e) => {
+      if (!pop.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+        pop.remove();
+        document.removeEventListener('click', closer);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', closer), 0);
+  }
+
+  function init() {
+    document.querySelectorAll('.ct-table, table[data-colpick]').forEach(applyVisibility);
+    document.querySelectorAll('.bi-layout-three-columns').forEach(icon => {
+      const btn = icon.closest('button, a');
+      if (!btn || btn.dataset.colpickBound) return;
+      btn.dataset.colpickBound = '1';
+      // Ищем ближайшую таблицу: внутри .ct-card, или просто в документе
+      const card = btn.closest('.ct-card, .table-responsive, main, body');
+      const table = card?.querySelector('.ct-table, table[data-colpick], #hawbTable, #cargoTable');
+      if (!table) return;
+      btn.addEventListener('click', (e) => { e.preventDefault(); openPicker(btn, table); });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+
 {% block scripts %}{% endblock %}
 </body>
 </html>

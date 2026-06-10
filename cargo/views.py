@@ -2186,7 +2186,7 @@ def _widget_kanban(qs, config: dict):
     for code, label in STAGE_CHOICES:
         if code not in stages_filter:
             continue
-        col_qs = qs.filter(Q(stage=code) | Q(queue=code))
+        col_qs = qs.filter(stage=code)
         total = col_qs.count()
         items = list(
             col_qs[:limit].values(
