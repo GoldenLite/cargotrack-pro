@@ -43,6 +43,8 @@ SPECIALIST_TABS = {
     'Пругар Ольга',
     'Алексеева Екатерина',
     'Шушарина Татьяна',
+    'Леонова Вера',
+    'Лиханова Раиса',
 }
 
 # Стандартный шаблон CRM-tabs (см. crm_sync.py).
@@ -56,6 +58,9 @@ COL_ED_STATUS    = 24  # X
 
 
 def _retry(fn, *args, label: str = '', **kwargs):
+    import requests.exceptions as _rex
+    import urllib3.exceptions as _u3ex
+    import ssl as _ssl
     backoff = [1, 2, 4, 8, 16, 32]
     for attempt in range(len(backoff) + 1):
         try:
@@ -66,6 +71,18 @@ def _retry(fn, *args, label: str = '', **kwargs):
                 wait = backoff[attempt]
                 logger.warning('crm_reindex %s API %s, retry in %ds',
                                label, status, wait)
+                time.sleep(wait)
+                continue
+            raise
+        except (_rex.SSLError, _rex.ConnectionError, _rex.ChunkedEncodingError,
+                _rex.Timeout, _u3ex.MaxRetryError, _u3ex.ProtocolError,
+                _ssl.SSLError, OSError) as e:
+            # Network/TLS flake — типично SSL: UNEXPECTED_EOF_WHILE_READING
+            # от sheets.googleapis.com. Backoff exponential как для API 5xx.
+            if attempt < len(backoff):
+                wait = backoff[attempt]
+                logger.warning('crm_reindex %s network err %s: %s, retry in %ds',
+                               label, type(e).__name__, str(e)[:120], wait)
                 time.sleep(wait)
                 continue
             raise

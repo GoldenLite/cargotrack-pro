@@ -35,6 +35,8 @@ SPECIALIST_TABS = {
     'Пругар Ольга',
     'Алексеева Екатерина',
     'Шушарина Татьяна',
+    'Леонова Вера',
+    'Лиханова Раиса',
 }
 
 COL_HAWB         = 3   # C
@@ -43,6 +45,9 @@ LAST_COL         = 24  # X
 
 
 def _retry(fn, *args, label: str = '', **kwargs):
+    import requests.exceptions as _rex
+    import urllib3.exceptions as _u3ex
+    import ssl as _ssl
     backoff = [1, 2, 4, 8, 16, 32]
     for attempt in range(len(backoff) + 1):
         try:
@@ -53,6 +58,18 @@ def _retry(fn, *args, label: str = '', **kwargs):
                 wait = backoff[attempt]
                 logger.warning('crm_sort %s API %s, retry in %ds',
                                label, status, wait)
+                time.sleep(wait)
+                continue
+            raise
+        except (_rex.SSLError, _rex.ConnectionError, _rex.ChunkedEncodingError,
+                _rex.Timeout, _u3ex.MaxRetryError, _u3ex.ProtocolError,
+                _ssl.SSLError, OSError) as e:
+            # Network/TLS flake — типично SSL: UNEXPECTED_EOF_WHILE_READING
+            # от sheets.googleapis.com. Backoff exponential как для API 5xx.
+            if attempt < len(backoff):
+                wait = backoff[attempt]
+                logger.warning('crm_sort %s network err %s: %s, retry in %ds',
+                               label, type(e).__name__, str(e)[:120], wait)
                 time.sleep(wait)
                 continue
             raise
@@ -86,14 +103,38 @@ class Command(BaseCommand):
         self.stdout.write(f'Sorting tabs: {len(target)}')
 
         for i, ws in enumerate(target):
+            sort_started = False
             try:
                 self._sort_tab(ss, ws)
+                sort_started = True
                 # После sort row_index'ы в индексе протухли. Reindex
                 # читает текущее состояние и обновляет.
                 self._reindex_tab(ws)
             except Exception as e:
                 logger.exception('crm_sort tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(f'  {ws.title}: {e}'))
+                # Safety: если sort прошёл, а reindex упал — Sheets уже
+                # переставлены, индекс ссылается на старые row_index.
+                # Incremental, пытаясь обновить ячейки по этому индексу,
+                # запишет данные в ЧУЖИЕ строки (роль HAWB на row=N теперь
+                # другая). Стираем индекс этой вкладки целиком — следующий
+                # crm_reindex (каждые 6 ч) построит заново; до тех пор
+                # incremental пропустит вкладку (ему просто нечего обновлять).
+                if sort_started:
+                    try:
+                        CrmHawbIndex.objects.filter(
+                            tab_name=ws.title).delete()
+                        self.stdout.write(self.style.WARNING(
+                            f'  {ws.title}: stale index wiped (Sheets уже '
+                            f'переставлены, reindex упал — следующий '
+                            f'reindex по cron заполнит индекс заново)'))
+                        logger.warning(
+                            'crm_sort tab %s: wiped stale index after '
+                            'sort succeeded but reindex failed', ws.title)
+                    except Exception:
+                        logger.exception(
+                            'crm_sort tab %s: failed to wipe stale index',
+                            ws.title)
             if i + 1 < len(target):
                 time.sleep(3)
 
