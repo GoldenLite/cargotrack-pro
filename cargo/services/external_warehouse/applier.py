@@ -169,13 +169,15 @@ def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True,
             cargo.scan_into_bond = scan_value
             updated.append('scan_into_bond')
 
-    if not updated:
-        return False
-
-    # Маркируем источник если запрошено и поле ещё пустое
+    # Маркируем источник если запрошено и поле ещё пустое — ДО проверки
+    # updated, чтобы svh_source проставился даже когда все остальные СВХ-поля
+    # уже были заполнены (idempotent backfill).
     if source and not (cargo.svh_source or '').strip():
         cargo.svh_source = source
         updated.append('svh_source')
+
+    if not updated:
+        return False
 
     _save_with_retry(cargo, updated)
     logger.info('moscow-cargo applied to %s: %s', cargo.awb_number, updated)
