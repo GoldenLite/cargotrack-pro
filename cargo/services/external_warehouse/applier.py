@@ -98,7 +98,8 @@ def _save_with_retry(cargo: Cargo, fields: list[str], attempts: int = 5) -> None
             delay *= 2
 
 
-def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> bool:
+def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True,
+                   source: str = '') -> bool:
     """Заполняет пустые СВХ-поля Cargo из parsed-данных moscow-cargo.
 
     Возвращает True если что-то реально записали.
@@ -107,6 +108,9 @@ def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> boo
     refresh_moscow_cargo) — там Sheets API ограничен 300 read/min, поэтому
     дешевле собрать ВСЕ изменённые Cargo и сделать один общий resync,
     чем делать per-cargo writeback (=~ 4 API-вызова на штуку).
+
+    Параметр `source` — значение svh_source ('moscow_cargo'/'shercargo'/...).
+    Ставится только если svh_source ещё пуст и что-то реально обновили.
     """
     import threading
     from datetime import datetime, time as dt_time
@@ -168,6 +172,11 @@ def apply_to_cargo(cargo: Cargo, parsed: dict, *, writeback: bool = True) -> boo
     if not updated:
         return False
 
+    # Маркируем источник если запрошено и поле ещё пустое
+    if source and not (cargo.svh_source or '').strip():
+        cargo.svh_source = source
+        updated.append('svh_source')
+
     _save_with_retry(cargo, updated)
     logger.info('moscow-cargo applied to %s: %s', cargo.awb_number, updated)
 
@@ -225,11 +234,7 @@ def fetch_and_apply_shercargo(cargo: Cargo, client=None) -> Optional[bool]:
         parsed = client.fetch(cargo.awb_number)
         if not parsed:
             return None
-        changed = apply_to_cargo(cargo, parsed)
-        if changed and not (cargo.svh_source or '').strip():
-            cargo.svh_source = 'shercargo'
-            _save_with_retry(cargo, ['svh_source'])
-        return changed
+        return apply_to_cargo(cargo, parsed, source='shercargo')
     finally:
         if close_after:
             client.close()

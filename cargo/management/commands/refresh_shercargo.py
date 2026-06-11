@@ -23,7 +23,7 @@ from django.db.models import Q
 
 from cargo.models import Cargo
 from cargo.services.external_warehouse.applier import (
-    SHERCARGO_PREFIXES, apply_to_cargo, _save_with_retry,
+    SHERCARGO_PREFIXES, apply_to_cargo,
 )
 from cargo.services.external_warehouse.shercargo import ShercargoClient
 
@@ -84,15 +84,10 @@ class Command(BaseCommand):
                     n_empty += 1
                 else:
                     n_found += 1
-                    if apply_to_cargo(cargo, parsed, writeback=False):
+                    if apply_to_cargo(cargo, parsed, writeback=False,
+                                      source='shercargo'):
                         n_applied += 1
                         applied_cargos.append(cargo)
-                        if not (cargo.svh_source or '').strip():
-                            cargo.svh_source = 'shercargo'
-                            try:
-                                _save_with_retry(cargo, ['svh_source'])
-                            except Exception:
-                                pass
                         self.stdout.write(self.style.SUCCESS(
                             f'  {cargo.awb_number}: {parsed.get("reg_number")} '
                             f'({parsed.get("do1_date")})'
