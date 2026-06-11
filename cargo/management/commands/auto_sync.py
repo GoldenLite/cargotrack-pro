@@ -96,6 +96,9 @@ class Command(BaseCommand):
                 ('import_sheets', {'source': 'crm'}),
                 ('relink_hawbs_from_tsd', {'all': True}),
                 ('refresh_moscow_cargo', {}),
+                # Шереметьево-Карго (shercargo.ru) — публичный портал. Только
+                # партии с префиксом 115 (см. SHERCARGO_PREFIXES).
+                ('refresh_shercargo', {}),
                 # Декларант Плюс (ДВ-склад «Таможенный портал»). No-op если
                 # DEKLARANT_ENABLED=False. Гейт внутри команды, ~50 сек при
                 # throttle=0.5 и limit=100.

@@ -27,6 +27,11 @@ logger = logging.getLogger('cargo.external.moscow_cargo')
 # Грузы с этими префиксами размещаются на их СВХ; остальные — на наших.
 MOSCOW_CARGO_PREFIXES = ('784', '555', '826', '537', '880')
 
+# Префиксы AWB которые приходят в Шереметьево-Карго (shercargo.ru).
+# Тот же терминал что Москва-Карго, но другой оператор — публичный портал
+# вместо JSON API. Только авиа (классический MAWB-формат XXX-XXXXXXXX).
+SHERCARGO_PREFIXES = ('115',)
+
 # Классический IATA MAWB: XXX-XXXXXXXX (3 цифры, дефис, 8 цифр).
 # Этот regex автоматически отсекает moscow-cargo (784/555/826/537/880) и
 # обычные авиа-MAWB (Внуково/Шереметьево). Всё что НЕ совпало — кандидат
@@ -40,6 +45,14 @@ def is_moscow_cargo_candidate(cargo: Cargo) -> bool:
     if len(awb) < 4 or awb[3] != '-':
         return False
     return awb[:3] in MOSCOW_CARGO_PREFIXES
+
+
+def is_shercargo_candidate(cargo: Cargo) -> bool:
+    """Подходит ли партия для проверки на shercargo.ru."""
+    awb = (cargo.awb_number or '').strip()
+    if len(awb) < 4 or awb[3] != '-':
+        return False
+    return awb[:3] in SHERCARGO_PREFIXES
 
 
 def is_far_east_candidate(cargo: Cargo) -> bool:
@@ -195,6 +208,28 @@ def fetch_and_apply(cargo: Cargo,
         if not parsed:
             return None
         return apply_to_cargo(cargo, parsed)
+    finally:
+        if close_after:
+            client.close()
+
+
+def fetch_and_apply_shercargo(cargo: Cargo, client=None) -> Optional[bool]:
+    """fetch + apply для shercargo.ru. См. fetch_and_apply для moscow_cargo."""
+    from .shercargo import ShercargoClient
+
+    close_after = False
+    if client is None:
+        client = ShercargoClient()
+        close_after = True
+    try:
+        parsed = client.fetch(cargo.awb_number)
+        if not parsed:
+            return None
+        changed = apply_to_cargo(cargo, parsed)
+        if changed and not (cargo.svh_source or '').strip():
+            cargo.svh_source = 'shercargo'
+            _save_with_retry(cargo, ['svh_source'])
+        return changed
     finally:
         if close_after:
             client.close()

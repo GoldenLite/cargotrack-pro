@@ -64,6 +64,28 @@ class CargoConfig(AppConfig):
                         'cargo_moscow_cargo_fetch failed for %s', instance.pk)
             threading.Thread(target=_run, daemon=True).start()
 
+        @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_shercargo_fetch')
+        def cargo_shercargo_fetch(sender, instance, created, **kwargs):
+            """При создании Cargo с префиксом Шереметьево-Карго → fetch с
+            shercargo.ru. Делаем в фоне; cron refresh_shercargo подхватит
+            если ДО1 ещё не зарегистрирован к моменту первого fetch'а.
+            """
+            if not created:
+                return
+            def _run():
+                try:
+                    from .services.external_warehouse.applier import (
+                        is_shercargo_candidate, fetch_and_apply_shercargo,
+                    )
+                    if not is_shercargo_candidate(instance):
+                        return
+                    fetch_and_apply_shercargo(instance)
+                except Exception:
+                    import logging
+                    logging.getLogger('cargo.external.shercargo').exception(
+                        'cargo_shercargo_fetch failed for %s', instance.pk)
+            threading.Thread(target=_run, daemon=True).start()
+
         @receiver(post_save, sender=Cargo, weak=False, dispatch_uid='cargo_svh_backfill')
         def cargo_svh_backfill(sender, instance, created, **kwargs):
             """При создании Cargo подхватываем висящие CMN.13029/CMN.13010.
