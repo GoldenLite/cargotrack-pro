@@ -782,7 +782,8 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         if not cargo:
             continue
         sources[r.source_id] = r.source
-        rows_by_source[r.source_id].append((r.source_row_index, cargo))
+        rows_by_source[r.source_id].append(
+            (r.source_row_index, r.hawb_number_norm, cargo))
 
     total = 0
     for source_id, items in rows_by_source.items():
@@ -815,8 +816,13 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
         letter_date     = _col_letter(col_date)
         letter_do1      = _col_letter(col_do1)
 
+        # Sort-proof: ищем реальный ряд HAWB в листе (не по устаревшему кэшу).
+        live_rows = _hawb_live_rows(ws, source.header_row)
+
         updates = []
-        for row_idx, cargo in items:
+        for row_idx, hawb_norm, cargo in items:
+            if live_rows:
+                row_idx = live_rows.get(hawb_norm, row_idx)
             lic = (cargo.warehouse_license or '').strip()
             placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
@@ -881,6 +887,32 @@ def _read_sheet_hawbs(ws, header_row: int) -> list[str]:
     except Exception:
         return []
     return [normalize_hawb_number(v) for v in raw]
+
+
+def _hawb_live_rows(ws, header_row: int) -> dict:
+    """{нормализованный HAWB → 1-based row_idx} из ЖИВОЙ колонки «Накладная СДЭК».
+
+    Sort-proof таргетинг: writeback пишет в ряд, где HAWB РЕАЛЬНО сейчас, а не
+    по кэшу `ImportedSheetRow.source_row_index`. Кэш устаревает когда юзер
+    сортирует «Общее» (импорт позиционный — ключ `(source, source_row_index)`),
+    и тогда лицензии/даты/ДТ писались в ЧУЖИЕ ряды (визуальный «микс СВХ»).
+    Пустой dict если колонки HAWB нет — тогда редирект отключается и поведение
+    как раньше (по source_row_index).
+    """
+    out: dict[str, int] = {}
+    for i, hn in enumerate(_read_sheet_hawbs(ws, header_row), start=1):
+        if hn and hn not in out:   # дубликаты HAWB → берём верхний ряд
+            out[hn] = i
+    return out
+
+
+def _live_row(live_map: dict, hawb_number: str, fallback: int) -> int:
+    """Реальный ряд HAWB из живой карты; fallback на кэш source_row_index
+    (если карта пуста / HAWB в листе сейчас нет)."""
+    if not live_map:
+        return fallback
+    from .mapping import normalize_hawb_number
+    return live_map.get(normalize_hawb_number(hawb_number or ''), fallback)
 
 
 def _filter_inrange_updates(updates: list, ws, source_name: str) -> list:
@@ -1131,8 +1163,10 @@ def _batch_write_hawb_dates(hawbs: list, value_attr: str,
             continue
 
         letter = _col_letter(col)
+        live_rows = _hawb_live_rows(ws, source.header_row)  # sort-proof
         updates = []
         for row_idx, h in items:
+            row_idx = _live_row(live_rows, h.hawb_number, row_idx)
             if value_provider is not None:
                 value = value_provider(h)
             else:
@@ -1891,8 +1925,10 @@ def batch_write_declarations_for_hawbs(hawbs: list, source_kind=None) -> int:
             continue
 
         letter = _col_letter(col)
+        live_rows = _hawb_live_rows(ws, source.header_row)  # sort-proof
         updates = []
         for row_idx, h in items:
+            row_idx = _live_row(live_rows, h.hawb_number, row_idx)
             decl = (h.customs_declaration_number or '').strip()
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
