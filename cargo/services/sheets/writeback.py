@@ -879,9 +879,13 @@ def _read_sheet_hawbs(ws, header_row: int) -> list[str]:
         header = ws.row_values(header_row)
     except Exception:
         return []
-    if GEN_HAWB_NUMBER not in header:
+    # «Общее» = «Накладная СДЭК»; экспорт/CRM = «Номер накладной» —
+    # берём ту HAWB-колонку, что реально есть в шапке этого листа.
+    hawb_header = next((c for c in (GEN_HAWB_NUMBER, EXPORT_HAWB_HEADER)
+                        if c in header), None)
+    if hawb_header is None:
         return []
-    col = header.index(GEN_HAWB_NUMBER) + 1
+    col = header.index(hawb_header) + 1
     try:
         raw = ws.col_values(col)
     except Exception:
@@ -1617,7 +1621,7 @@ def _apply_ed_status_colors_for_export(hawbs: list) -> None:
         h = by_hawb.get(r.hawb_number_norm)
         if not h:
             continue
-        items.append((r.source_row_index,
+        items.append((r.source_row_index, r.hawb_number_norm,
                       bg_color_for_status(compute_ed_status(h))))
     if not items:
         return
@@ -1633,8 +1637,11 @@ def _apply_ed_status_colors_for_export(hawbs: list) -> None:
     last_letter = _col_letter(len(EXPORT_HEADERS_ORDER))
     white = {'red': 1.0, 'green': 1.0, 'blue': 1.0}
 
+    live_rows = _hawb_live_rows(ws, src.header_row)  # sort-proof
     formats: list[dict] = []
-    for row_idx, color in items:
+    for row_idx, hawb_norm, color in items:
+        if live_rows:
+            row_idx = live_rows.get(hawb_norm, row_idx)
         formats.append({
             'range': f'A{row_idx}:{last_letter}{row_idx}',
             'format': {'backgroundColor': white},
@@ -1674,7 +1681,8 @@ def _apply_ed_status_colors_for_general(hawbs: list) -> None:
             continue
         sources[r.source_id] = r.source
         by_source[r.source_id].append(
-            (r.source_row_index, bg_color_for_status(compute_ed_status(h))))
+            (r.source_row_index, r.hawb_number_norm,
+             bg_color_for_status(compute_ed_status(h))))
 
     for source_id, items in by_source.items():
         src = sources[source_id]
@@ -1688,11 +1696,13 @@ def _apply_ed_status_colors_for_general(hawbs: list) -> None:
             logger.exception('ed_status gen color: open/col failed: %s', e)
             continue
         letter = _col_letter(col)
-        formats = [
-            {'range': f'{letter}{r}:{letter}{r}',
-             'format': {'backgroundColor': color}}
-            for r, color in items
-        ]
+        live_rows = _hawb_live_rows(ws, src.header_row)  # sort-proof
+        formats = []
+        for row_idx, hawb_norm, color in items:
+            if live_rows:
+                row_idx = live_rows.get(hawb_norm, row_idx)
+            formats.append({'range': f'{letter}{row_idx}:{letter}{row_idx}',
+                            'format': {'backgroundColor': color}})
         try:
             _retry_api(ws.batch_format, formats,
                        label='ed_status gen batch_format')
