@@ -1186,9 +1186,28 @@ def apply_consignment_decisions(msg: AltaInboxMessage,
             for hawb_num in cons.get('waybills') or []:
                 h = cargo.hawbs.filter(hawb_number__iexact=hawb_num).first()
                 if not h:
-                    # HAWB упомянута в CMN но её нет в нашей партии — норм.
-                    # Можно залогировать но не считать ошибкой.
-                    continue
+                    # Одна ДТ может покрывать HAWB из РАЗНЫХ наших MAWB
+                    # (консолидация: несколько транспортных документов под
+                    # одной декларацией). cargo.hawbs ограничен партией
+                    # сообщения, поэтому такие накладные молча терялись
+                    # (silent skip → решение таможни не применялось, выпуск
+                    # не доезжал). Глобальный fallback по точному hawb_number
+                    # применяет per-HAWB решение К ИМЕННО НАЗВАННОЙ накладной
+                    # из consignment — это адресное решение таможни, НЕ
+                    # пропагация на siblings (тех в consignment нет).
+                    gmatch = list(
+                        HouseWaybill.objects.filter(
+                            hawb_number__iexact=hawb_num)[:2])
+                    if len(gmatch) == 1:
+                        h = gmatch[0]
+                    else:
+                        if len(gmatch) > 1:
+                            logger.warning(
+                                'consignment %s: HAWB %s неоднозначна '
+                                '(>1 копия в БД) — пропуск',
+                                msg.envelope_id, hawb_num)
+                        # 0 совпадений — реально чужая накладная, не наша.
+                        continue
 
                 # decl_number + filed_date: пишем как только в любом значимом
                 # сообщении (registered/released/hold/examination/withdrawn)
