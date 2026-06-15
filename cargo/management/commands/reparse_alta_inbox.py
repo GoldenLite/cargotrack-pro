@@ -34,6 +34,11 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--msg', type=int, default=0, help='Конкретный msg id')
         parser.add_argument('--kind', default='', help='Только указанный msg_kind')
+        parser.add_argument('--unapplied', action='store_true',
+                            help='Только сообщения со status_applied=False — '
+                                 'передиспатчить застрявшие (dispatch упал на '
+                                 'DB-lock и не доставил выпуск/рег.номер до '
+                                 'HouseWaybill). Подразумевает --force-dispatch.')
         parser.add_argument('--limit', type=int, default=0)
         parser.add_argument('--dry-run', action='store_true',
                             help='Только показать diff, без сохранения')
@@ -52,11 +57,18 @@ class Command(BaseCommand):
                 # 12k сообщений уверенно бьются о SQLite-локи.
                 c.execute('PRAGMA busy_timeout=120000;')
 
+        # --unapplied подразумевает --force-dispatch: parsed_meta у застрявших
+        # не менялся, без force-dispatch цикл их пропустит (diff=False).
+        if opts['unapplied']:
+            opts['force_dispatch'] = True
+
         qs = AltaInboxMessage.objects.all().order_by('prepared_at')
         if opts['msg']:
             qs = qs.filter(pk=opts['msg'])
         if opts['kind']:
             qs = qs.filter(msg_kind=opts['kind'])
+        if opts['unapplied']:
+            qs = qs.filter(status_applied=False)
         if opts['limit']:
             qs = qs[:opts['limit']]
 
@@ -74,14 +86,16 @@ class Command(BaseCommand):
         if not opts['dry_run']:
             begin_batch_writeback()
 
-        # Одноразовый ресет stale-полей перед --force-dispatch.
+        # Одноразовый ресет stale-полей перед ПОЛНЫМ --force-dispatch.
         # match_svh_do2 (commit 30c4c36) больше НЕ матчит ДО2 по
         # customs_declaration_number — только по прямому hawb_number в
         # TransportDoc. Но apply_svh_do2 только записывает в matched HAWB,
         # не очищает в не-matched. Старые stale-значения (записанные раньше
         # через ДТ-matching) висят в БД. Зануляем — dispatch заново
         # проставит правильно только тем HAWB кто реально в TransportDoc.
-        if not opts['dry_run'] and opts['force_dispatch']:
+        # ВАЖНО: НЕ делаем при --unapplied — там гоняется лишь подмножество
+        # сообщений, обнулённые ДО2-даты остальных HAWB не восстановятся.
+        if not opts['dry_run'] and opts['force_dispatch'] and not opts['unapplied']:
             from cargo.models import HouseWaybill
             n_do2 = HouseWaybill.objects.filter(
                 svh_do2_send_at__isnull=False).update(svh_do2_send_at=None)
