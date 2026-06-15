@@ -46,6 +46,14 @@ def _read_rows(worksheet, header_row: int) -> list[dict]:
 class SheetImporter:
     """Один прогон импорта по конкретному SheetSource."""
 
+    # Импорт идёт чанками по столько строк — каждый чанк отдельная короткая
+    # транзакция. Без этого весь цикл (13k+ строк «Общее», 7k CRM) висел в
+    # одной transaction.atomic(), удерживая SQLite write-lock на 2-4 минуты —
+    # и realtime-эндпоинты агента (/api/v1/alta/inbox|outbox) голодали и
+    # падали с `database is locked` → HTTP 500. Чанк коммитится за ~1с,
+    # лок отпускается часто, busy_timeout=60s с запасом покрывает остальных.
+    IMPORT_CHUNK_SIZE = 200
+
     def __init__(self, source: SheetSource, *, dry_run: bool = False,
                  user: Optional[User] = None, verbose: bool = False,
                  auto_promote: bool = True):
@@ -104,19 +112,26 @@ class SheetImporter:
         rows_before = ImportedSheetRow.objects.filter(source=self.source).count()
         seen_row_indices: set[int] = set()
 
-        with transaction.atomic():
-            for i, raw in enumerate(rows, start=1):
-                row_index = raw.pop('_row_index')
-                seen_row_indices.add(row_index)
-                data = {k: v for k, v in raw.items() if k}
-                ch = _content_hash(data)
-                self._process_row(row_index, data, ch)
-                if i % 500 == 0:
-                    logger.info(
-                        'Progress %s: %d/%d (new=%d unchanged=%d)',
-                        self.source.name, i, len(rows),
-                        self.run.rows_new, self.run.rows_unchanged,
-                    )
+        # Чанкуем: каждый чанк — отдельная транзакция. См. IMPORT_CHUNK_SIZE.
+        # Идемпотентно — _process_row делает upsert по (source, row_index),
+        # поэтому частичный коммит безопасен: следующий прогон до-импортирует
+        # остаток. sync-delete не сработает если цикл упадёт (он после loop).
+        for chunk_start in range(0, len(rows), self.IMPORT_CHUNK_SIZE):
+            chunk = rows[chunk_start:chunk_start + self.IMPORT_CHUNK_SIZE]
+            with transaction.atomic():
+                for offset, raw in enumerate(chunk):
+                    i = chunk_start + offset + 1
+                    row_index = raw.pop('_row_index')
+                    seen_row_indices.add(row_index)
+                    data = {k: v for k, v in raw.items() if k}
+                    ch = _content_hash(data)
+                    self._process_row(row_index, data, ch)
+                    if i % 500 == 0:
+                        logger.info(
+                            'Progress %s: %d/%d (new=%d unchanged=%d)',
+                            self.source.name, i, len(rows),
+                            self.run.rows_new, self.run.rows_unchanged,
+                        )
 
         if not self.dry_run:
             self._mark_duplicates()
