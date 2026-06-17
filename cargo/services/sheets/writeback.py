@@ -1962,6 +1962,24 @@ def batch_write_declarations_for_hawbs(hawbs: list, source_kind=None) -> int:
     return total
 
 
+# Историческая граница: ДТ, зарегистрированные ДО этой даты, считаем
+# выпущенными — по ним у нас нет историчности CMN.11350 в БД (старые
+# сообщения не захватывались), но они давно оформлены. Для них рег.номер в
+# «Регистрационный номер ДТ» показываем ВСЕГДА, не требуя «Выпуск разрешен».
+_USER_DECL_HISTORY_CUTOFF = (2026, 6, 1)
+_DECL_REGDATE_RE = re.compile(r'^\d+/(\d{2})(\d{2})(\d{2})/')
+
+
+def _decl_registered_before(decl: str, cutoff=_USER_DECL_HISTORY_CUTOFF) -> bool:
+    """True если рег.дата внутри номера ДТ (CC/ДДММГГ/GTD) раньше cutoff.
+    Для не-классических номеров (экспорт 5xxxxxx без даты) — False."""
+    m = _DECL_REGDATE_RE.match(decl or '')
+    if not m:
+        return False
+    dd, mm, yy = m.groups()
+    return (2000 + int(yy), int(mm), int(dd)) < cutoff
+
+
 def _fill_empty_user_decl(hawbs: list) -> int:
     """Управляет ручной колонкой «Регистрационный номер ДТ» (GEN_DECLARATION)
     в «Общее» для импортных HAWB:
@@ -2020,13 +2038,19 @@ def _fill_empty_user_decl(hawbs: list) -> int:
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
             decl = (h.customs_declaration_number or '').strip()
-            if compute_ed_status(h) == 'Выпуск разрешен':
-                # Выпуск → ставим рег.номер, но только в пустую ячейку.
+            # Показываем рег.номер если выпуск разрешён ИЛИ ДТ историческая
+            # (зарегистрирована до _USER_DECL_HISTORY_CUTOFF — по старым нет
+            # данных о выпуске, но они давно оформлены, доверяем номеру).
+            show = (compute_ed_status(h) == 'Выпуск разрешен'
+                    or _decl_registered_before(decl))
+            if show:
+                # Ставим рег.номер, но только в пустую ячейку (ручной ввод
+                # не перетираем).
                 if not cur:
                     updates.append({'range': f'{letter}{row_idx}',
                                     'values': [[decl]]})
             else:
-                # Ещё не выпуск → убираем ТОЛЬКО наш авто-проставленный номер
+                # Свежая ДТ ещё не выпущена → убираем ТОЛЬКО наш авто-номер
                 # (== decl). Ручной ввод (иное значение) оставляем.
                 if cur and cur == decl:
                     updates.append({'range': f'{letter}{row_idx}',
