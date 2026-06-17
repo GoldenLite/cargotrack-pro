@@ -2021,8 +2021,10 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
         msg.cargo = None
         msg.status_applied = True
         return True
-    # Идемпотент: если уже актуальное значение — не переписываем
-    if cargo.svh_do1_reg_number == reg_number:
+    # Идемпотент: пропускаем только если И reg_number совпал, И дата ДО1 уже
+    # стоит. Иначе нужно дозаполнить scan_into_bond (был баг: при пустом
+    # scan_into_bond в parsed-table дата терялась, reg_number ставился).
+    if cargo.svh_do1_reg_number == reg_number and cargo.scan_into_bond:
         msg.cargo = cargo
         msg.status_applied = True
         return True
@@ -2032,17 +2034,34 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
     update_fields['svh_do1_reg_number'] = reg_number[:64]
     if pm.get('svh_warehouse_license') and not (cargo.warehouse_license or '').strip():
         update_fields['warehouse_license'] = pm['svh_warehouse_license'][:64]
-    if pm.get('scan_into_bond') and not cargo.scan_into_bond:
-        try:
-            from django.utils.dateparse import parse_datetime
-            dt = parse_datetime(pm['scan_into_bond'])
-            if dt:
-                from django.utils import timezone as _tz
-                if _tz.is_naive(dt):
-                    dt = _tz.make_aware(dt, _tz.get_current_timezone())
-                update_fields['scan_into_bond'] = dt
-        except Exception:
-            pass
+    # Дата ДО1 → scan_into_bond. Предпочитаем явный scan_into_bond; если он
+    # пуст (parsed-table иногда шлёт scan_into_bond='') — берём svh_do1_reg_date
+    # (+ время, если есть). Без fallback дата терялась (баг 250-40950980).
+    if not cargo.scan_into_bond:
+        from django.utils.dateparse import parse_datetime, parse_date
+        from django.utils import timezone as _tz
+        from datetime import datetime as _dtcls, time as _timecls
+        dt = None
+        sib = (pm.get('scan_into_bond') or '').strip()
+        if sib:
+            dt = parse_datetime(sib)
+        if dt is None:
+            rd = (pm.get('svh_do1_reg_date') or '').strip()
+            d = parse_date(rd) if rd else None
+            if d:
+                rt = (pm.get('svh_do1_reg_time') or '').strip()
+                t = None
+                for fmt in ('%H:%M:%S', '%H:%M'):
+                    try:
+                        t = _dtcls.strptime(rt, fmt).time()
+                        break
+                    except (ValueError, TypeError):
+                        pass
+                dt = _dtcls.combine(d, t or _timecls(0, 0))
+        if dt:
+            if _tz.is_naive(dt):
+                dt = _tz.make_aware(dt, _tz.get_current_timezone())
+            update_fields['scan_into_bond'] = dt
     if not cargo.svh_source:
         update_fields['svh_source'] = 'alta'
     Cargo.objects.filter(pk=cargo.pk).update(**update_fields)
