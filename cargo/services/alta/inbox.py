@@ -131,7 +131,16 @@ def classify(msg_type: str, parsed_meta: Optional[dict] = None) -> str:
 
     Неизвестные коды → 'info' (статус не меняем).
     """
-    base = MSG_KIND_MAP.get((msg_type or '').strip(), 'info')
+    mt = (msg_type or '').strip()
+    # Конверты db_reconcile (ED.11010) несут ВНУТРИ другой тип сообщения —
+    # parsed_meta.msg_type (например CMN.11001 «Документ успешно
+    # зарегистрирован», CMN.11014). Классификация по внешнему 'ED.11010'
+    # давала 'info' и регистрация терялась. Если внутренний тип распознан —
+    # берём его. Нормальные сообщения: inner == msg_type → ничего не меняется.
+    inner = ((parsed_meta or {}).get('msg_type') or '').strip()
+    if inner and inner != mt and inner in MSG_KIND_MAP:
+        mt = inner
+    base = MSG_KIND_MAP.get(mt, 'info')
     if not parsed_meta:
         return base
 

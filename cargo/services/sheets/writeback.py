@@ -1955,6 +1955,74 @@ def batch_write_declarations_for_hawbs(hawbs: list, source_kind=None) -> int:
 
         total += _chunked_batch_update(ws, updates, 'decl', source.name)
 
+    # П1: дублируем рег.номер ДТ в ручную колонку «Регистрационный номер ДТ»
+    # ТОЛЬКО в пустые ячейки — ручной ввод ВЭД-менеджеров не перетираем.
+    if source_kind == 'general':
+        total += _fill_empty_user_decl(hawbs)
+    return total
+
+
+def _fill_empty_user_decl(hawbs: list) -> int:
+    """Fill-if-empty: пишет HAWB.customs_declaration_number в ручную колонку
+    «Регистрационный номер ДТ» (GEN_DECLARATION) в «Общее» ТОЛЬКО если ячейка
+    пуста. Ручной ввод сотрудников не перетираем. Только импортные HAWB
+    (у экспорта эта колонка — основная decl-колонка, её пишет общий путь).
+    Sort-proof: целевой ряд — по живой колонке HAWB."""
+    from .mapping import GEN_DECLARATION
+    if _sheets_writeback_disabled():
+        return 0
+    by_hawb = {
+        h.hawb_number: h for h in hawbs
+        if h.hawb_number and (h.customs_declaration_number or '').strip()
+        and _kind_for_hawb(h) != 'export'
+    }
+    if not by_hawb:
+        return 0
+    rows = (ImportedSheetRow.objects
+            .filter(source__kind='general',
+                    hawb_number_norm__in=list(by_hawb.keys()))
+            .select_related('source')
+            .order_by('-last_imported_at'))
+    sources: dict[int, SheetSource] = {}
+    items_by_source: dict[int, list[tuple[int, HouseWaybill]]] = defaultdict(list)
+    seen: set[str] = set()
+    for r in rows:
+        if r.hawb_number_norm in seen:
+            continue
+        seen.add(r.hawb_number_norm)
+        h = by_hawb.get(r.hawb_number_norm)
+        if not h:
+            continue
+        sources[r.source_id] = r.source
+        items_by_source[r.source_id].append((r.source_row_index, h))
+
+    total = 0
+    for source_id, items in items_by_source.items():
+        source = sources[source_id]
+        try:
+            ws = _retry_api(open_worksheet, source, label='user decl open')
+            col = _retry_api(_ensure_named_column, ws, source.header_row,
+                             GEN_DECLARATION, label='user decl col')
+            existing = _retry_api(ws.col_values, col, label='user decl read')
+        except (SheetsConfigError, gspread.exceptions.APIError):
+            logger.exception('user decl: open/read failed')
+            continue
+        letter = _col_letter(col)
+        live_rows = _hawb_live_rows(ws, source.header_row)  # sort-proof
+        updates = []
+        for row_idx, h in items:
+            row_idx = _live_row(live_rows, h.hawb_number, row_idx)
+            cur = (existing[row_idx - 1]
+                   if row_idx - 1 < len(existing) else '').strip()
+            if cur:        # fill-ONLY-if-empty — ручной ввод не трогаем
+                continue
+            updates.append({'range': f'{letter}{row_idx}',
+                            'values': [[h.customs_declaration_number.strip()]]})
+        if not updates:
+            continue
+        updates = _filter_inrange_updates(updates, ws, source.name)
+        if updates:
+            total += _chunked_batch_update(ws, updates, 'user decl', source.name)
     return total
 
 
