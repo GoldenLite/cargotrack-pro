@@ -1963,12 +1963,17 @@ def batch_write_declarations_for_hawbs(hawbs: list, source_kind=None) -> int:
 
 
 def _fill_empty_user_decl(hawbs: list) -> int:
-    """Fill-if-empty: пишет HAWB.customs_declaration_number в ручную колонку
-    «Регистрационный номер ДТ» (GEN_DECLARATION) в «Общее» ТОЛЬКО если ячейка
-    пуста. Ручной ввод сотрудников не перетираем. Только импортные HAWB
-    (у экспорта эта колонка — основная decl-колонка, её пишет общий путь).
+    """Управляет ручной колонкой «Регистрационный номер ДТ» (GEN_DECLARATION)
+    в «Общее» для импортных HAWB:
+      - статус ЭД == «Выпуск разрешен» → пишем рег.номер ДТ, но ТОЛЬКО в пустую
+        ячейку (ручной ввод сотрудников не перетираем);
+      - статус ЭД ещё НЕ «Выпуск разрешен» → чистим ячейку ТОЛЬКО если в ней
+        ровно наш номер (== customs_declaration_number); ручной ввод (иное
+        значение) не трогаем.
+    Экспорт пропускаем (там эта колонка — основная decl-колонка общего пути).
     Sort-proof: целевой ряд — по живой колонке HAWB."""
     from .mapping import GEN_DECLARATION
+    from cargo.services.alta.ed_status import compute_ed_status
     if _sheets_writeback_disabled():
         return 0
     by_hawb = {
@@ -2014,10 +2019,18 @@ def _fill_empty_user_decl(hawbs: list) -> int:
             row_idx = _live_row(live_rows, h.hawb_number, row_idx)
             cur = (existing[row_idx - 1]
                    if row_idx - 1 < len(existing) else '').strip()
-            if cur:        # fill-ONLY-if-empty — ручной ввод не трогаем
-                continue
-            updates.append({'range': f'{letter}{row_idx}',
-                            'values': [[h.customs_declaration_number.strip()]]})
+            decl = (h.customs_declaration_number or '').strip()
+            if compute_ed_status(h) == 'Выпуск разрешен':
+                # Выпуск → ставим рег.номер, но только в пустую ячейку.
+                if not cur:
+                    updates.append({'range': f'{letter}{row_idx}',
+                                    'values': [[decl]]})
+            else:
+                # Ещё не выпуск → убираем ТОЛЬКО наш авто-проставленный номер
+                # (== decl). Ручной ввод (иное значение) оставляем.
+                if cur and cur == decl:
+                    updates.append({'range': f'{letter}{row_idx}',
+                                    'values': [['']]})
         if not updates:
             continue
         updates = _filter_inrange_updates(updates, ws, source.name)
