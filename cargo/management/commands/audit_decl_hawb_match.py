@@ -57,12 +57,17 @@ class Command(BaseCommand):
                             help='Записать MISMATCH в CSV-файл')
 
     def handle(self, *args, **opts):
-        # 1. decl -> {названные HAWB}, и decl -> [inbox msg ids] для raw-прохода
+        # FK hawb_id → hawb_number: сообщение может быть привязано к накладной
+        # напрямую (dispatch), не называя её в теле — это тоже валидная связь.
+        id_to_hawb = dict(HouseWaybill.objects.values_list('id', 'hawb_number'))
+
+        # 1. decl -> {названные/привязанные HAWB}, decl -> [inbox msg ids]
         decl_to_hawbs: dict[str, set] = defaultdict(set)
         decl_to_msgids: dict[str, list] = defaultdict(list)
 
         for m in AltaInboxMessage.objects.values(
-                'id', 'parsed_meta', 'waybill_number_raw').iterator(chunk_size=2000):
+                'id', 'parsed_meta', 'waybill_number_raw',
+                'hawb_id').iterator(chunk_size=2000):
             pm = m['parsed_meta'] or {}
             decl = _build_declaration_number(pm)
             if not decl:
@@ -71,11 +76,13 @@ class Command(BaseCommand):
             wr = (m['waybill_number_raw'] or '').strip()
             if wr:
                 named.add(wr)
+            if m['hawb_id'] in id_to_hawb:
+                named.add(id_to_hawb[m['hawb_id']])
             decl_to_hawbs[decl].update(named)
             decl_to_msgids[decl].append(m['id'])
 
         for m in AltaOutboxObservation.objects.values(
-                'parsed_meta', 'waybill_number').iterator(chunk_size=2000):
+                'parsed_meta', 'waybill_number', 'hawb_id').iterator(chunk_size=2000):
             pm = m['parsed_meta'] or {}
             decl = _build_declaration_number(pm)
             if not decl:
@@ -85,6 +92,8 @@ class Command(BaseCommand):
             wb = (m['waybill_number'] or '').strip()
             if wb:
                 decl_to_hawbs[decl].add(wb)
+            if m['hawb_id'] in id_to_hawb:
+                decl_to_hawbs[decl].add(id_to_hawb[m['hawb_id']])
 
         self.stdout.write(f'decl с привязкой к накладным: {len(decl_to_hawbs)}')
 
@@ -101,12 +110,16 @@ class Command(BaseCommand):
             if not decl:
                 continue
             named = decl_to_hawbs.get(decl)
-            if named is None:
+            # named пуст/None → decl нигде не привязан к накладным (ручной ввод
+            # вне Alta или сообщение без HAWB-связи) — проверить нечем.
+            if not named:
                 external += 1
                 continue
             if h['hawb_number'] in named:
                 verified += 1
             else:
+                # named непустой, но НАС там нет → decl относится к ДРУГИМ
+                # накладным. Это и есть настоящее подозрение.
                 mismatch_rows.append(
                     (h['hawb_number'], decl, h['shipment_type'] or ''))
 
