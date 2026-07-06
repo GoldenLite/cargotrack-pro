@@ -219,6 +219,28 @@ class Command(BaseCommand):
         n_diff_hidden = 0
         n_diff_t = 0
 
+        # sort-proof: читаем ЖИВЫЕ строки (колонка C) всех вкладок в qs ОДИН
+        # раз — пишем/скрываем по реальной позиции HAWB, а не по кэшу
+        # row_index. Позволяет менеджерам свободно двигать/удалять строки;
+        # в чужую строку не пишем. Открываем лист ЗДЕСЬ (раньше — только в
+        # фазе записи), переиспользуем ниже.
+        from cargo.services.sheets.crm_realtime import live_row_map
+        tabs_in_qs = set(qs.values_list('tab_name', flat=True).distinct())
+        try:
+            client = get_client()
+            ss = client.open_by_key(CRM_ID)
+            ws_by_title = {ws.title: ws for ws in ss.worksheets()}
+        except Exception:
+            self.stdout.write(self.style.ERROR(
+                '  Не смог открыть CRM spreadsheet — пропуск прогона '
+                '(sort-proof требует чтения живых строк)'))
+            return
+        live_maps: dict = {}
+        for _tab in tabs_in_qs:
+            _ws = ws_by_title.get(_tab)
+            if _ws is not None:
+                live_maps[_tab] = live_row_map(_ws)
+
         for entry in qs.iterator(chunk_size=500):
             h = hawbs_db.get(entry.hawb_number)
             if h:
@@ -249,8 +271,13 @@ class Command(BaseCommand):
                 new_t = entry.last_t
                 db_tracked = False
 
-            row = entry.row_index
             tab = entry.tab_name
+            # sort-proof: реальная строка HAWB в листе; если HAWB больше нет
+            # на вкладке (удалена/перемещена) — пропускаем, в чужую строку
+            # не пишем (reindex потом уберёт stale-запись индекса).
+            row = live_maps.get(tab, {}).get(entry.hawb_number)
+            if row is None:
+                continue
             changed = False
 
             # decl: в CRM-вкладке колонка W (рег.номер ДТ) показывает
@@ -370,10 +397,8 @@ class Command(BaseCommand):
             self.stdout.write(f'Elapsed: {time.time()-t0:.1f}s')
             return
 
-        client = get_client()
-        ss = client.open_by_key(CRM_ID)
-        ws_by_title = {ws.title: ws for ws in ss.worksheets()}
-
+        # ss / ws_by_title уже открыты выше (для чтения живых строк) —
+        # переиспользуем, второй раз не открываем.
         deadline_hit = False
         for tab, updates in updates_per_tab.items():
             if time.time() > deadline:
@@ -421,7 +446,12 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 f'  index update SKIPPED ({len(idx_to_save)} rows) due to timeout'))
         elif idx_to_save:
-            CrmHawbIndex.objects.bulk_update(
+            # retry-на-locked: финальный bulk_update конкурирует с agent/
+            # auto_sync за write-lock; без повтора прогон падал с
+            # database is locked и индекс отставал (см. lock-storm-rootcause).
+            from cargo.services.alta.inbox import _retry_on_locked
+            _retry_on_locked(
+                CrmHawbIndex.objects.bulk_update,
                 idx_to_save,
                 fields=['last_decl', 'last_status', 'last_request',
                         'last_arrival', 'last_warehouse', 'last_hidden',

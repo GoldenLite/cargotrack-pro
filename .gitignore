@@ -62,3 +62,12 @@ alta_agent/alta_agent.ini
 # Сервисные credentials и любые секреты — только локально
 secrets/
 cargotrack/local_settings.py
+
+# Операционные скрипты-инструменты (живут через scp, не версионируем)
+tmp/
+
+# Локальные бэкапы БД любых форм
+db.sqlite3.local.bak*
+
+# Разовые data-файлы операций
+hawbs_to_delete.txt

@@ -357,6 +357,60 @@
     </div>
     {% endif %}
 
+    <!-- ═══ СДЭК — СТАТУС ДОСТАВКИ (read-only трекинг) ═══ -->
+    {% if cdek_enabled %}
+    <div class="card mb-3 border-info">
+      <div class="card-header py-2 fw-bold small text-uppercase d-flex justify-content-between align-items-center"
+           style="background:#eff6ff;color:#1e40af">
+        <span><i class="bi bi-box-seam me-2"></i>СДЭК — доставка</span>
+        {% if hawb.cdek_status_code %}
+        <span class="badge bg-{{ hawb.cdek_status_color }} {% if hawb.cdek_status_color == 'warning' %}text-dark{% endif %}">
+          {{ hawb.cdek_status_display }}
+        </span>
+        {% endif %}
+      </div>
+      <div class="card-body py-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div class="small">
+            {% if hawb.cdek_number %}
+              <div>Номер заказа СДЭК: <strong>{{ hawb.cdek_number }}</strong></div>
+            {% else %}
+              <div class="text-muted">Заказ СДЭК ещё не сопоставлен.</div>
+            {% endif %}
+            {% if hawb.cdek_status_date %}
+              <div class="text-muted">Статус от {{ hawb.cdek_status_date|date:"d.m.Y H:i" }}</div>
+            {% endif %}
+            {% if hawb.cdek_synced_at %}
+              <div class="text-muted">Синхронизировано {{ hawb.cdek_synced_at|date:"d.m.Y H:i" }}</div>
+            {% endif %}
+          </div>
+          <form method="post" action="{% url 'hawb_refresh_cdek' hawb.pk %}" style="display:inline">
+            {% csrf_token %}
+            <button class="btn btn-sm btn-outline-info" type="submit">
+              <i class="bi bi-arrow-repeat me-1"></i>Обновить статус СДЭК
+            </button>
+          </form>
+        </div>
+
+        {% if cdek_events %}
+        <hr class="my-2">
+        <div class="small text-muted mb-1">История статусов:</div>
+        <ul class="list-unstyled mb-0 small">
+          {% for ev in cdek_events %}
+          <li class="d-flex justify-content-between border-bottom py-1">
+            <span>
+              <strong>{{ ev.status_name|default:ev.status_code }}</strong>
+              {% if ev.city %}<span class="text-muted"> · {{ ev.city }}</span>{% endif %}
+            </span>
+            <span class="text-muted">{{ ev.occurred_at|date:"d.m.Y H:i" }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
     <!-- ═══ ЧЕКЛИСТ ДОКУМЕНТОВ (динамический) ═══ -->
     <div class="card mb-3 border-primary" id="checklistCard">
       <div class="card-header py-2 bg-primary text-white fw-bold small text-uppercase d-flex justify-content-between align-items-center">

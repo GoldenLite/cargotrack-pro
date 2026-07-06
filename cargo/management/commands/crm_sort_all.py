@@ -25,19 +25,7 @@ logger = logging.getLogger('cargo.crm_sort_all')
 
 CRM_ID = '1H7AdXuo_zalnalgrWfVhm0Lau1MdXtFuFbg5pPGfcfI'
 
-SPECIALIST_TABS = {
-    'Беляева Екатерина',
-    'Калина Елена',
-    'Коробкова Екатерина',
-    'Азамов Азам',
-    'Никонова Светлана',
-    'Подолин Алексей',
-    'Пругар Ольга',
-    'Алексеева Екатерина',
-    'Шушарина Татьяна',
-    'Леонова Вера',
-    'Лиханова Раиса',
-}
+from cargo.services.sheets.crm_tabs import SPECIALIST_TABS  # noqa: E402  единый whitelist вкладок
 
 COL_HAWB         = 3   # C
 COL_ARRIVAL_DATE = 5   # E

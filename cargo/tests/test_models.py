@@ -9,7 +9,7 @@ class CargoModelTests(TestCase):
         c = Cargo.objects.create(awb_number='123-12345670')
         self.assertEqual(c.awb_number, '123-12345670')
         self.assertEqual(c.stage, 'DRAFT')
-        self.assertEqual(c.status, 'CNPK')
+        # Легаси-поле Cargo.status удалено из модели — проверяем только stage.
         self.assertEqual(c.pieces_declared, 0)
 
     def test_cargo_awb_unique(self):

@@ -19,19 +19,7 @@ logger = logging.getLogger('cargo.sync_hide')
 
 CRM_ID = '1H7AdXuo_zalnalgrWfVhm0Lau1MdXtFuFbg5pPGfcfI'
 
-SPECIALIST_TABS = {
-    'Беляева Екатерина',
-    'Калина Елена',
-    'Коробкова Екатерина',
-    'Азамов Азам',
-    'Никонова Светлана',
-    'Подолин Алексей',
-    'Пругар Ольга',
-    'Алексеева Екатерина',
-    'Шушарина Татьяна',
-    'Леонова Вера',
-    'Лиханова Раиса',
-}
+from cargo.services.sheets.crm_tabs import SPECIALIST_TABS  # noqa: E402  единый whitelist вкладок
 
 
 def _retry(fn, *args, label='', **kwargs):
@@ -105,16 +93,44 @@ class Command(BaseCommand):
         entries = list(CrmHawbIndex.objects.filter(tab_name=ws.title))
         self.stdout.write(f'  index entries: {len(entries)}')
 
-        # 3. Сверяем — где last_hidden ≠ Sheets state
+        # sort-proof: реальные строки HAWB по ЖИВОЙ колонке C — скрываем/
+        # раскрываем по фактической позиции, а не по кэшу row_index
+        # (менеджеры свободно двигают/удаляют строки между сотрудниками).
+        from cargo.services.sheets.crm_realtime import live_row_map
+        live = live_row_map(ws)
+
+        # 3. Сверяем — где НУЖНОЕ скрытие ≠ фактическое в Sheets.
+        # want_hidden вычисляем ПРЯМО ЗДЕСЬ из кэша decl/status, а не полагаемся
+        # на last_hidden (его обновляет hide-фаза crm_sync, которая под лимитами
+        # Google API часто НЕ доходит → выпущенные строки оставались раскрытыми).
+        # Логика идентична crm_sync_incremental: «Выпуск разрешен» в статусе ИЛИ
+        # legacy (есть рег.ДТ, но статуса нет = старая ручная отметка «выпущено»).
         rows_to_hide = []
         rows_to_show = []
+        idx_to_save = []
         for e in entries:
-            idx = e.row_index - 1
+            row = live.get(e.hawb_number)
+            if row is None:
+                continue  # HAWB больше нет на вкладке — reindex уберёт запись
+            want_hidden = ('Выпуск разрешен' in (e.last_status or '')) \
+                or (bool(e.last_decl) and not e.last_status)
+            if want_hidden != e.last_hidden:
+                e.last_hidden = want_hidden
+                idx_to_save.append(e)
+            idx = row - 1
             actual = hidden_arr[idx] if idx < len(hidden_arr) else False
-            if e.last_hidden and not actual:
-                rows_to_hide.append(e.row_index)
-            elif not e.last_hidden and actual:
-                rows_to_show.append(e.row_index)
+            if want_hidden and not actual:
+                rows_to_hide.append(row)
+            elif not want_hidden and actual:
+                rows_to_show.append(row)
+
+        # Обновляем last_hidden в кэше (best-effort: под DB-lock не критично —
+        # Sheets уже поправим ниже, кэш догонит в следующий прогон).
+        if idx_to_save:
+            try:
+                CrmHawbIndex.objects.bulk_update(idx_to_save, ['last_hidden'])
+            except Exception as _e:
+                logger.warning('sync_hide: last_hidden bulk_update отложен: %s', _e)
 
         self.stdout.write(
             f'  to hide: {len(rows_to_hide)}, to show: {len(rows_to_show)}')

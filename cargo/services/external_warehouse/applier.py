@@ -30,7 +30,7 @@ MOSCOW_CARGO_PREFIXES = ('784', '555', '826', '537', '880')
 # Префиксы AWB которые приходят в Шереметьево-Карго (shercargo.ru).
 # Тот же терминал что Москва-Карго, но другой оператор — публичный портал
 # вместо JSON API. Только авиа (классический MAWB-формат XXX-XXXXXXXX).
-SHERCARGO_PREFIXES = ('115', '738')
+SHERCARGO_PREFIXES = ('115', '738', '999')
 
 # Классический IATA MAWB: XXX-XXXXXXXX (3 цифры, дефис, 8 цифр).
 # Этот regex автоматически отсекает moscow-cargo (784/555/826/537/880) и
@@ -218,7 +218,7 @@ def fetch_and_apply(cargo: Cargo,
         parsed = client.fetch(cargo.awb_number)
         if not parsed:
             return None
-        return apply_to_cargo(cargo, parsed)
+        return apply_to_cargo(cargo, parsed, source='moscow_cargo')
     finally:
         if close_after:
             client.close()

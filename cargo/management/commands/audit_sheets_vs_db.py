@@ -52,6 +52,7 @@ from cargo.services.sheets.writeback import (
     EXPORT_TRANSPORT_DOC_HEADER,
     _local_date_str,
     _retry_api,
+    _hawb_live_rows,
     _customs_requests_text,
     _customs_requests_count,
     _attempts_count,
@@ -205,6 +206,30 @@ def _normalize_num(s: str) -> str:
         return s
 
 
+# Колонки-даты: writeback пишет '09:03:31', но Google Sheets при сохранении
+# срезает ведущий ноль часа → '9:03:31'. Без нормализации аудит видит вечный
+# MISMATCH и --fix переписывает их каждый прогон впустую (format-churn).
+_DATE_LABELS = frozenset({
+    'filed_date', 'release_date', 'svh_do1_reg_date',
+    'svh_do1_sent', 'svh_do2',
+})
+
+
+def _normalize_dt(s: str) -> str:
+    """Нормализует дату/время: убирает ведущие нули у КАЖДОГО числового
+    компонента ('10.06.2026 09:03:31' → '10.6.2026 9:3:31'). Применяется к
+    обеим сторонам, поэтому реальные расхождения (другой день/час) сохраняются,
+    а различие в нулях/формате — гасится."""
+    s = (s or '').strip()
+    if not s:
+        return ''
+    # Разбиваем по разделителям, сохраняя их; числовые токены → int()
+    return ''.join(
+        str(int(tok)) if tok.isdigit() else tok
+        for tok in re.split(r'([.\s:/-])', s)
+    )
+
+
 class Command(BaseCommand):
     help = 'Сравнить CargoTrack-колонки в Sheets с ожидаемыми из БД'
 
@@ -237,9 +262,14 @@ class Command(BaseCommand):
             self.stdout.write(f'Нет активных {kind}-источников')
             return
 
-        # Safety gate против инцидента 09.06.2026: --fix без свежего
-        # import_sheets опирается на устаревшие row_index → пишет в чужие
-        # строки. Падаем рано, до любых API-вызовов.
+        # Freshness: ИСТОРИЧЕСКИ тут был hard-fail если import_sheets устарел
+        # >5мин — защита от инцидента 09.06.2026 (--fix писал в устаревшие
+        # row_index после ручной сортировки → данные съезжали). Теперь аудит
+        # sort-proof (таргетит ЖИВУЮ строку HAWB, _hawb_live_rows), поэтому
+        # staleness больше не опасен — оставляем только предупреждение, чтобы
+        # 15-минутный CargoTrack-AuditFix реально залечивал, а не падал на gate.
+        # Настоящая защита теперь в _audit_source: --fix пропускается, если
+        # живую HAWB-колонку прочитать не удалось (live_rows пуст).
         if opts.get('fix') and not opts.get('force'):
             from django.db.models import Max
             from django.utils import timezone as _tz
@@ -251,21 +281,14 @@ class Command(BaseCommand):
                         .filter(source=source)
                         .aggregate(m=Max('last_imported_at'))['m'])
                 if last is None:
-                    self.stdout.write(self.style.ERROR(
-                        f'  [{source.name}] нет ImportedSheetRow — запусти сначала '
-                        f'import_sheets'))
-                    return
-                if last < cutoff:
+                    self.stdout.write(self.style.WARNING(
+                        f'  [{source.name}] нет ImportedSheetRow — запусти '
+                        f'import_sheets (источник будет пропущен)'))
+                elif last < cutoff:
                     age_min = int((_tz.now() - last).total_seconds() / 60)
-                    self.stdout.write(self.style.ERROR(
-                        f'  [{source.name}] последний import_sheets {age_min} мин '
-                        f'назад (> {max_stale} мин). row_index могут устареть, '
-                        f'--fix опасен.'))
                     self.stdout.write(self.style.WARNING(
-                        f'  Запусти сначала: manage.py import_sheets --source {kind}'))
-                    self.stdout.write(self.style.WARNING(
-                        f'  Или повтори с --force (на свой риск)'))
-                    return
+                        f'  [{source.name}] import_sheets {age_min} мин назад — '
+                        f'аудит sort-proof таргетит живые строки, продолжаю'))
 
         for source in sources:
             self.stdout.write('')
@@ -296,6 +319,12 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(
                     f'  Не смог прочитать колонку {hdr}: {e}'))
 
+        # Sort-proof: где HAWB реально сейчас в листе (а не по устаревшему
+        # кэшу source_row_index). Без этого пересортировка/сдвиг строк юзером
+        # даёт ложные MISSING/STALE пары, а --fix пишет в чужие строки
+        # (инцидент 09.06.2026). Таргетим по живой колонке HAWB, как writeback.
+        live_rows = _hawb_live_rows(ws, source.header_row)
+
         # Все HAWB в Sheets «Общее»
         rows = (ImportedSheetRow.objects
                 .filter(source=source)
@@ -321,6 +350,9 @@ class Command(BaseCommand):
         # mismatch_kind → list of (row_idx, hawb_number, sheet_value, db_value, label)
         mismatches: dict = defaultdict(list)
         for row_idx, hn in items:
+            # Sort-proof: реальная строка HAWB в листе, fallback на кэш.
+            if live_rows:
+                row_idx = live_rows.get(hn, row_idx)
             h = hawbs_db.get(hn)
             if not h:
                 # HAWB в Sheets, но нет в БД → orphan-row, не интересует здесь
@@ -334,10 +366,14 @@ class Command(BaseCommand):
                     db_val = db_fn(h)
                 except Exception:
                     db_val = ''
-                # Нормализация для числовых колонок
+                # Нормализация для числовых и date-колонок (иначе ложные
+                # mismatch'и: Sheets хранит 1 как 1.0, а час как 9 а не 09).
                 if label in ('svh_do1_weight', 'svh_do1_places'):
                     s_norm = _normalize_num(sheet_val)
                     d_norm = _normalize_num(db_val)
+                elif label in _DATE_LABELS:
+                    s_norm = _normalize_dt(sheet_val)
+                    d_norm = _normalize_dt(db_val)
                 else:
                     s_norm = sheet_val
                     d_norm = db_val
@@ -386,6 +422,14 @@ class Command(BaseCommand):
 
         # Авто-фикс
         if opts['fix']:
+            # Sort-proof guard: без живой HAWB-колонки --fix опирался бы на
+            # устаревшие row_index → запись в чужие строки. Пропускаем
+            # (если только не --force).
+            if not live_rows and not opts.get('force'):
+                self.stdout.write(self.style.ERROR(
+                    '  Живую HAWB-колонку прочитать не удалось — --fix пропущен '
+                    '(sort-proof недоступен; --force чтобы записать на свой риск)'))
+                return
             self.stdout.write('')
             self.stdout.write(self.style.NOTICE('  Авто-фикс...'))
             self._auto_fix(ws, source, col_map, mismatches)

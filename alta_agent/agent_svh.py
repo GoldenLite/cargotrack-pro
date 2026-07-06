@@ -51,7 +51,7 @@ _HERE = Path(__file__).resolve().parent
 _PS1 = _HERE / 'svh_query.ps1'
 
 # Default timeout for fetch op (review concern #7: not 180)
-_FETCH_TIMEOUT = 60   # seconds — batched fetch of up to chunk envelopes
+_FETCH_TIMEOUT = 90   # seconds — batched fetch of up to chunk envelopes
 _LIST_TIMEOUT = 60    # seconds — single list query
 
 
@@ -170,21 +170,30 @@ def svh_reconcile_one_cycle(cfg: dict, post_inbox_fn, http_request_fn) -> None:
     # 3. Fetch missing in BATCHES (single PS invocation per batch — review #8)
     # Cap at max_per_cycle so a single cycle doesn't run too long.
     to_fetch = missing[:max_per_cycle]
-    FETCH_BATCH = 25  # 25 envelopes per PS invocation
+    # 5 (не 25) envelopes на PS-вызов: каждый fetch тянет blob сообщения
+    # из MS SQL Альты, 25 за раз не укладывались в timeout → таймаут всего
+    # батча. Меньший батч укладывается, missing разгребается за неск. циклов.
+    FETCH_BATCH = 5
     consecutive_failures = 0   # circuit breaker — review #7
     posted_ok = 0
     posted_fail = 0
     for i in range(0, len(to_fetch), FETCH_BATCH):
         batch = to_fetch[i:i + FETCH_BATCH]
         code, fetched = _run_ps(
-            ['-Op', 'fetch', '-EnvelopeIds', ','.join(batch)],
+            ['-Op', 'fetch', '-EnvelopeIds', ','.join(batch),
+             '-QueryTimeoutSec', '75'],   # SQL CommandTimeout (default 30 рвал
+                                          # тяжёлый blob-fetch раньше времени)
             timeout=_FETCH_TIMEOUT, op_label=f'fetch[{i}]'
         )
         if code != 0:
             consecutive_failures += 1
             if consecutive_failures >= 5:
-                logger.error('svh_reconcile: 5 consecutive fetch failures — abort cycle')
-                break
+                # НЕ абортим весь цикл (раньше был break — из-за этого при
+                # серии таймаутов missing вообще не разгребался). Логируем,
+                # сбрасываем счётчик и продолжаем со следующим батчем.
+                logger.warning('svh_reconcile: %d consecutive fetch failures — '
+                               'skip batch, continue cycle', consecutive_failures)
+                consecutive_failures = 0
             time.sleep(2)
             continue
         consecutive_failures = 0

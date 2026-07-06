@@ -26,6 +26,32 @@ from cargo.models import AltaInboxMessage, Cargo, HawbWorkflowEvent, HouseWaybil
 logger = logging.getLogger('cargo.alta.inbox')
 
 
+def _retry_on_locked(fn, *args, attempts: int = 6, **kwargs):
+    """Повтор записи при 'database is locked'.
+
+    SQLite WAL + waitress + параллельные cron-писатели (import/audit/crm_sync)
+    дают окна, где write-lock держится дольше busy_timeout (60s). Голый
+    save/update тогда кидает OperationalError → HTTP 500, и agent_svh теряет
+    svh_do1 (в логе `svh_do1: mawb=… → HTTP 500`, `failed=N`). Backoff-повтор
+    закрывает окно без архитектурных правок. Применять ТОЛЬКО к идемпотентным
+    записям (UPDATE по pk, save(update_fields=)).
+    """
+    import time as _time
+    from django.db import OperationalError
+
+    delay = 1.0
+    for i in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except OperationalError as e:
+            if 'locked' not in str(e).lower() or i == attempts - 1:
+                raise
+            logger.warning('inbox: DB locked, retry %d/%d in %.1fs',
+                           i + 1, attempts, delay)
+            _time.sleep(delay)
+            delay = min(delay * 2, 8.0)
+
+
 def _autocreate_disabled() -> bool:
     """Process-wide kill-switch для auto-create EXPORT HouseWaybill веток.
     Включается env ALTA_INBOX_AUTOCREATE_DISABLED=1 на время backfill,
@@ -1597,6 +1623,13 @@ def apply_svh_do1(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
                 cargo.scan_into_bond = new_dt
                 update_fields.append('scan_into_bond')
 
+    # Источник СВХ-данных: ДО1 (CMN.13010) — из Альта-СВХ (Внуково).
+    # Ставим маркер, только если ещё пуст (не перетираем moscow_cargo/
+    # deklarant/manual, у которых своя precedence).
+    if (do1_reg or license_) and not (cargo.svh_source or '').strip():
+        cargo.svh_source = 'alta'
+        update_fields.append('svh_source')
+
     if update_fields:
         cargo.save(update_fields=update_fields)
 
@@ -2064,7 +2097,7 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
             update_fields['scan_into_bond'] = dt
     if not cargo.svh_source:
         update_fields['svh_source'] = 'alta'
-    Cargo.objects.filter(pk=cargo.pk).update(**update_fields)
+    _retry_on_locked(Cargo.objects.filter(pk=cargo.pk).update, **update_fields)
     logger.info('svh_do1 parsed: Cargo %s (id=%s) updated: %s',
                 mawb, cargo.pk, sorted(update_fields.keys()))
     msg.cargo = cargo
@@ -2087,8 +2120,8 @@ def dispatch(msg: AltaInboxMessage) -> None:
     # ── Fast-path для CMN.13010 из parsed-таблицы ED2WHDocInventory ──
     # См. _apply_svh_do1_from_parsed_table docstring.
     if msg.msg_type == 'CMN.13010' and _apply_svh_do1_from_parsed_table(msg):
-        msg.save(update_fields=['msg_kind', 'cargo',
-                                'status_applied', 'parsed_meta'])
+        _retry_on_locked(msg.save, update_fields=['msg_kind', 'cargo',
+                                                  'status_applied', 'parsed_meta'])
         return
 
     # ── Запрос документов (MY.11003) ──

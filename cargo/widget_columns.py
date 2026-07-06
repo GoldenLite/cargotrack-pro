@@ -182,6 +182,12 @@ HAWB_COLUMNS = [
     {'key': 'sla_customs',  'label': 'SLA (таможня)',    'type': 'sla_progress',
      'db_fields': ['customs_status', 'customs_status_date'], 'align': 'center',
      'sla': {'entity_type': 'hawb', 'status_field': 'customs_status'}},
+    {'key': 'cdek_status',  'label': 'Статус СДЭК',       'type': 'text',
+     'db_fields': ['cdek_status_name'], 'sortable': True},
+    {'key': 'cdek_number',  'label': 'Заказ СДЭК',        'type': 'mono',
+     'db_fields': ['cdek_number'], 'sortable': True},
+    {'key': 'cdek_status_date','label': 'Дата статуса СДЭК','type': 'datetime',
+     'db_fields': ['cdek_status_date'], 'sortable': True},
 ]
 
 HAWB_DEFAULT_COLUMNS = [

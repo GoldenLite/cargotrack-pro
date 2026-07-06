@@ -3300,7 +3300,7 @@ def api_alta_inbox_post(request):
         return Response({'ok': True, 'note': 'noise type, skipped'})
 
     from .models import AltaInboxMessage
-    from .services.alta.inbox import dispatch
+    from .services.alta.inbox import dispatch, _retry_on_locked
 
     prepared_at = data.get('prepared_at')
     if prepared_at:
@@ -3326,7 +3326,14 @@ def api_alta_inbox_post(request):
             # парсер никогда не должен ронять view
             pass
 
-    msg, created = AltaInboxMessage.objects.update_or_create(
+    # Retry на 'database is locked': svh_reconcile/db_reconcile шлют пачками,
+    # а БД под конкурентной нагрузкой (import_sheets 14k строк + cron) держит
+    # write-lock дольше busy_timeout → update/dispatch падали в HTTP 500, и
+    # СВХ-сообщения (CMN.13010 ДО1) терялись. Записи идемпотентны
+    # (update_or_create по envelope_id; svh-dispatch пишет только пустые поля),
+    # поэтому backoff-повтор безопасен.
+    msg, created = _retry_on_locked(
+        AltaInboxMessage.objects.update_or_create,
         envelope_id=envelope_id,
         defaults={
             'msg_type': (data.get('msg_type') or '').strip()[:32],
@@ -3338,7 +3345,7 @@ def api_alta_inbox_post(request):
         },
     )
     if created:
-        dispatch(msg)
+        _retry_on_locked(dispatch, msg)
     return Response({
         'id': msg.pk,
         'envelope_id': msg.envelope_id,
@@ -3492,22 +3499,31 @@ def api_alta_outbox_post(request):
 @permission_classes([])
 @authentication_classes([])
 def api_alta_agent_download(request):
-    """GET /api/v1/alta/agent/download/ — отдаёт текущий alta_agent.py.
+    """GET /api/v1/alta/agent/download/[?file=NAME] — отдаёт файл агента.
 
     Используется как self-update: на рабочей VPS скачиваем фиксированную версию,
-    кладём поверх C:\\ALTA\\IN\\alta_agent\\alta_agent.py и рестартим
-    scheduled task. Файл публичный (исходный код агента не секретный).
+    кладём поверх C:\\ALTA\\IN\\alta_agent\\<file> и рестартим scheduled task.
+    Файлы публичные (исходный код агента не секретный). Без ?file= — alta_agent.py
+    (обратная совместимость). Whitelist, чтобы не отдавать произвольные пути.
     """
     from pathlib import Path
     from django.http import FileResponse, HttpResponse
-    p = Path(__file__).resolve().parent.parent / 'alta_agent' / 'alta_agent.py'
+    allowed = {
+        'alta_agent.py': 'text/x-python',
+        'agent_svh.py': 'text/x-python',
+        'svh_query.ps1': 'text/plain',
+    }
+    fname = (request.GET.get('file') or 'alta_agent.py').strip()
+    if fname not in allowed:
+        return HttpResponse('file not allowed', status=400)
+    p = Path(__file__).resolve().parent.parent / 'alta_agent' / fname
     if not p.exists():
         return HttpResponse('agent file missing', status=404)
     return FileResponse(
         open(p, 'rb'),
         as_attachment=True,
-        filename='alta_agent.py',
-        content_type='text/x-python',
+        filename=fname,
+        content_type=allowed[fname],
     )
 
 

@@ -15,6 +15,7 @@ class HouseWaybillSerializer(serializers.ModelSerializer):
     logistics_status_display = serializers.CharField(read_only=True)
     customs_status_label = serializers.CharField(read_only=True)
     full_status_display = serializers.CharField(read_only=True)
+    cdek_status_display = serializers.CharField(read_only=True)
 
     class Meta:
         model = HouseWaybill
@@ -28,6 +29,8 @@ class HouseWaybillSerializer(serializers.ModelSerializer):
             'customs_status', 'customs_status_label', 'full_status_display',
             'customs_declaration_number',
             'scan_into_bond', 'release_date',
+            'cdek_number', 'cdek_status_code', 'cdek_status_name',
+            'cdek_status_display', 'cdek_status_date', 'cdek_synced_at',
             'created_at', 'updated_at',
         ]
 

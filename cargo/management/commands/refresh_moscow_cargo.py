@@ -89,7 +89,8 @@ class Command(BaseCommand):
                     n_found += 1
                     # writeback=False — собираем applied и делаем batch ниже,
                     # иначе на 100+ партий упираемся в Google API 300 read/min.
-                    if apply_to_cargo(cargo, parsed, writeback=False):
+                    if apply_to_cargo(cargo, parsed, writeback=False,
+                                      source='moscow_cargo'):
                         n_applied += 1
                         applied_cargos.append(cargo)
                         self.stdout.write(self.style.SUCCESS(

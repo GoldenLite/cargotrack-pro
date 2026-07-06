@@ -116,6 +116,49 @@ def _open_ss_and_ws_map():
     return ss, ws_by_title
 
 
+def live_row_map(ws) -> dict:
+    """{hawb_number → 1-based row} из ЖИВОЙ колонки C (COL_HAWB) вкладки.
+
+    Sort-proof таргетинг: пишем/скрываем в строку, где HAWB РЕАЛЬНО сейчас,
+    а не по кэшу CrmHawbIndex.row_index. Это позволяет менеджерам свободно
+    резать/вставлять/двигать строки в Google Sheets — запись подстраивается,
+    в чужую строку не пишем.
+
+    Читается заново на каждый прогон (без TTL-кэша) — чтобы сразу после
+    ручного редактирования не было окна со stale-позициями.
+    """
+    try:
+        col = _retry(ws.col_values, COL_HAWB, label=f'live rows {ws.title}')
+    except Exception:
+        logger.exception('crm_rt: live col read failed for %r', ws.title)
+        return {}
+    m: dict[str, int] = {}
+    for i, v in enumerate(col):
+        s = str(v or '').strip()
+        if s and s not in m:   # первая встреча = верхняя строка (дубли игнорим)
+            m[s] = i + 1
+    return m
+
+
+def resolve_live_rows(ws_by_title, entries_by_tab) -> dict:
+    """{(tab, hawb_number) → live_row} по живой колонке C для каждой вкладки.
+
+    Если HAWB больше нет на вкладке — ключа нет (caller пропускает запись,
+    не трогая чужую строку). Один read колонки C на вкладку.
+    """
+    out: dict = {}
+    for tab, entries in entries_by_tab.items():
+        ws = ws_by_title.get(tab)
+        if ws is None:
+            continue
+        lm = live_row_map(ws)
+        for e in entries:
+            r = lm.get(e.hawb_number)
+            if r:
+                out[(tab, e.hawb_number)] = r
+    return out
+
+
 def _write_batch(ws_by_title, updates_per_tab: dict, label: str) -> int:
     """Пишет batched updates per-tab. Возвращает суммарное число cells."""
     wrote = 0
@@ -139,12 +182,18 @@ def _write_batch(ws_by_title, updates_per_tab: dict, label: str) -> int:
     return wrote
 
 
-def batch_write_ed_status_for_crm_hawbs(hawbs: list) -> int:
+def batch_write_ed_status_for_crm_hawbs(hawbs: list, ws_by_title: dict = None,
+                                        live: dict = None) -> int:
     """Realtime запись «Статус ЭД» (колонка X) в CRM-вкладках специалистов.
 
     Параллельно с «Общее»-writeback. Если HAWB не в CrmHawbIndex (нет в
     спец-вкладках) — no-op. Обновляет CrmHawbIndex.last_status чтобы cron
-    не дёргался впустую."""
+    не дёргался впустую.
+
+    sort-proof: пишем в ЖИВУЮ строку HAWB (по колонке C), а не по кэшу
+    row_index — менеджеры могут свободно двигать строки. ws_by_title/live
+    можно передать снаружи (batch_write_all переиспользует на 3 функции),
+    иначе открываем/резолвим сами."""
     from cargo.services.alta.ed_status import compute_ed_status
 
     if not hawbs:
@@ -164,6 +213,17 @@ def batch_write_ed_status_for_crm_hawbs(hawbs: list) -> int:
             logger.exception('crm_rt ed_status compute for %s failed', hn)
             new_status_by_num[hn] = None
 
+    # Открываем лист ПЕРВЫМ — нужно прочитать живую колонку C (sort-proof).
+    own_open = ws_by_title is None
+    if own_open:
+        try:
+            _, ws_by_title = _open_ss_and_ws_map()
+        except Exception:
+            logger.exception('crm_rt ed_status: spreadsheet open failed')
+            return 0
+    if live is None:
+        live = resolve_live_rows(ws_by_title, by_tab)
+
     updates_per_tab: dict[str, list] = defaultdict(list)
     idx_to_save: list[CrmHawbIndex] = []
     for tab, entries in by_tab.items():
@@ -173,20 +233,19 @@ def batch_write_ed_status_for_crm_hawbs(hawbs: list) -> int:
                 continue
             if new_status == entry.last_status:
                 continue
+            row = live.get((tab, entry.hawb_number))
+            if row is None:
+                continue  # HAWB больше нет на этой вкладке — в чужую строку не пишем
             updates_per_tab[tab].append({
-                'range': f'{_col_letter(COL_ED_STATUS)}{entry.row_index}',
+                'range': f'{_col_letter(COL_ED_STATUS)}{row}',
                 'values': [[new_status]],
             })
             entry.last_status = (new_status or '')[:128]
+            if entry.row_index != row:
+                entry.row_index = row  # self-heal индекса к реальной строке
             idx_to_save.append(entry)
 
     if not updates_per_tab:
-        return 0
-
-    try:
-        _, ws_by_title = _open_ss_and_ws_map()
-    except Exception:
-        logger.exception('crm_rt ed_status: spreadsheet open failed')
         return 0
 
     wrote = _write_batch(ws_by_title, updates_per_tab, 'ed_status')
@@ -198,7 +257,8 @@ def batch_write_ed_status_for_crm_hawbs(hawbs: list) -> int:
             for e in idx_to_save:
                 e.last_synced_at = now
             CrmHawbIndex.objects.bulk_update(
-                idx_to_save, fields=['last_status', 'last_synced_at'],
+                idx_to_save,
+                fields=['last_status', 'last_synced_at', 'row_index'],
                 batch_size=500,
             )
         except Exception:
@@ -207,10 +267,13 @@ def batch_write_ed_status_for_crm_hawbs(hawbs: list) -> int:
     return wrote
 
 
-def batch_write_decl_for_crm_hawbs(hawbs: list) -> int:
+def batch_write_decl_for_crm_hawbs(hawbs: list, ws_by_title: dict = None,
+                                   live: dict = None) -> int:
     """Realtime запись «Регистрационный номер ДТ» (колонка W) в CRM-вкладках.
     Правило feedback_decl_only_on_released — пишем decl ТОЛЬКО при статусе
-    «Выпуск разрешен», при не-released — стираем."""
+    «Выпуск разрешен», при не-released — стираем.
+
+    sort-proof: пишем в живую строку HAWB (колонка C)."""
     from cargo.services.alta.ed_status import compute_ed_status
 
     if not hawbs:
@@ -230,6 +293,16 @@ def batch_write_decl_for_crm_hawbs(hawbs: list) -> int:
         new_decl = (getattr(h, 'customs_declaration_number', '') or '').strip()
         snapshot[hn] = (new_decl, new_status)
 
+    own_open = ws_by_title is None
+    if own_open:
+        try:
+            _, ws_by_title = _open_ss_and_ws_map()
+        except Exception:
+            logger.exception('crm_rt decl: spreadsheet open failed')
+            return 0
+    if live is None:
+        live = resolve_live_rows(ws_by_title, by_tab)
+
     updates_per_tab: dict[str, list] = defaultdict(list)
     idx_to_save: list[CrmHawbIndex] = []
     for tab, entries in by_tab.items():
@@ -240,20 +313,19 @@ def batch_write_decl_for_crm_hawbs(hawbs: list) -> int:
             want = _compute_want_decl(new_decl, new_status, entry.last_decl)
             if want == entry.last_decl:
                 continue
+            row = live.get((tab, entry.hawb_number))
+            if row is None:
+                continue  # HAWB больше нет на этой вкладке — в чужую строку не пишем
             updates_per_tab[tab].append({
-                'range': f'{_col_letter(COL_DECL)}{entry.row_index}',
+                'range': f'{_col_letter(COL_DECL)}{row}',
                 'values': [[want]],
             })
             entry.last_decl = (want or '')[:64]
+            if entry.row_index != row:
+                entry.row_index = row  # self-heal индекса
             idx_to_save.append(entry)
 
     if not updates_per_tab:
-        return 0
-
-    try:
-        _, ws_by_title = _open_ss_and_ws_map()
-    except Exception:
-        logger.exception('crm_rt decl: spreadsheet open failed')
         return 0
 
     wrote = _write_batch(ws_by_title, updates_per_tab, 'decl')
@@ -265,7 +337,8 @@ def batch_write_decl_for_crm_hawbs(hawbs: list) -> int:
             for e in idx_to_save:
                 e.last_synced_at = now
             CrmHawbIndex.objects.bulk_update(
-                idx_to_save, fields=['last_decl', 'last_synced_at'],
+                idx_to_save,
+                fields=['last_decl', 'last_synced_at', 'row_index'],
                 batch_size=500,
             )
         except Exception:
@@ -274,9 +347,12 @@ def batch_write_decl_for_crm_hawbs(hawbs: list) -> int:
     return wrote
 
 
-def batch_write_request_for_crm_hawbs(hawbs: list) -> int:
+def batch_write_request_for_crm_hawbs(hawbs: list, ws_by_title: dict = None,
+                                      live: dict = None) -> int:
     """Realtime «Запросы таможни» (колонка U). Пишем только если новое
-    значение непустое и отличается."""
+    значение непустое и отличается.
+
+    sort-proof: пишем в живую строку HAWB (колонка C)."""
     from cargo.services.sheets.writeback import _customs_requests_text
 
     if not hawbs:
@@ -293,6 +369,16 @@ def batch_write_request_for_crm_hawbs(hawbs: list) -> int:
         except Exception:
             snapshot[hn] = ''
 
+    own_open = ws_by_title is None
+    if own_open:
+        try:
+            _, ws_by_title = _open_ss_and_ws_map()
+        except Exception:
+            logger.exception('crm_rt request: spreadsheet open failed')
+            return 0
+    if live is None:
+        live = resolve_live_rows(ws_by_title, by_tab)
+
     updates_per_tab: dict[str, list] = defaultdict(list)
     idx_to_save: list[CrmHawbIndex] = []
     for tab, entries in by_tab.items():
@@ -300,19 +386,19 @@ def batch_write_request_for_crm_hawbs(hawbs: list) -> int:
             new_request = snapshot.get(entry.hawb_number, '')
             if not new_request or new_request == entry.last_request:
                 continue
+            row = live.get((tab, entry.hawb_number))
+            if row is None:
+                continue  # HAWB больше нет на этой вкладке — в чужую строку не пишем
             updates_per_tab[tab].append({
-                'range': f'{_col_letter(COL_REQUEST)}{entry.row_index}',
+                'range': f'{_col_letter(COL_REQUEST)}{row}',
                 'values': [[new_request]],
             })
             entry.last_request = new_request
+            if entry.row_index != row:
+                entry.row_index = row  # self-heal индекса
             idx_to_save.append(entry)
 
     if not updates_per_tab:
-        return 0
-    try:
-        _, ws_by_title = _open_ss_and_ws_map()
-    except Exception:
-        logger.exception('crm_rt request: spreadsheet open failed')
         return 0
     wrote = _write_batch(ws_by_title, updates_per_tab, 'request')
 
@@ -323,7 +409,8 @@ def batch_write_request_for_crm_hawbs(hawbs: list) -> int:
             for e in idx_to_save:
                 e.last_synced_at = now
             CrmHawbIndex.objects.bulk_update(
-                idx_to_save, fields=['last_request', 'last_synced_at'],
+                idx_to_save,
+                fields=['last_request', 'last_synced_at', 'row_index'],
                 batch_size=500,
             )
         except Exception:
@@ -339,16 +426,30 @@ def batch_write_all_for_crm_hawbs(hawbs: list) -> dict[str, int]:
     result = {'ed_status': 0, 'decl': 0, 'request': 0}
     if not hawbs:
         return result
+    # Открываем лист и резолвим живые строки ОДИН раз на 3 функции
+    # (sort-proof без 3× чтений колонки C). Если не вышло — функции
+    # откроют/резолвят сами (own_open).
+    ws_by_title = live = None
     try:
-        result['ed_status'] = batch_write_ed_status_for_crm_hawbs(hawbs)
+        by_tab = _hawbs_to_crm_index_groups(hawbs)
+        if by_tab:
+            _, ws_by_title = _open_ss_and_ws_map()
+            live = resolve_live_rows(ws_by_title, by_tab)
+    except Exception:
+        logger.exception('crm_rt: open/resolve failed; под-функции откроют сами')
+        ws_by_title = live = None
+    try:
+        result['ed_status'] = batch_write_ed_status_for_crm_hawbs(
+            hawbs, ws_by_title, live)
     except Exception:
         logger.exception('crm_rt: ed_status writeback failed')
     try:
-        result['decl'] = batch_write_decl_for_crm_hawbs(hawbs)
+        result['decl'] = batch_write_decl_for_crm_hawbs(hawbs, ws_by_title, live)
     except Exception:
         logger.exception('crm_rt: decl writeback failed')
     try:
-        result['request'] = batch_write_request_for_crm_hawbs(hawbs)
+        result['request'] = batch_write_request_for_crm_hawbs(
+            hawbs, ws_by_title, live)
     except Exception:
         logger.exception('crm_rt: request writeback failed')
     return result

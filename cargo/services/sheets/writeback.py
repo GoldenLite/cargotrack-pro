@@ -619,175 +619,53 @@ def _local_date_str(dt) -> str:
 
 
 def write_svh_placement_for_cargo(cargo: Cargo) -> int:
-    """Пишет лицензию СВХ и дату размещения в Sheets для всех HAWB партии.
+    """Пишет СВХ-поля (лицензия / дата ДО1 / рег.номер ДО1) в «Общее» для
+    всех HAWB одной партии.
 
-    СВХ-данные (CMN.13029) на уровне Cargo (партии), но строки в Sheets
-    «Общее» индексированы по HAWB. Эта функция:
-    1. Достаёт лицензию и дату из cargo (выставленных в apply_svh_placement).
-    2. Находит все HAWB партии → их строки в Sheets.
-    3. Группирует по SheetSource (обычно одна — таблица «Общее»).
-    4. Делает batch_update по 2 ячейкам на HAWB одним запросом.
-
-    Возвращает кол-во записанных ячеек (для логирования).
+    Тонкая обёртка над sort-proof `batch_write_svh_for_cargos` — единая
+    реализация. Раньше здесь была отдельная копия, которая таргетила по
+    `ImportedSheetRow.source_row_index` (НЕ sort-proof): после сортировки
+    строк писала в чужой ряд, а HAWB, ещё не попавшую в ImportedSheetRow,
+    не видела вовсе («дата прибытия есть, СВХ нет»). Теперь оба пути идут
+    через live-таргетинг по колонке «Накладная СДЭК».
     """
-    if _sheets_writeback_disabled():
-        return 0
-    lic = (cargo.warehouse_license or '').strip()
-    placed_dt = cargo.scan_into_bond
-    do1_reg = (cargo.svh_do1_reg_number or '').strip()
-    # ДО2 НЕ на Cargo — это per-HAWB поле (HouseWaybill.svh_do2_send_at),
-    # отдельный writeback batch_write_svh_do2_dates_for_hawbs.
-    # Не делаем early-return при пустых значениях — функция должна
-    # уметь ОЧИЩАТЬ Sheets-ячейки если данные были откачены на стороне БД.
-
-    # Дата для Sheets — формат дд.мм.гггг чч:мм:сс по МСК. _local_date_str
-    # переводит из UTC если datetime aware.
-    placed_str = _local_date_str(placed_dt)
-
-    # Все HAWB партии
-    hawbs = list(cargo.hawbs.values_list('hawb_number', flat=True))
-    if not hawbs:
-        return 0
-
-    # Группировка row_index по SheetSource — типично всё в одной general-таблице
-    rows = (ImportedSheetRow.objects
-            .filter(source__kind='general', hawb_number_norm__in=hawbs)
-            .select_related('source')
-            .order_by('-last_imported_at'))
-    if not rows.exists():
-        logger.info('svh writeback: no Sheets rows for Cargo %s (%d hawbs)',
-                    cargo.awb_number, len(hawbs))
-        return 0
-
-    sources: dict[int, SheetSource] = {}
-    rows_by_source: dict[int, list[int]] = defaultdict(list)
-    seen_hawb: set[str] = set()  # отсекаем дубли (исторические импорты)
-    for r in rows:
-        if r.hawb_number_norm in seen_hawb:
-            continue
-        seen_hawb.add(r.hawb_number_norm)
-        sources[r.source_id] = r.source
-        rows_by_source[r.source_id].append(r.source_row_index)
-
-    total_writes = 0
-    for source_id, row_indices in rows_by_source.items():
-        source = sources[source_id]
-        try:
-            ws = open_worksheet(source)
-        except SheetsConfigError as e:
-            logger.warning('svh writeback: open failed for %s: %s', source.name, e)
-            continue
-        except Exception:
-            logger.exception('svh writeback: open error for %s', source.name)
-            continue
-
-        try:
-            col_lic      = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_LICENSE_HEADER)
-            col_date     = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DATE_HEADER)
-            col_do1      = _ensure_named_column(ws, source.header_row,
-                                                CARGOTRACK_SVH_DO1_HEADER)
-        except gspread.exceptions.APIError as e:
-            logger.exception('svh writeback: ensure column failed: %s', e)
-            continue
-
-        # Читаем существующие значения колонок одним запросом каждая,
-        # чтобы не писать совпадающее (Google биллит каждый write).
-        try:
-            existing_lic      = ws.col_values(col_lic)
-            existing_date     = ws.col_values(col_date)
-            existing_do1      = ws.col_values(col_do1)
-        except gspread.exceptions.APIError as e:
-            logger.exception('svh writeback: col_values failed: %s', e)
-            continue
-
-        letter_lic      = _col_letter(col_lic)
-        letter_date     = _col_letter(col_date)
-        letter_do1      = _col_letter(col_do1)
-
-        updates = []
-        for row_idx in row_indices:
-            cur_lic = (existing_lic[row_idx - 1]
-                       if row_idx - 1 < len(existing_lic) else '').strip()
-            cur_date = (existing_date[row_idx - 1]
-                        if row_idx - 1 < len(existing_date) else '').strip()
-            cur_do1 = (existing_do1[row_idx - 1]
-                       if row_idx - 1 < len(existing_do1) else '').strip()
-            # Пишем даже если значение пустое — нужно чтобы при откате
-            # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
-            # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
-            if cur_lic != lic:
-                updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
-            if cur_date != placed_str:
-                updates.append({'range': f'{letter_date}{row_idx}', 'values': [[placed_str]]})
-            if cur_do1 != do1_reg:
-                updates.append({'range': f'{letter_do1}{row_idx}', 'values': [[do1_reg]]})
-
-        if not updates:
-            continue
-
-        updates = _filter_inrange_updates(updates, ws, source.name)
-        if not updates:
-            continue
-
-        # Bьём на чанки + retry на 503/429 (см. _chunked_batch_update).
-        total_writes += _chunked_batch_update(
-            ws, updates, f'svh Cargo {cargo.awb_number}', source.name)
-
-    return total_writes
+    return batch_write_svh_for_cargos([cargo])
 
 
 def batch_write_svh_for_cargos(cargos: list) -> int:
-    """Batch-writeback СВХ-полей для списка партий — ОДИН проход по Sheets.
+    """Batch-writeback СВХ-полей (лицензия / дата ДО1 / рег.номер ДО1) в «Общее».
 
-    Per-cargo `write_svh_placement_for_cargo` делает по 3 read'а на колонку,
-    что упирается в Google quota 300 read/min уже на 100 партиях. Эта функция
-    читает каждую из трёх колонок ОДИН раз для всей таблицы и собирает
-    единый batch_update.
+    SORT-PROOF + без окна ImportedSheetRow: ряды находим в ЖИВОЙ колонке
+    «Накладная СДЭК» (`_hawb_live_rows`), а не по кэшу `source_row_index`.
+    Следствия:
+    - после сортировки/удаления строк юзером пишем в ПРАВИЛЬНЫЙ ряд;
+    - HAWB, которая уже в листе, но ещё не попала в ImportedSheetRow
+      (импорт не прогнался), получает СВХ сразу — закрывает класс
+      «дата прибытия есть, а СВХ/ДО1 нет».
 
+    Читает каждую из трёх СВХ-колонок + HAWB-колонку по одному разу на
+    источник (обычно единственный — «Общее»). Единая реализация: per-cargo
+    `write_svh_placement_for_cargo` — тонкая обёртка над этой функцией.
     Возвращает кол-во записанных ячеек.
     """
     if _sheets_writeback_disabled():
         return 0
     if not cargos:
         return 0
+    from .mapping import normalize_hawb_number
 
-    # Собираем все HAWB в одну выборку с привязкой к Cargo
+    # нормализованный HAWB -> Cargo
     hawb_to_cargo: dict[str, Cargo] = {}
     for c in cargos:
         for hn in c.hawbs.values_list('hawb_number', flat=True):
-            hawb_to_cargo[hn] = c
+            key = normalize_hawb_number(hn)
+            if key:
+                hawb_to_cargo[key] = c
     if not hawb_to_cargo:
         return 0
 
-    rows = (ImportedSheetRow.objects
-            .filter(source__kind='general',
-                    hawb_number_norm__in=list(hawb_to_cargo.keys()))
-            .select_related('source')
-            .order_by('-last_imported_at'))
-    if not rows.exists():
-        logger.info('batch svh: no Sheets rows for %d cargos', len(cargos))
-        return 0
-
-    # Группируем по source, дедупим по HAWB
-    sources: dict[int, SheetSource] = {}
-    rows_by_source: dict[int, list[tuple[int, Cargo]]] = defaultdict(list)
-    seen: set[str] = set()
-    for r in rows:
-        if r.hawb_number_norm in seen:
-            continue
-        seen.add(r.hawb_number_norm)
-        cargo = hawb_to_cargo.get(r.hawb_number_norm)
-        if not cargo:
-            continue
-        sources[r.source_id] = r.source
-        rows_by_source[r.source_id].append(
-            (r.source_row_index, r.hawb_number_norm, cargo))
-
     total = 0
-    for source_id, items in rows_by_source.items():
-        source = sources[source_id]
+    for source in SheetSource.objects.filter(kind='general', is_active=True):
         try:
             ws = _retry_api(open_worksheet, source, label='batch svh open')
             col_lic = _retry_api(_ensure_named_column, ws, source.header_row,
@@ -799,47 +677,47 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
             col_do1 = _retry_api(_ensure_named_column, ws, source.header_row,
                                  CARGOTRACK_SVH_DO1_HEADER,
                                  label='batch svh col_do1')
-        except (SheetsConfigError, gspread.exceptions.APIError) as e:
-            logger.exception('batch svh: open/ensure failed: %s', e)
-            continue
-
-        # Читаем все нужные колонки ОДИН РАЗ для всей таблицы
-        try:
+            # Читаем все нужные колонки ОДИН РАЗ для всей таблицы.
             existing_lic = _retry_api(ws.col_values, col_lic, label='batch svh read_lic')
             existing_date = _retry_api(ws.col_values, col_date, label='batch svh read_date')
             existing_do1 = _retry_api(ws.col_values, col_do1, label='batch svh read_do1')
-        except gspread.exceptions.APIError as e:
-            logger.exception('batch svh: col_values failed: %s', e)
+        except (SheetsConfigError, gspread.exceptions.APIError) as e:
+            logger.exception('batch svh: open/read failed for %s: %s', source.name, e)
+            continue
+        except Exception:
+            logger.exception('batch svh: unexpected error for %s', source.name)
             continue
 
-        letter_lic      = _col_letter(col_lic)
-        letter_date     = _col_letter(col_date)
-        letter_do1      = _col_letter(col_do1)
-
-        # Sort-proof: ищем реальный ряд HAWB в листе (не по устаревшему кэшу).
+        # Sort-proof + без окна ImportedSheetRow: {нормализованный HAWB →
+        # живой ряд} из колонки «Накладная СДЭК». Пустой dict = нет
+        # HAWB-колонки → не пишем вслепую, пропускаем источник.
         live_rows = _hawb_live_rows(ws, source.header_row)
+        if not live_rows:
+            logger.info('batch svh: no live HAWB column in %s, skip', source.name)
+            continue
+
+        letter_lic  = _col_letter(col_lic)
+        letter_date = _col_letter(col_date)
+        letter_do1  = _col_letter(col_do1)
 
         updates = []
-        for row_idx, hawb_norm, cargo in items:
-            if live_rows:
-                row_idx = live_rows.get(hawb_norm, row_idx)
+        for hawb_norm, cargo in hawb_to_cargo.items():
+            row_idx = live_rows.get(hawb_norm)
+            if not row_idx:
+                continue  # HAWB нет в этом листе сейчас — писать некуда
             lic = (cargo.warehouse_license or '').strip()
             placed_str = _local_date_str(cargo.scan_into_bond)
             do1_reg = (cargo.svh_do1_reg_number or '').strip()
-            # NB: чужие лицензии (10005/...) — это легитимные данные с
-            # moscow-cargo.com парсера (refresh_moscow_cargo). Не фильтруем —
-            # юзер хочет видеть инфу о партиях которые едут в Москва Карго.
-
+            # NB: чужие лицензии (10005/...) — легитимные данные с
+            # moscow-cargo.com (refresh_moscow_cargo), не фильтруем.
             cur_lic = (existing_lic[row_idx - 1]
                        if row_idx - 1 < len(existing_lic) else '').strip()
             cur_date = (existing_date[row_idx - 1]
                         if row_idx - 1 < len(existing_date) else '').strip()
             cur_do1 = (existing_do1[row_idx - 1]
                        if row_idx - 1 < len(existing_do1) else '').strip()
-
-            # Пишем даже если значение пустое — нужно чтобы при откате
-            # неверной CMN.13010-привязки (Cargo.scan_into_bond=None и
-            # т.п.) Sheets-ячейки тоже очищались, а не висели стейлом.
+            # Пишем даже пустое значение (diff), чтобы при откате CMN.13010
+            # (scan_into_bond=None и т.п.) ячейки очищались, а не висели стейлом.
             if cur_lic != lic:
                 updates.append({'range': f'{letter_lic}{row_idx}', 'values': [[lic]]})
             if cur_date != placed_str:
@@ -849,16 +727,11 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
 
         if not updates:
             continue
-
-        # Если ImportedSheetRow ссылается на строки за пределами текущего
-        # размера Sheet (юзер удалил строки в Sheets после импорта) —
-        # отфильтровываем такие записи, иначе ВЕСЬ batch падает с 400.
+        # Отбрасываем ряды за пределами текущего размера листа, иначе весь
+        # batch падает с 400 (обычно не бывает, т.к. ряд из живой карты).
         updates = _filter_inrange_updates(updates, ws, source.name)
         if not updates:
             continue
-
-        # Bьём на чанки + retry на 503 — _chunked_batch_update определён
-        # ниже, но Python резолвит при вызове, не при импорте функции.
         total += _chunked_batch_update(ws, updates, 'svh', source.name)
 
     return total

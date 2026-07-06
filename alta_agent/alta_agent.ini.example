@@ -114,3 +114,40 @@ state_db = svh_outbox_state.sqlite
 
 # Endpoint на VPS. Тот же что у [outbox] (msg_type='ED.DO1' разводит логику).
 endpoint = /api/v1/alta/outbox/
+
+
+# ── DB Reconcile: сверка с БД Альты (Postgres) ─────────────────────────
+# Опрашивает Postgres БД Альты-ГТД на предмет входящих сообщений за окно
+# (window_days), узнаёт у VPS какие envelope_id у нас отсутствуют, и
+# докачивает их тела из `edmsgsxml` → отправляет на /api/v1/alta/inbox/.
+# Закрывает дырки, образовавшиеся когда inbox-watcher не сработал (агент
+# был выключен, s3-скрипт опередил, ошибки архива и т.п.).
+#
+# По умолчанию ВЫКЛЮЧЕНО — на машинах без psycopg2 / без доступа к PG.
+# Включить: enabled=true + установить psycopg2-binary (uv add psycopg2-binary
+# или pip install psycopg2-binary).
+#
+# Безопасность: read-only сессия, statement_timeout=60s.
+
+[db_reconcile]
+enabled = false
+
+# Период опроса (сек). 600 = раз в 10 минут.
+poll_interval = 600
+
+# Окно сверки: смотрим сообщения за последние N дней.
+window_days = 2
+
+# Чанк для batch-запроса /api/v1/alta/inbox/missing/.
+chunk = 2000
+
+# Реквизиты БД Альты-ГТД (Postgres).
+db_host = 10.129.0.9
+db_port = 5432
+db_name = alta
+db_user = alta_admin
+db_password =
+
+# Фильтр типов сообщений, которые сверяем. Через запятую без пробелов.
+# Сюда добавлены входящие, которые реально парсятся на VPS.
+msg_types = CMN.11337,CMN.11314,CMN.11350,MY.11003,ED.11003,ED.11010,CMN.11010,CMN.11001,CMN.11002,CMN.11309,CMN.11310,ED.11002

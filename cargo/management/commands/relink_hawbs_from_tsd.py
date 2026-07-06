@@ -165,24 +165,31 @@ class Command(BaseCommand):
             cargos_db[tsd] = c
             self.stdout.write(f'  Created Cargo {tsd} (pk={c.pk})')
 
-        # Перепривязка (прямой UPDATE минуя save)
+        # Перепривязка (прямой UPDATE минуя save).
+        # Чанкуем по 200 — каждый чанк отдельная короткая транзакция, чтобы
+        # НЕ держать SQLite write-lock на весь цикл (при большом actions это
+        # минуты → database is locked у параллельных писателей agent/cron).
+        # Идемпотентно: частичный прогон безопасен, следующий запуск дочинит
+        # остаток (actions пересчитывается из текущего state).
         clear_svh = not opts['no_clear_svh']
         moved = 0
-        with transaction.atomic():
-            for h, tsd, _ in actions:
-                cargo = cargos_db.get(tsd)
-                if not cargo:
-                    continue
-                update_fields = {'mawb_id': cargo.pk}
-                if clear_svh:
-                    update_fields.update({
-                        'svh_do1_sent_at': None,
-                        'svh_do1_gross_weight': None,
-                        'svh_do1_place_count': None,
-                        'svh_do2_send_at': None,
-                    })
-                HouseWaybill.objects.filter(pk=h.pk).update(**update_fields)
-                moved += 1
+        RELINK_CHUNK = 200
+        for _ci in range(0, len(actions), RELINK_CHUNK):
+            with transaction.atomic():
+                for h, tsd, _ in actions[_ci:_ci + RELINK_CHUNK]:
+                    cargo = cargos_db.get(tsd)
+                    if not cargo:
+                        continue
+                    update_fields = {'mawb_id': cargo.pk}
+                    if clear_svh:
+                        update_fields.update({
+                            'svh_do1_sent_at': None,
+                            'svh_do1_gross_weight': None,
+                            'svh_do1_place_count': None,
+                            'svh_do2_send_at': None,
+                        })
+                    HouseWaybill.objects.filter(pk=h.pk).update(**update_fields)
+                    moved += 1
         self.stdout.write(self.style.SUCCESS(
             f'Перепривязано: {moved} HAWB'))
 
