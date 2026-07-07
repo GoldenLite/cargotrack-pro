@@ -45,6 +45,30 @@ COL_DECL         = 23  # W
 COL_ED_STATUS    = 24  # X
 
 
+def _arrival_to_ddmmyyyy(v) -> str:
+    """Значение ячейки «Дата прибытия» → 'дд.мм.гггг'.
+
+    Лист читается как UNFORMATTED_VALUE, поэтому настоящая дата приходит
+    СЕРИЙНЫМ числом (напр. 46207), а crm_sync сравнивает с
+    `_format_date_only` = 'дд.мм.гггг'. Без конверсии last_arrival вечно
+    != new_arrival → каждый reindex порождает сотни ложных arrival-diff'ов
+    (churn) → crm_sync съедает дедлайн на них и не доходит до decl/status
+    (starvation). Число → дата (эпоха Google Sheets 1899-12-30); строку/
+    пусто отдаём как есть.
+    """
+    if v in (None, ''):
+        return ''
+    if isinstance(v, bool):
+        return ''
+    if isinstance(v, (int, float)):
+        from datetime import datetime as _dt, timedelta as _td
+        try:
+            return (_dt(1899, 12, 30) + _td(days=int(v))).strftime('%d.%m.%Y')
+        except (ValueError, OverflowError):
+            return ''
+    return str(v).strip()
+
+
 def _retry(fn, *args, label: str = '', **kwargs):
     import requests.exceptions as _rex
     import urllib3.exceptions as _u3ex
@@ -167,11 +191,15 @@ class Command(BaseCommand):
             t_val = bool(t_raw) if t_raw is not None else False
             is_hidden = hidden_arr[i - 1] if i - 1 < len(hidden_arr) else False
 
+            arr_raw = (row[COL_ARRIVAL_DATE - 1]
+                       if COL_ARRIVAL_DATE - 1 < len(row) else '')
             found_rows.append((hn, i, {
                 'last_decl':      _cell(COL_DECL),
                 'last_status':    _cell(COL_ED_STATUS),
                 'last_request':   _cell(COL_REQUEST),
-                'last_arrival':   _cell(COL_ARRIVAL_DATE),
+                # СЕРИЙНОЕ число → 'дд.мм.гггг', чтобы совпадало с crm_sync
+                # (иначе вечный churn arrival-diff'ов, см. _arrival_to_ddmmyyyy).
+                'last_arrival':   _arrival_to_ddmmyyyy(arr_raw),
                 'last_warehouse': _cell(COL_WAREHOUSE),
                 'last_t':         t_val,
             }, is_hidden))
