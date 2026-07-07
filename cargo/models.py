@@ -277,14 +277,6 @@ class Cargo(models.Model):
         return idx < len(stages) - 1
 
     @property
-    def all_hawbs_released(self) -> bool:
-        """Все HAWB в партии выпущены (таможенный статус RELEASED)"""
-        hawbs = self.hawbs.all()
-        if not hawbs.exists():
-            return False
-        return all(h.customs_status == 'RELEASED' for h in hawbs)
-
-    @property
     def released_weight(self) -> float:
         """Суммарный вес по выпущенным HAWB"""
         return float(self.hawbs.filter(
@@ -312,6 +304,10 @@ class Cargo(models.Model):
         """Установить этап"""
         self.stage = new_stage
         self.stage_changed_at = timezone.now()
+        # Сбрасываем и таймер «времени в статусе» — hours_in_status /
+        # status_timer_display считают по last_status_change, иначе таймер
+        # на detail-странице никогда не обнуляется при смене этапа.
+        self.last_status_change = timezone.now()
 
         # Закрываем черновик при первом продвижении
         if new_stage != 'DRAFT':
@@ -484,31 +480,6 @@ class Cargo(models.Model):
         days = int(hours // 24)
         rem_h = int(hours % 24)
         return f'{days}д {rem_h}ч' if rem_h else f'{days}д'
-
-
-        """Смена статуса с созданием записи в истории"""
-        old_status = self.status
-        self.status = new_status
-        self.last_status_change = timezone.now()
-
-        # Автоматические действия при смене статуса
-        if new_status == 'RLSE' and not self.release_date:
-            self.release_date = timezone.now()
-            self.set_stage('RELEASED')
-        elif new_status == 'REJ':
-            pass  # этап не меняем автоматически
-
-        self.save()
-
-        # Запись в историю
-        StatusHistory.objects.create(
-            cargo=self,
-            old_status=old_status,
-            new_status=new_status,
-            changed_by=user,
-            comment=comment,
-        )
-        logger.info(f'Груз {self.awb_number}: статус {old_status} → {new_status} (пользователь: {user})')
 
     def save(self, *args, **kwargs):
         # Правило: дата вылета недоступна на этапах DRAFT и FORMED
@@ -1075,6 +1046,16 @@ class HouseWaybill(models.Model):
                 self.release_date = event_dt
             elif not self.release_date:
                 self.release_date = timezone.now()
+            # После выпуска — переводим в следующий логистический статус.
+            # (Fix 06.07.2026: блок жил в ветке `elif event_dt` ниже, т.е.
+            # срабатывал на НЕ-выпускных событиях (регистрация/досмотр/отказ)
+            # и НЕ срабатывал на выпуске — инверсия логики.)
+            if self.logistics_status == 'IMPORT_CUSTOMS':
+                self.logistics_status = 'READY_DELIVERY'
+                self.logistics_status_date = timezone.now()
+            elif self.logistics_status == 'EXPORT_CUSTOMS' and self.mawb_id:
+                self.logistics_status = 'IN_TRANSIT_EXP'
+                self.logistics_status_date = timezone.now()
         elif event_dt:
             # Нет выпуска → не должно быть release_date. Это правило ОК
             # для всех типов (даты выпуска не может быть если не RELEASED).
@@ -1083,13 +1064,6 @@ class HouseWaybill(models.Model):
             # того дошло ли уже до выпуска.
             if self.release_date:
                 self.release_date = None
-            # После выпуска на импорте — переводим в следующий лог.статус
-            if self.logistics_status == 'IMPORT_CUSTOMS':
-                self.logistics_status = 'READY_DELIVERY'
-                self.logistics_status_date = timezone.now()
-            elif self.logistics_status == 'EXPORT_CUSTOMS' and self.mawb_id:
-                self.logistics_status = 'IN_TRANSIT_EXP'
-                self.logistics_status_date = timezone.now()
 
         self.save()
         logger.info(f'HAWB {self.hawb_number}: там.статус → {new_status} ({user})')
