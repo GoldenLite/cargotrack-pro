@@ -110,20 +110,25 @@ class Command(BaseCommand):
             sheet_hidden[title] = arr
             time.sleep(1)
 
-        for e in all_entries:
-            if e.tab_name not in ws_by_title:
-                continue
-            total_idx += 1
-            arr = sheet_hidden.get(e.tab_name, [])
-            idx = e.row_index - 1
-            actual_hidden = arr[idx] if idx < len(arr) else False
-            if not actual_hidden:
-                continue  # Sheets не скрыт — пропускаем
-            total_actual_hidden += 1
-            h = hawbs_db.get(e.hawb_number)
-            want_hidden = _compute_want_hidden(e, h)
-            if not want_hidden:
-                orphans_per_tab[e.tab_name].append(e)
+        # Батч-кэш ed_status: _compute_want_hidden зовёт compute_ed_status
+        # для каждой скрытой строки (скрытые = выпущенное большинство) —
+        # без кэша это тысячи per-HAWB raw_xml-LIKE.
+        from cargo.services.alta.ed_status import ed_status_batch
+        with ed_status_batch():
+            for e in all_entries:
+                if e.tab_name not in ws_by_title:
+                    continue
+                total_idx += 1
+                arr = sheet_hidden.get(e.tab_name, [])
+                idx = e.row_index - 1
+                actual_hidden = arr[idx] if idx < len(arr) else False
+                if not actual_hidden:
+                    continue  # Sheets не скрыт — пропускаем
+                total_actual_hidden += 1
+                h = hawbs_db.get(e.hawb_number)
+                want_hidden = _compute_want_hidden(e, h)
+                if not want_hidden:
+                    orphans_per_tab[e.tab_name].append(e)
 
         total_orphans = sum(len(v) for v in orphans_per_tab.values())
         self.stdout.write(

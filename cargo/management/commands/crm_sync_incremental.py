@@ -41,7 +41,8 @@ from django.utils import timezone as djtz
 import gspread.exceptions
 
 from cargo.models import CrmHawbIndex, HouseWaybill
-from cargo.services.alta.ed_status import compute_ed_status, compute_t_value
+from cargo.services.alta.ed_status import (compute_ed_status,
+                                            compute_t_value, ed_status_batch)
 from cargo.services.sheets.client import get_client
 from cargo.services.sheets.writeback import _customs_requests_text
 
@@ -169,7 +170,10 @@ class Command(BaseCommand):
                     'Выхожу без работы.'))
                 return
         try:
-            self._run(*args, **opts)
+            # Батч-кэш ed_status на весь прогон: убирает per-HAWB
+            # raw_xml-LIKE (главный пожиратель дедлайна, см. ed_status.py).
+            with ed_status_batch():
+                self._run(*args, **opts)
         finally:
             if not opts.get('no_lock'):
                 _release_lock()

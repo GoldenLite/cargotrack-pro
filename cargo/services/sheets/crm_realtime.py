@@ -204,14 +204,18 @@ def batch_write_ed_status_for_crm_hawbs(hawbs: list, ws_by_title: dict = None,
         return 0
 
     # Считаем новые значения per-HAWB (тяжёлая часть — compute_ed_status).
+    # Function-scoped батч-кэш: создаётся после DB-мутаций вызывающего,
+    # умирает на выходе — убирает per-HAWB raw_xml-LIKE без риска стейла.
+    from cargo.services.alta.ed_status import ed_status_batch
     new_status_by_num = {}
     hawbs_by_num = {h.hawb_number: h for h in hawbs if getattr(h, 'hawb_number', '')}
-    for hn, h in hawbs_by_num.items():
-        try:
-            new_status_by_num[hn] = compute_ed_status(h)
-        except Exception:
-            logger.exception('crm_rt ed_status compute for %s failed', hn)
-            new_status_by_num[hn] = None
+    with ed_status_batch():
+        for hn, h in hawbs_by_num.items():
+            try:
+                new_status_by_num[hn] = compute_ed_status(h)
+            except Exception:
+                logger.exception('crm_rt ed_status compute for %s failed', hn)
+                new_status_by_num[hn] = None
 
     # Открываем лист ПЕРВЫМ — нужно прочитать живую колонку C (sort-proof).
     own_open = ws_by_title is None
@@ -283,15 +287,17 @@ def batch_write_decl_for_crm_hawbs(hawbs: list, ws_by_title: dict = None,
     if not by_tab:
         return 0
 
+    from cargo.services.alta.ed_status import ed_status_batch
     hawbs_by_num = {h.hawb_number: h for h in hawbs if getattr(h, 'hawb_number', '')}
     snapshot = {}
-    for hn, h in hawbs_by_num.items():
-        try:
-            new_status = compute_ed_status(h)
-        except Exception:
-            new_status = ''
-        new_decl = (getattr(h, 'customs_declaration_number', '') or '').strip()
-        snapshot[hn] = (new_decl, new_status)
+    with ed_status_batch():
+        for hn, h in hawbs_by_num.items():
+            try:
+                new_status = compute_ed_status(h)
+            except Exception:
+                new_status = ''
+            new_decl = (getattr(h, 'customs_declaration_number', '') or '').strip()
+            snapshot[hn] = (new_decl, new_status)
 
     own_open = ws_by_title is None
     if own_open:

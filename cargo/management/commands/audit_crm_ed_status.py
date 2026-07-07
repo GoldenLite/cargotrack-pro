@@ -93,9 +93,13 @@ class Command(BaseCommand):
         self.stdout.write(f'Tabs: {len(target)}')
 
         grand_total = defaultdict(int)
+        from cargo.services.alta.ed_status import ed_status_batch
         for i, ws in enumerate(target):
             try:
-                self._audit_tab(ws, opts, grand_total)
+                # Батч-кэш per-tab: свежий снапшот на вкладку, без
+                # per-HAWB raw_xml-LIKE (см. ed_status.ed_status_batch).
+                with ed_status_batch():
+                    self._audit_tab(ws, opts, grand_total)
             except Exception as e:
                 logger.exception('audit_crm_ed_status tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(f'  {ws.title}: {e}'))

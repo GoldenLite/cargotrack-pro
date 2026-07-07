@@ -9,9 +9,22 @@
 - HawbDeclarationAttempt (переподачи)
 
 Фразы взяты как у Альты (gtdw.exe, Delphi resourcestrings).
+
+Батч-режим (ed_status_batch): плановые команды (audit_sheets_vs_db,
+crm_sync_incremental, crm_sort_all, ...) вызывают compute_ed_status на
+тысячи HAWB. Шаг 1.5 в одиночном режиме делает per-HAWB SQL с
+`raw_xml__icontains` — LIKE по гигантскому TEXT, который с ростом
+AltaInboxMessage довёл аудит до убийства по таймлимиту крона (07.07.2026).
+Внутри `with ed_status_batch():` «последнее значимое сообщение» строится
+один раз НА ПАРТИЮ (один проход по raw_xml сообщений партии в Python)
+и кэшируется на время контекста. Вне контекста поведение прежнее —
+realtime-путям (waitress) кэш не достаётся, стейл исключён.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import datetime as _dt
 from typing import Optional
 
 
@@ -125,6 +138,156 @@ DECISION_CODE_TO_STATUS: dict[str, str] = {
 }
 
 
+# ─────────────────────────── батч-режим ───────────────────────────
+
+# Активный батч-кэш (None вне ed_status_batch). contextvars: не протекает
+# в другие треды/реквесты waitress — новый тред видит default (None).
+_batch_ctx: contextvars.ContextVar['_EdStatusBatchCache | None'] = \
+    contextvars.ContextVar('ed_status_batch', default=None)
+
+# «Минус бесконечность» для сортировки: SQLite в ORDER BY ... DESC ставит
+# NULL последним (NULL = наименьшее значение) — повторяем ту же семантику.
+_DT_MIN = _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)
+
+
+class _MsgLite:
+    """Лёгкий слепок AltaInboxMessage — ровно то, что нужно _status_from_msg
+    (msg_kind, parsed_meta) и шагу 1.6 (prepared_at)."""
+    __slots__ = ('pk', 'msg_kind', 'parsed_meta', 'prepared_at', 'received_at')
+
+    def __init__(self, pk, msg_kind, parsed_meta, prepared_at, received_at):
+        self.pk = pk
+        self.msg_kind = msg_kind
+        self.parsed_meta = parsed_meta
+        self.prepared_at = prepared_at
+        self.received_at = received_at
+
+    def _sort_key(self):
+        # pk — детерминированный тай-брейк при равных (prepared_at,
+        # received_at); одиночный путь сортирует так же ('-pk').
+        return (self.prepared_at or _DT_MIN,
+                self.received_at or _DT_MIN, self.pk)
+
+
+# Сентинел «HAWB не было в снапшоте партии» (создана/перелинкована после
+# построения кэша) — вызывающий код падает на одиночный SQL-путь.
+_MISSING = object()
+
+
+# msg_kind, исключаемые из «значимых» (тот же список, что в шаге 1.5).
+_INSIGNIFICANT_KINDS = ('info', 'svh_placed',
+                        'svh_do1_registered', 'svh_do2_registered')
+# Типы outbox-подач (шаги 1.6 и 2).
+_SUBMISSION_TYPES = ('CMN.11023', 'CMN.11349', 'CMN.11335', 'CMN.11024')
+
+
+class _EdStatusBatchCache:
+    """Ленивая пред-агрегация «последнее значимое сообщение per-HAWB».
+
+    Строится по требованию НА ПАРТИЮ (cargo): один SQL-запрос за всеми
+    значимыми сообщениями партии + один Python-проход по их raw_xml для
+    всех номеров HAWB партии — вместо per-HAWB LIKE-запроса. Семантика
+    атрибуции 1:1 с одиночным шагом 1.5:
+      - FK: msg.hawb_id ∈ HAWB партии → сообщение её (независимо от
+        msg.cargo — как Q(hawb=hawb) без условия на cargo);
+      - substring: номер HAWB встречается в msg.raw_xml И msg.cargo_id
+        == cargo.pk (как Q(raw_xml__icontains=...) & Q(cargo=mawb)).
+    raw_xml после прохода не хранится.
+    """
+
+    def __init__(self):
+        # cargo_id → ({hawb_pk: _MsgLite}, {hawb_pk партии на момент снапшота})
+        self._latest_by_cargo: dict[int, tuple[dict, set]] = {}
+
+    # ── шаг 1.5 ──
+
+    def latest_for(self, hawb):
+        """_MsgLite | None | _MISSING (HAWB нет в снапшоте — нужен fallback)."""
+        entry = self._latest_by_cargo.get(hawb.mawb_id)
+        if entry is None:
+            entry = self._build_cargo(hawb.mawb_id)
+        per_hawb, snapshot_ids = entry
+        if hawb.pk not in snapshot_ids:
+            # HAWB создана/перелинкована в партию ПОСЛЕ построения кэша
+            # (авто-создание siblings, relink-крон) — снапшот её не знает.
+            # Одиночный Q(hawb=hawb) нашёл бы FK-сообщения — сигналим
+            # вызывающему упасть на одиночный путь.
+            return _MISSING
+        return per_hawb.get(hawb.pk)
+
+    def _build_cargo(self, cargo_id: int) -> tuple[dict, set]:
+        from cargo.models import AltaInboxMessage, HouseWaybill
+        from django.db.models import Q
+
+        hawbs = list(HouseWaybill.objects
+                     .filter(mawb_id=cargo_id)
+                     .values_list('pk', 'hawb_number'))
+        hawb_ids = {pk for pk, _ in hawbs}
+        latest: dict[int, _MsgLite] = {}
+        qs = (AltaInboxMessage.objects
+              .filter(Q(cargo_id=cargo_id) | Q(hawb_id__in=list(hawb_ids)))
+              .exclude(msg_kind__in=_INSIGNIFICANT_KINDS)
+              .values_list('pk', 'hawb_id', 'cargo_id', 'msg_kind',
+                           'parsed_meta', 'prepared_at', 'received_at',
+                           'raw_xml'))
+        for m_pk, m_hawb_id, m_cargo_id, kind, pm, prep, recv, raw \
+                in qs.iterator():
+            lite = _MsgLite(m_pk, kind, pm, prep, recv)
+            mentioned: set[int] = set()
+            # FK-атрибуция: msg.hawb ∈ партии (как Q(hawb=hawb), без
+            # условия на msg.cargo)
+            if m_hawb_id in hawb_ids:
+                mentioned.add(m_hawb_id)
+            if m_cargo_id == cargo_id and raw:
+                for pk, num in hawbs:
+                    if num and num in raw:
+                        mentioned.add(pk)
+            for pk in mentioned:
+                cur = latest.get(pk)
+                if cur is None or lite._sort_key() > cur._sort_key():
+                    latest[pk] = lite
+        entry = (latest, hawb_ids)
+        self._latest_by_cargo[cargo_id] = entry
+        return entry
+
+
+def _has_resubmission(hawb, baseline_ts) -> bool:
+    """Есть ли outbox-подача ПОЗЖЕ baseline_ts, относящаяся к этой HAWB.
+
+    values_list('parsed_meta__hawbs') — json_extract на стороне SQLite:
+    тянем только маленький массив номеров, а НЕ весь parsed_meta (в него
+    агент кладёт полный raw_xml — до 4МБ на строку CMN.11335/11349;
+    полная выборка была ~150+МБ и грелась на каждый rejected-HAWB).
+    Запрос свежий per-call — никакого кэша, стейла нет."""
+    from cargo.models import AltaOutboxObservation
+    rows = (AltaOutboxObservation.objects
+            .filter(msg_type__in=_SUBMISSION_TYPES,
+                    prepared_at__gt=baseline_ts)
+            .values_list('hawb_id', 'parsed_meta__hawbs'))
+    for o_hawb_id, hawbs_list in rows.iterator():
+        if o_hawb_id == hawb.pk:
+            return True
+        if hawb.hawb_number in (hawbs_list or []):
+            return True
+    return False
+
+
+@contextlib.contextmanager
+def ed_status_batch():
+    """Контекст для массовых прогонов compute_ed_status (команды/кроны).
+
+    Внутри контекста шаги 1.5/1.6 работают через пред-агрегацию per-cargo
+    (см. _EdStatusBatchCache). Кэш живёт ТОЛЬКО до выхода из контекста —
+    свежесть realtime-путей не страдает. Не использовать вокруг кода,
+    который сам меняет inbox/outbox и тут же ждёт нового статуса.
+    """
+    token = _batch_ctx.set(_EdStatusBatchCache())
+    try:
+        yield
+    finally:
+        _batch_ctx.reset(token)
+
+
 def _status_from_msg(msg, hawb_number: str = '') -> str:
     """Извлекает наиболее точный статус для одного AltaInboxMessage.
 
@@ -214,16 +377,25 @@ def compute_ed_status(hawb) -> str:
     # hawb_number И msg.cargo=hawb.mawb. Это нужно для multi-HAWB ДТ:
     # CMN.11350 может быть привязан только к одной HAWB (matched), но
     # упоминает всех siblings в raw_xml.
-    from django.db.models import Q
-    cond = Q(hawb=hawb)
-    if hawb.mawb_id and hawb.hawb_number:
-        cond = cond | (Q(raw_xml__icontains=hawb.hawb_number)
-                       & Q(cargo=hawb.mawb))
-    msgs = AltaInboxMessage.objects.filter(
-        cond,
-    ).exclude(msg_kind__in=('info', 'svh_placed',
-                            'svh_do1_registered', 'svh_do2_registered'))
-    latest = msgs.order_by('-prepared_at', '-received_at').first()
+    batch = _batch_ctx.get()
+    latest = _MISSING
+    if batch is not None and hawb.mawb_id and hawb.hawb_number:
+        # Батч-режим: пред-агрегация per-cargo вместо per-HAWB LIKE.
+        # _MISSING = HAWB не было в снапшоте (создана/перелинкована после
+        # построения кэша) → одиночный путь ниже.
+        latest = batch.latest_for(hawb)
+    if latest is _MISSING:
+        from django.db.models import Q
+        cond = Q(hawb=hawb)
+        if hawb.mawb_id and hawb.hawb_number:
+            cond = cond | (Q(raw_xml__icontains=hawb.hawb_number)
+                           & Q(cargo=hawb.mawb))
+        msgs = AltaInboxMessage.objects.filter(
+            cond,
+        ).exclude(msg_kind__in=_INSIGNIFICANT_KINDS)
+        # '-pk' — детерминированный тай-брейк при равных датах (в батч-пути
+        # так же, см. _MsgLite._sort_key).
+        latest = msgs.order_by('-prepared_at', '-received_at', '-pk').first()
     if not main:
         main = _status_from_msg(latest, hawb.hawb_number) if latest else ''
 
@@ -235,22 +407,10 @@ def compute_ed_status(hawb) -> str:
     if main in ('Отказано в выпуске', 'Считается не поданной', 'Отзыв'):
         baseline_ts = latest.prepared_at if latest else None
         if baseline_ts:
-            # Связь outbox с HAWB: либо FK hawb_id, либо в parsed_meta.hawbs
-            # или raw_xml. Полный поиск дорогой; ограничиваем по дате.
-            candidates = AltaOutboxObservation.objects.filter(
-                msg_type__in=('CMN.11023', 'CMN.11349',
-                              'CMN.11335', 'CMN.11024'),
-                prepared_at__gt=baseline_ts,
-            )
-            has_resubmission = False
-            for o in candidates:
-                if o.hawb_id == hawb.pk:
-                    has_resubmission = True
-                    break
-                pm = o.parsed_meta or {}
-                if hawb.hawb_number in (pm.get('hawbs') or []):
-                    has_resubmission = True
-                    break
+            # Связь outbox с HAWB: либо FK hawb_id, либо в parsed_meta.hawbs.
+            # Лёгкий свежий запрос per-call (см. _has_resubmission) — общий
+            # для одиночного и батч-режима.
+            has_resubmission = _has_resubmission(hawb, baseline_ts)
             if has_resubmission:
                 # Если уже пришёл CMN.11337/11001 на новую подачу с
                 # GTDNumber — current_decl уже изменился, и attempt

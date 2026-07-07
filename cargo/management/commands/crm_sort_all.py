@@ -90,14 +90,23 @@ class Command(BaseCommand):
             target.append(ws)
         self.stdout.write(f'Sorting tabs: {len(target)}')
 
+        self._sort_all(ss, target)
+
+    def _sort_all(self, ss, target):
+        # Батч-кэш ed_status per-tab (не на весь прогон — hourly-команда
+        # может идти долго, свежесть статусов важнее межвкладочного кэша).
+        from cargo.services.alta.ed_status import ed_status_batch
         for i, ws in enumerate(target):
             sort_started = False
             try:
-                self._sort_tab(ss, ws)
-                sort_started = True
-                # После sort row_index'ы в индексе протухли. Reindex
-                # читает текущее состояние и обновляет.
-                self._reindex_tab(ws)
+                with ed_status_batch():
+                    self._sort_tab(ss, ws)
+                    sort_started = True
+                    # После sort row_index'ы в индексе протухли. Reindex
+                    # читает текущее состояние и обновляет (тоже зовёт
+                    # compute_ed_status — тот же per-tab снапшот; между
+                    # sort и reindex БД не мутирует, только Sheets).
+                    self._reindex_tab(ws)
             except Exception as e:
                 logger.exception('crm_sort tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(f'  {ws.title}: {e}'))

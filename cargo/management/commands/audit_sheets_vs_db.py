@@ -90,8 +90,15 @@ def _svh_do1_weight(h):
     v = h.svh_do1_gross_weight
     if v is None:
         return ''
-    # Числа без trailing zeros — как пишет writeback (Decimal → str)
-    return str(v)
+    # Как пишет writeback (_format_weight): без trailing zeros, десятичный
+    # разделитель — ЗАПЯТАЯ (RU-локаль листа; с точкой USER_ENTERED
+    # оставляет текст и ломает сортировку). Сравнение гасится _normalize_num.
+    from decimal import Decimal
+    try:
+        d = Decimal(v).normalize()
+        return (str(d) if d != 0 else '0').replace('.', ',')
+    except Exception:
+        return str(v).replace('.', ',')
 
 
 def _svh_do1_places(h):
@@ -290,10 +297,15 @@ class Command(BaseCommand):
                         f'  [{source.name}] import_sheets {age_min} мин назад — '
                         f'аудит sort-proof таргетит живые строки, продолжаю'))
 
-        for source in sources:
-            self.stdout.write('')
-            self.stdout.write(self.style.NOTICE(f'=== {source.name} ==='))
-            self._audit_source(source, opts)
+        # Батч-кэш ed_status: per-cargo пред-агрегация вместо per-HAWB
+        # raw_xml-LIKE — без него аудит на 14k+ HAWB не влезал в лимит
+        # крона (kill 267014, инцидент 04-07.07.2026).
+        from cargo.services.alta.ed_status import ed_status_batch
+        with ed_status_batch():
+            for source in sources:
+                self.stdout.write('')
+                self.stdout.write(self.style.NOTICE(f'=== {source.name} ==='))
+                self._audit_source(source, opts)
 
     def _audit_source(self, source: SheetSource, opts: dict):
         checks = EXPORT_CHECKS if source.kind == 'export' else CHECKS

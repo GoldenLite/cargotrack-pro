@@ -1187,7 +1187,13 @@ def batch_write_svh_do2_dates_for_hawbs(hawbs: list) -> int:
 
 
 def _format_weight(value) -> str:
-    """Decimal → '0.062' (без trailing zeros), None → ''."""
+    """Decimal → '0,062' (без trailing zeros, ЗАПЯТАЯ), None → ''.
+
+    Десятичный разделитель — запятая: лист в RU-локали, и USER_ENTERED
+    с точкой ('0.1') Google оставляет ТЕКСТОМ → колонка перестаёт
+    сортироваться (378 text-ячеек накопилось к 07.07.2026). С запятой
+    значение типизируется в число. Аудит сравнение переживает —
+    _normalize_num гасит ','/'.'."""
     if value is None:
         return ''
     # normalize убирает trailing zeros, str — обычное представление
@@ -1195,9 +1201,9 @@ def _format_weight(value) -> str:
     try:
         d = Decimal(value).normalize()
         # Decimal('0.062').normalize() = Decimal('0.062'); но Decimal('1.0').normalize() = Decimal('1')
-        return str(d) if d != 0 else '0'
+        return (str(d) if d != 0 else '0').replace('.', ',')
     except Exception:
-        return str(value)
+        return str(value).replace('.', ',')
 
 
 def _format_int(value) -> str:
@@ -1431,31 +1437,37 @@ def batch_write_ed_status_for_hawbs(hawbs: list) -> int:
         return 0
     if not hawbs:
         return 0
-    imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
-    exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
-    n = 0
-    if imp:
-        n += _batch_write_hawb_dates(
-            imp, 'ed_status',
-            CARGOTRACK_ED_STATUS_HEADER, 'ed_status',
-            formatter=lambda v: v or '',
-            value_provider=_ed_status_for_hawb,
-            source_kind='general',
-        )
-    if exp:
-        n += _batch_write_hawb_dates(
-            exp, 'ed_status',
-            EXPORT_ED_STATUS_HEADER, 'ed_status',
-            formatter=lambda v: v or '',
-            value_provider=_ed_status_for_hawb,
-            source_kind='export',
-        )
-    # После записи — расставим цвета фона.
-    try:
-        _apply_ed_status_colors(hawbs)
-    except Exception:
-        logger.exception('ed_status color formatting failed')
-    return n
+    # Function-scoped батч-кэш ed_status: значение и цвет считаются из
+    # ОДНОГО снапшота (раньше 2× compute per-HAWB могли оседлать разные
+    # сообщения), per-HAWB LIKE уходит. Кэш создаётся здесь — ПОСЛЕ всех
+    # DB-мутаций вызывающего dispatch — и умирает на выходе; стейла нет.
+    from cargo.services.alta.ed_status import ed_status_batch
+    with ed_status_batch():
+        imp = [h for h in hawbs if _kind_for_hawb(h) != 'export']
+        exp = [h for h in hawbs if _kind_for_hawb(h) == 'export']
+        n = 0
+        if imp:
+            n += _batch_write_hawb_dates(
+                imp, 'ed_status',
+                CARGOTRACK_ED_STATUS_HEADER, 'ed_status',
+                formatter=lambda v: v or '',
+                value_provider=_ed_status_for_hawb,
+                source_kind='general',
+            )
+        if exp:
+            n += _batch_write_hawb_dates(
+                exp, 'ed_status',
+                EXPORT_ED_STATUS_HEADER, 'ed_status',
+                formatter=lambda v: v or '',
+                value_provider=_ed_status_for_hawb,
+                source_kind='export',
+            )
+        # После записи — расставим цвета фона (из того же снапшота).
+        try:
+            _apply_ed_status_colors(hawbs)
+        except Exception:
+            logger.exception('ed_status color formatting failed')
+        return n
 
 
 def _apply_ed_status_colors(hawbs: list) -> None:

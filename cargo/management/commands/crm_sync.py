@@ -141,9 +141,14 @@ class Command(BaseCommand):
 
         self.stdout.write(f'Specialist tabs: {len(target_ws)}')
 
+        # Батч-кэш ed_status per-tab (не на весь прогон: полный crm_sync
+        # может идти час+ — кэш начала прогона отдал бы последним вкладкам
+        # статусы часовой давности). См. ed_status.ed_status_batch.
+        from cargo.services.alta.ed_status import ed_status_batch
         for i, ws in enumerate(target_ws):
             try:
-                self._sync_tab(ss, ws, opts)
+                with ed_status_batch():
+                    self._sync_tab(ss, ws, opts)
             except Exception as e:
                 logger.exception('crm_sync tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(
