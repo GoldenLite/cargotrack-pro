@@ -190,7 +190,14 @@ class Command(BaseCommand):
         t0 = time.time()
         deadline = t0 + self.MAX_TOTAL_SEC
 
-        qs = CrmHawbIndex.objects.all()
+        # Durable-страховка от starvation: голодающие записи (никогда не
+        # синканные last_synced_at=NULL, затем самые давние) обрабатываются
+        # ПЕРВЫМИ. Если прогон упрётся в дедлайн, урезаются свежесинканные,
+        # а не застрявшие выпуски (класс «БД=выпуск, CRM тихо», 08.07.2026).
+        # nulls_first: NULL считается «бесконечно старым» → идёт раньше всех.
+        from django.db.models import F
+        qs = CrmHawbIndex.objects.order_by(
+            F('last_synced_at').asc(nulls_first=True))
         if opts['tab']:
             qs = qs.filter(tab_name=opts['tab'])
 
