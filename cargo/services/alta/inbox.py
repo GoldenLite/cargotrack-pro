@@ -1463,6 +1463,20 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
         if outbox and outbox.cargo:
             return (outbox.cargo, None)
 
+    # Прямой матч по svh_mawb → Cargo.awb_number. CMN.13010 несёт MAWB
+    # партии в svh_mawb; для нашей лицензии это надёжный идентификатор —
+    # тот же путь, что apply_svh_do1_from_parsed_table (parsed-table).
+    # Ловит случаи, где report-якорь пуст (ED.DO1 не наблюдали) И
+    # представление не привязано/вне 7-дн окна: раньше такой ДО1 повисал
+    # cargo=None навсегда (гонка «CMN.13010 раньше создания Cargo» — 13
+    # партий на 08.07.2026). awb_number глобально уникален (MAWB), поэтому
+    # совпадение = наша партия, ложный матч исключён.
+    mawb = (pm.get('svh_mawb') or '').strip()
+    if mawb:
+        c = Cargo.objects.filter(awb_number__iexact=mawb).first()
+        if c:
+            return (c, None)
+
     # Fallback на time-эвристику
     if not msg.prepared_at:
         return (None, None)
