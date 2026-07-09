@@ -93,51 +93,112 @@ class Command(BaseCommand):
             return
 
         self.stdout.write('\n=== Applying fix ===')
-        from cargo.services.alta.inbox import dispatch
+        from django.utils.dateparse import parse_datetime
+        from cargo.services.alta.inbox import _retry_on_locked
         fixed: list[HouseWaybill] = []
-        for waybill, h, releases in problems:
-            # Auto-match unmatched через MAWB.
-            all_msgs = []
-            qs = AltaInboxMessage.objects.filter(
-                msg_type__in=('CMN.11350', 'CMN.11337', 'CMN.11001',
-                              'CMN.11309', 'CMN.11010')
-            ).order_by('prepared_at')
-            for m in qs.iterator(chunk_size=500):
-                meta = m.parsed_meta or {}
-                hit = False
-                for c in meta.get('consignments') or []:
-                    if waybill in (c.get('waybills') or []):
-                        hit = True
-                        break
-                if not hit and meta.get('waybill_number') == waybill:
-                    hit = True
-                if not hit and m.hawb_id == h.pk:
-                    hit = True
-                if hit:
-                    all_msgs.append(m)
 
-            for m in all_msgs:
+        # Индекс waybill → релевантные сообщения строим ОДНИМ проходом по
+        # inbox (раньше был вложенный скан всей inbox НА КАЖДУЮ проблему —
+        # O(проблемы × сообщения), из-за чего команда зависала под cron'ом,
+        # 09.07.2026). Теперь O(сообщения): один проход, фильтр по set
+        # проблемных waybills + map pk→waybill для hawb_id-совпадений.
+        problem_waybills = {waybill for waybill, _, _ in problems}
+        pk_to_waybill = {h.pk: waybill for waybill, h, _ in problems}
+        msgs_by_waybill: dict[str, list] = defaultdict(list)
+        idx_qs = AltaInboxMessage.objects.filter(
+            msg_type__in=('CMN.11350', 'CMN.11337', 'CMN.11001',
+                          'CMN.11309', 'CMN.11010')
+        ).order_by('prepared_at')
+        for m in idx_qs.iterator(chunk_size=500):
+            meta = m.parsed_meta or {}
+            hit: set[str] = set()
+            for c in meta.get('consignments') or []:
+                for w in c.get('waybills') or []:
+                    if w in problem_waybills:
+                        hit.add(w)
+            wn = (meta.get('waybill_number') or '').strip()
+            if wn in problem_waybills:
+                hit.add(wn)
+            if m.hawb_id in pk_to_waybill:
+                hit.add(pk_to_waybill[m.hawb_id])
+            for w in hit:
+                msgs_by_waybill[w].append(m)
+
+        # ПРИМЕНЕНИЕ через bulk_update, НЕ dispatch. Урок сессии
+        # (redispatch_stuck_finals --lean): dispatch на каждую HAWB под
+        # cron-конкуренцией = ~3 мин/HAWB (лок + инлайн-writeback) →
+        # 114 backlog = часы, reaper убивал прогон. Lean = одна транзакция:
+        #   1) auto-match unmatched (привязать cargo/hawb по MAWB),
+        #   2) гард newer_final (не перебивать более свежий отказ/отзыв),
+        #   3) bulk_update customs_status=RELEASED + release_date.
+        # Листы догоняет AuditFixExport (--kind export --fix, 20 мин).
+        to_match: list[AltaInboxMessage] = []
+        to_release: dict[int, HouseWaybill] = {}
+        skipped_newer = 0
+        for waybill, h, releases in problems:
+            # 1) auto-match unmatched сообщения этого waybill
+            for m in msgs_by_waybill.get(waybill, []):
                 if m.cargo_id is None and m.hawb_id is None and h.mawb:
                     m.cargo = h.mawb
                     m.hawb = h
-                    m.save(update_fields=['cargo', 'hawb'])
+                    to_match.append(m)
 
-            for m in all_msgs:
-                try:
-                    dispatch(m)
-                except Exception:
-                    logger.exception(
-                        'audit_export_releases: dispatch failed env=%s',
-                        m.envelope_id)
-
-            h.refresh_from_db()
             if h.customs_status == 'RELEASED':
-                fixed.append(h)
-                self.stdout.write(
-                    f'  ✓ {waybill}: → RELEASED decl={h.customs_declaration_number}')
-            else:
-                self.stdout.write(self.style.WARNING(
-                    f'  ✗ {waybill}: still {h.customs_status}'))
+                continue
+
+            # release_prepared = самое свежее release-сообщение по waybill
+            rel_prepared = max((m.prepared_at for m in releases
+                                if m.prepared_at), default=None)
+            # 2) гард: есть ли ПОЗЖЕ отказ/отзыв по этой HAWB → не выпускать
+            if rel_prepared and h.pk:
+                newer = (AltaInboxMessage.objects
+                         .filter(hawb_id=h.pk, prepared_at__gt=rel_prepared,
+                                 msg_kind__in=('rejected', 'withdrawn'))
+                         .exists())
+                if newer:
+                    skipped_newer += 1
+                    continue
+
+            # release_date: decision_date per-waybill из consignment, иначе
+            # prepared_at самого свежего release.
+            rel_dt = None
+            for m in sorted(releases, key=lambda x: x.prepared_at or rel_prepared,
+                            reverse=True):
+                meta = m.parsed_meta or {}
+                for c in meta.get('consignments') or []:
+                    if waybill in (c.get('waybills') or []):
+                        rel_dt = parse_datetime(c.get('decision_date') or '') \
+                            or None
+                        break
+                if rel_dt:
+                    break
+            h.customs_status = 'RELEASED'
+            h.release_date = rel_dt or rel_prepared
+            to_release[h.pk] = h
+            fixed.append(h)
+
+        # Оба bulk_update в ОДНОЙ короткой atomic-транзакции: под
+        # cron-конкуренцией серия отдельных UPDATE ловит 'database is
+        # locked' между собой; atomic делает всё разом и быстро отпускает
+        # write-lock. attempts=12 (backoff до 8с ≈ 80с суммарно) на случай
+        # долгого чужого writer'а.
+        from django.db import transaction
+
+        def _apply_bulk():
+            with transaction.atomic():
+                if to_match:
+                    AltaInboxMessage.objects.bulk_update(
+                        to_match, ['cargo', 'hawb'], batch_size=200)
+                if to_release:
+                    HouseWaybill.objects.bulk_update(
+                        list(to_release.values()),
+                        ['customs_status', 'release_date'], batch_size=100)
+
+        if to_match or to_release:
+            _retry_on_locked(_apply_bulk, attempts=12)
+        self.stdout.write(self.style.SUCCESS(
+            f'выпущено (bulk): {len(to_release)}, привязано сообщений: '
+            f'{len(to_match)}, пропущено (свежий отказ): {skipped_newer}'))
 
         # Writeback в Sheets для всех починенных.
         if fixed:
@@ -151,4 +212,4 @@ class Command(BaseCommand):
             batch_write_release_dates_for_hawbs(fixed)
             batch_write_filed_dates_for_hawbs(fixed)
             batch_write_ed_status_for_hawbs(fixed)
-            self.stdout.write(f'\nWriteback done for {len(fixed)} HAWB')
+            self.stdout.write(f'Writeback done for {len(fixed)} HAWB')
