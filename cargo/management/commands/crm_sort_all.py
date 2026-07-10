@@ -42,7 +42,13 @@ def _retry(fn, *args, label: str = '', **kwargs):
             return fn(*args, **kwargs)
         except gspread.exceptions.APIError as e:
             status = getattr(e.response, 'status_code', None)
-            if status in (429, 500, 502, 503, 504) and attempt < len(backoff):
+            # 409 'operation was aborted' — sort (структурный batch_update,
+            # переставляет строки) конфликтует с ПАРАЛЛЕЛЬНОЙ записью в ту же
+            # CRM-таблицу (CrmIncSync/CrmSyncHide каждые 5 мин, reindex).
+            # Google отклоняет конкурентную операцию; без ретрая sort падал
+            # целиком и «сортировки не отрабатывали» (10.07.2026). Ретрай с
+            # backoff ловит окно между чужими записями.
+            if status in (409, 429, 500, 502, 503, 504) and attempt < len(backoff):
                 wait = backoff[attempt]
                 logger.warning('crm_sort %s API %s, retry in %ds',
                                label, status, wait)
