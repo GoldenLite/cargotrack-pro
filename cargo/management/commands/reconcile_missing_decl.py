@@ -67,20 +67,89 @@ class Command(BaseCommand):
                 self.stdout.write(f'  {h.hawb_number} → {decl}')
             if plan:
                 self.stdout.write('(dry-run — добавь --apply)')
+            # attempt-часть тоже в dry-режиме (покажет кандидатов)
+            self._reconcile_attempts(opts)
             return
-        if not plan:
+
+        if plan:
+            to_write = []
+            for h, decl in plan:
+                _retry_on_locked(
+                    HouseWaybill.objects.filter(pk=h.pk).update,
+                    customs_declaration_number=decl, attempts=15)
+                h.customs_declaration_number = decl
+                to_write.append(h)
+
+            from cargo.services.sheets.writeback import (
+                batch_write_declarations_for_hawbs)
+            batch_write_declarations_for_hawbs(to_write)
+            self.stdout.write(self.style.SUCCESS(
+                f'проставлено {len(to_write)} + writeback'))
+
+        self._reconcile_attempts(opts)
+
+    def _reconcile_attempts(self, opts):
+        """Класс 2: RELEASED в БД, но попытка текущей декларации НЕ
+        RELEASED (FILED/REJECTED) → compute_ed_status рассинхрон
+        ('Присвоен номер'/'Отказано') → номер ДТ не подтягивается в лист
+        (колонка W пишется только при 'Выпуск разрешен').
+
+        Причины: (а) lean-применение выпуска (bulk_update customs_status)
+        не обновляло attempt; (б) перепутанные attempts multi-HAWB ДТ
+        (выпущенная ДТ помечена REJECTED, см. 10275193543); (в) выпуск
+        старого агента без release-сообщения в inbox (attempt остался FILED).
+
+        Выравниваем: attempt current-decl → RELEASED, ЕСЛИ выпуск реален
+        (release_date есть) и НЕТ более свежего отказа/отзыва (реальный
+        отказ ПОСЛЕ выпуска не перетираем). Тяжёлый guard по raw_xml —
+        только для невыровненных кандидатов (не для всех RELEASED)."""
+        from cargo.models import HawbDeclarationAttempt
+        from cargo.services.alta.inbox import _retry_on_locked
+
+        cand = (HouseWaybill.objects
+                .filter(customs_status='RELEASED', release_date__isnull=False)
+                .exclude(customs_declaration_number='')
+                .prefetch_related('declaration_attempts')
+                .select_related('mawb'))
+        fix = []
+        for h in cand:
+            cur = (h.customs_declaration_number or '').strip()
+            att = next((a for a in h.declaration_attempts.all()
+                        if a.declaration_number == cur), None)
+            if att is None or att.status == 'RELEASED':
+                continue  # нет попытки для current-decl или уже выровнена
+            # guard: нет более свежего отказа/отзыва, чем выпуск
+            cond = Q(hawb=h)
+            if h.mawb_id and h.hawb_number:
+                cond |= (Q(raw_xml__icontains=h.hawb_number)
+                         & Q(cargo=h.mawb))
+            newer_rej = (AltaInboxMessage.objects
+                         .filter(cond, prepared_at__gt=h.release_date,
+                                 msg_kind__in=('rejected', 'withdrawn'))
+                         .exists())
+            if newer_rej:
+                continue
+            fix.append((h, att))
+
+        self.stdout.write(f'RELEASED с невыровненной попыткой: {len(fix)}')
+        if not opts['apply'] or not fix:
+            if fix and not opts['apply']:
+                for h, att in fix[:25]:
+                    self.stdout.write(f'  {h.hawb_number} attempt '
+                                      f'{att.status}→RELEASED')
             return
 
         to_write = []
-        for h, decl in plan:
+        for h, att in fix:
             _retry_on_locked(
-                HouseWaybill.objects.filter(pk=h.pk).update,
-                customs_declaration_number=decl, attempts=15)
-            h.customs_declaration_number = decl
+                HawbDeclarationAttempt.objects.filter(pk=att.pk).update,
+                status='RELEASED', attempts=15)
             to_write.append(h)
 
         from cargo.services.sheets.writeback import (
+            batch_write_ed_status_for_hawbs,
             batch_write_declarations_for_hawbs)
         batch_write_declarations_for_hawbs(to_write)
+        batch_write_ed_status_for_hawbs(to_write)
         self.stdout.write(self.style.SUCCESS(
-            f'проставлено {len(to_write)} + writeback'))
+            f'выровнено попыток {len(to_write)} + writeback'))
