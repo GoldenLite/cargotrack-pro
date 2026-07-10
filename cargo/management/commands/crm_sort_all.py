@@ -103,41 +103,21 @@ class Command(BaseCommand):
         # может идти долго, свежесть статусов важнее межвкладочного кэша).
         from cargo.services.alta.ed_status import ed_status_batch
         for i, ws in enumerate(target):
-            sort_started = False
             try:
+                # ТОЛЬКО сортировка. Reindex ВНУТРИ sort убран (10.07.2026):
+                # он был главной тяжестью (read всего листа + delete/recreate
+                # индекса на каждую вкладку → ~175с/вкладку, 12 вкладок не
+                # укладывались в лимит → kill 267014). Его цель (защита от
+                # записи incremental в ЧУЖИЕ строки по устаревшему row_index)
+                # УСТАРЕЛА: и crm_sync_incremental, и sync_hide_state теперь
+                # sort-proof — таргетят живую колонку C (live_row_map), не
+                # CrmHawbIndex.row_index. Индекс обновляет отдельный
+                # CrmReindex-крон (4×/день). Sort стал секундами.
                 with ed_status_batch():
                     self._sort_tab(ss, ws)
-                    sort_started = True
-                    # После sort row_index'ы в индексе протухли. Reindex
-                    # читает текущее состояние и обновляет (тоже зовёт
-                    # compute_ed_status — тот же per-tab снапшот; между
-                    # sort и reindex БД не мутирует, только Sheets).
-                    self._reindex_tab(ws)
             except Exception as e:
                 logger.exception('crm_sort tab %s failed', ws.title)
                 self.stdout.write(self.style.ERROR(f'  {ws.title}: {e}'))
-                # Safety: если sort прошёл, а reindex упал — Sheets уже
-                # переставлены, индекс ссылается на старые row_index.
-                # Incremental, пытаясь обновить ячейки по этому индексу,
-                # запишет данные в ЧУЖИЕ строки (роль HAWB на row=N теперь
-                # другая). Стираем индекс этой вкладки целиком — следующий
-                # crm_reindex (каждые 6 ч) построит заново; до тех пор
-                # incremental пропустит вкладку (ему просто нечего обновлять).
-                if sort_started:
-                    try:
-                        CrmHawbIndex.objects.filter(
-                            tab_name=ws.title).delete()
-                        self.stdout.write(self.style.WARNING(
-                            f'  {ws.title}: stale index wiped (Sheets уже '
-                            f'переставлены, reindex упал — следующий '
-                            f'reindex по cron заполнит индекс заново)'))
-                        logger.warning(
-                            'crm_sort tab %s: wiped stale index after '
-                            'sort succeeded but reindex failed', ws.title)
-                    except Exception:
-                        logger.exception(
-                            'crm_sort tab %s: failed to wipe stale index',
-                            ws.title)
             if i + 1 < len(target):
                 time.sleep(3)
 
