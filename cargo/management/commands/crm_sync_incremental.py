@@ -360,15 +360,12 @@ class Command(BaseCommand):
                 changed = True
                 n_diff_request += 1
 
-            # arrival: пишем только если непустой и отличается.
-            if new_arrival and new_arrival != entry.last_arrival:
-                updates_per_tab[tab].append({
-                    'range': f'{_col_letter(COL_ARRIVAL_DATE)}{row}',
-                    'values': [[new_arrival]],
-                })
-                entry.last_arrival = new_arrival[:16]
-                changed = True
-                n_diff_arrival += 1
+            # arrival (столбец E): НЕ пишем в CRM-вкладки — по требованию
+            # юзера (13.07.2026) дату прибытия в CRM считает ФОРМУЛА
+            # специалиста, наша запись её затирала. Столбец E отдан формуле;
+            # last_arrival остаётся только для reindex-чтения (не для записи).
+            # (В «Общее» дата прибытия по-прежнему ставится set_arrival_from_do1
+            #  — это другой лист/путь, здесь не затронут.)
 
             # warehouse: пишем только если непустой и отличается.
             if new_warehouse and new_warehouse != entry.last_warehouse:
