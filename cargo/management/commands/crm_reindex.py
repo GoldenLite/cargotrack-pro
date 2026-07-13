@@ -212,6 +212,21 @@ class Command(BaseCommand):
             self.stdout.write('  --dry-run: skip writes')
             return len(found_rows)
 
+        # Сохраняем last_synced_at по hawb_number ПЕРЕД DELETE. Иначе
+        # DELETE+INSERT обнуляет его у ВСЕХ строк вкладки → в crm_sync
+        # anti-starvation (order_by last_synced_at nulls_first) теряет
+        # способность отличать реально не синканные строки от давно
+        # синканных → при 4×/день reindex прогресс сходимости стирается и
+        # хвост-вкладки голодают. Переносим таймстемп на пересозданную
+        # строку того же HAWB; новые HAWB получают NULL (корректно — они
+        # и должны идти в приоритете).
+        preserved: dict[str, object] = {}
+        for hn, ts in (CrmHawbIndex.objects.filter(tab_name=ws.title)
+                       .exclude(last_synced_at__isnull=True)
+                       .values_list('hawb_number', 'last_synced_at')):
+            if hn not in preserved or ts > preserved[hn]:
+                preserved[hn] = ts
+
         # Идемпотентный reindex: DELETE все entries вкладки, INSERT новые
         # из текущего Sheets-state. last_hidden корректен из metadata,
         # никакой incremental после не unhide'ит правильное состояние.
@@ -231,6 +246,7 @@ class Command(BaseCommand):
                     last_warehouse=d['last_warehouse'][:32],
                     last_t=d['last_t'],
                     last_hidden=is_hidden,
+                    last_synced_at=preserved.get(hn),
                 ))
 
         if to_create:

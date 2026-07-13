@@ -189,6 +189,13 @@ class Command(BaseCommand):
     def _run(self, *args, **opts):
         t0 = time.time()
         deadline = t0 + self.MAX_TOTAL_SEC
+        # Бюджет фазы вычисления (70% общего) — оставляем время на запись
+        # и сохранение индекса. Ключ к СХОДИМОСТИ: без этого цикл по всем
+        # ~5339 строкам молотит дольше MAX_TOTAL_SEC, прогон умирает
+        # (reaper/limit) ДО write/save → last_synced_at не двигается →
+        # хвост-вкладки (Субботина, Алексеева, Беляева…) голодают вечно
+        # (наблюдали 5339/5379 = NULL, целые вкладки ни разу не синканы).
+        compute_deadline = t0 + int(self.MAX_TOTAL_SEC * 0.7)
 
         # Durable-страховка от starvation: голодающие записи (никогда не
         # синканные last_synced_at=NULL, затем самые давние) обрабатываются
@@ -252,7 +259,14 @@ class Command(BaseCommand):
             if _ws is not None:
                 live_maps[_tab] = live_row_map(_ws)
 
+        n_processed = 0
         for entry in qs.iterator(chunk_size=500):
+            if time.time() > compute_deadline:
+                self.stdout.write(self.style.WARNING(
+                    f'  compute budget reached — обработано {n_processed}/{n_idx}; '
+                    'не синканные (last_synced_at=NULL) — в приоритете '
+                    'следующего прогона (anti-starvation)'))
+                break
             h = hawbs_db.get(entry.hawb_number)
             if h:
                 new_decl = (h.customs_declaration_number or '').strip()
@@ -288,6 +302,12 @@ class Command(BaseCommand):
             # не пишем (reindex потом уберёт stale-запись индекса).
             row = live_maps.get(tab, {}).get(entry.hawb_number)
             if row is None:
+                # HAWB больше нет на вкладке (удалена/перемещена) — в чужую
+                # строку не пишем. Но штампуем, чтобы stale-запись не висела
+                # вечно в голове очереди (reindex её потом уберёт).
+                entry.last_synced_at = djtz.now()
+                idx_to_save.append(entry)
+                n_processed += 1
                 continue
             changed = False
 
@@ -389,9 +409,15 @@ class Command(BaseCommand):
                 changed = True
                 n_diff_hidden += 1
 
-            if changed:
-                entry.last_synced_at = djtz.now()
-                idx_to_save.append(entry)
+            # Штампуем last_synced_at для КАЖДОЙ обработанной строки (не
+            # только изменённой). Иначе no-diff строки навсегда остаются
+            # last_synced_at=NULL → при order_by(nulls_first) все NULL равны
+            # → один и тот же префикс каждый прогон → хвост-вкладки никогда
+            # не достигаются. Штамп двигает обработанную строку в конец
+            # очереди → фронт очереди = реально не синканные строки.
+            entry.last_synced_at = djtz.now()
+            idx_to_save.append(entry)
+            n_processed += 1
 
         self.stdout.write(
             f'  diffs: decl={n_diff_decl} status={n_diff_status} '
