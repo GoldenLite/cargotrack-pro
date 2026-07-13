@@ -296,8 +296,24 @@ class Command(BaseCommand):
                    label=f'{ws.title} rehide')
 
     def _sort_tab(self, ss, ws):
-        n_hawb_rows = CrmHawbIndex.objects.filter(tab_name=ws.title).count()
-        self.stdout.write(f'  {ws.title}: HAWB rows in index = {n_hawb_rows}')
+        # Диапазон pass-2 (сортировка по дате прибытия) считаем по ФАКТИЧЕСКОМУ
+        # числу строк с HAWB в листе, а не по CrmHawbIndex.count(). Индекс
+        # обновляет reindex 4×/день; между ними новые строки в него не
+        # попадают → pass-2 их не охватывал и «хвост» новых накладных не
+        # сортировался по дате (наблюдали у Никоновой: индекс 284, лист 296 →
+        # 12 строк вне сортировки, 10246951615 висела на стр.283 вместо 112).
+        # Читаем живую колонку C — sort всегда покрывает все HAWB-строки.
+        idx_rows = CrmHawbIndex.objects.filter(tab_name=ws.title).count()
+        try:
+            col_c = _retry(ws.col_values, COL_HAWB, label=f'{ws.title} count C')
+        except Exception:
+            col_c = None
+        if col_c:
+            n_hawb_rows = sum(1 for v in col_c[1:] if str(v or '').strip())
+        else:
+            n_hawb_rows = idx_rows  # fallback: чтение не удалось
+        self.stdout.write(
+            f'  {ws.title}: HAWB rows sheet={n_hawb_rows} index={idx_rows}')
 
         # КРИТИЧНО: Google Sheets sortRange игнорирует HIDDEN ряды
         # (hiddenByUser=True остаются на своих позициях, в сорт не
