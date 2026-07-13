@@ -137,6 +137,18 @@ class Command(BaseCommand):
                 for m in e['msgs']:
                     _retry_on_locked(dispatch, m)
                     dispatched += 1
+                # Синхронный СВХ-writeback в «Общее» (лицензия/дата ДО1/рег):
+                # apply_svh_placement шлёт его daemon-тредом, который умирает
+                # при выходе management-команды → в «Общее» не долетает
+                # (наблюдали 070726-5: склад в БД есть, в «Общее» пусто).
+                # Realtime CRM-writeback уже синхронный; здесь добираем «Общее».
+                try:
+                    from cargo.services.sheets.writeback import (
+                        batch_write_svh_for_cargos)
+                    cargo.refresh_from_db()
+                    _retry_on_locked(batch_write_svh_for_cargos, [cargo])
+                except Exception as wex:  # noqa: BLE001
+                    self.stderr.write(f'  {mawb}: svh writeback «Общее»: {wex}')
             except Exception as ex:  # noqa: BLE001
                 err += 1
                 self.stderr.write(f'  {mawb}: {ex}')
