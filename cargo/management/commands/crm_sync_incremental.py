@@ -393,8 +393,15 @@ class Command(BaseCommand):
             will_status = entry.last_status
             # Скрываем только выпущенные (отказ/отзыв ребята продолжают
             # видеть для работы — переподача и т.п.).
-            # Legacy: cur_decl без статуса — старая ручная запись «выпущено».
-            is_legacy_released = bool(will_decl) and not will_status
+            # Legacy: cur_decl без статуса — старая РУЧНАЯ запись «выпущено».
+            # ТОЛЬКО для non-DB строк: если HAWB есть в БД (db_tracked), её
+            # реальный статус известен (compute_ed_status). Пустой статус у
+            # db-строки = НЕ выпущена, даже если специалист вписал рег.ДТ в
+            # колонку W вручную (ДТ присвоена, выпуска ещё нет) — не скрываем.
+            # Иначе ложно прятали невыпущенные (13.07.2026: 10265907412,
+            # 10274413851 на Подолине).
+            is_legacy_released = (bool(will_decl) and not will_status
+                                  and not db_tracked)
             want_hidden = ('Выпуск разрешен' in will_status
                            or is_legacy_released)
             if want_hidden != entry.last_hidden:

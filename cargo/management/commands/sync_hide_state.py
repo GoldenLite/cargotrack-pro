@@ -105,6 +105,15 @@ class Command(BaseCommand):
         # Google API часто НЕ доходит → выпущенные строки оставались раскрытыми).
         # Логика идентична crm_sync_incremental: «Выпуск разрешен» в статусе ИЛИ
         # legacy (есть рег.ДТ, но статуса нет = старая ручная отметка «выпущено»).
+        # legacy-ветку применяем ТОЛЬКО к строкам, которых нет в БД (настоящее
+        # ручное легаси). Для db-строк реальный статус в last_status; пустой =
+        # НЕ выпущена, даже если специалист вписал рег.ДТ в колонку W вручную
+        # (ДТ присвоена, выпуска ещё нет) — не скрываем. Иначе ложно прятали
+        # невыпущенные (13.07.2026: 10265907412, 10274413851 на Подолине).
+        from cargo.models import HouseWaybill
+        db_nums = set(HouseWaybill.objects.filter(
+            hawb_number__in=[e.hawb_number for e in entries]
+        ).values_list('hawb_number', flat=True))
         rows_to_hide = []
         rows_to_show = []
         idx_to_save = []
@@ -113,7 +122,8 @@ class Command(BaseCommand):
             if row is None:
                 continue  # HAWB больше нет на вкладке — reindex уберёт запись
             want_hidden = ('Выпуск разрешен' in (e.last_status or '')) \
-                or (bool(e.last_decl) and not e.last_status)
+                or (bool(e.last_decl) and not e.last_status
+                    and e.hawb_number not in db_nums)
             if want_hidden != e.last_hidden:
                 e.last_hidden = want_hidden
                 idx_to_save.append(e)
