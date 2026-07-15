@@ -1399,18 +1399,69 @@ def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+# Авиа-MAWB: 3 цифры-дефис-8 цифр (555-80546406). Транзитный номер партии
+# (СВХ/moscow-cargo): ддммгг-N (070726-4).
+_AIR_MAWB_RE = re.compile(r'^\d{3}-\d{8}$')
+_AIR_MAWB_RE_G = re.compile(r'\b\d{3}-\d{8}\b')
+_TRANSIT_NUM_RE = re.compile(r'\b\d{6}-\d{1,3}\b')
+_TRANSIT_MSG_TYPES = ('CMN.15007', 'CMN.15015', 'CMN.15016', 'CMN.15041')
+
+
+def _resolve_svh_cargo(svh_mawb: str) -> Optional[Cargo]:
+    """svh_mawb → Cargo.
+
+    Прямой матч по awb_number. Если не нашли И svh_mawb — это АВИА-MAWB
+    (ддд-8цифр), резолвим через ТРАНЗИТНЫЕ сообщения (CMN.15007/15015/15016)
+    в транзитный номер партии (ддммгг-N) и матчим Cargo по нему.
+
+    ЗАЧЕМ: СВХ-представление (CMN.13029) и parsed-table ДО1 иногда идут под
+    АВИА-номером (svh_mawb=555-80546406), а Cargo/ТСД специалист ведёт под
+    ТРАНЗИТНЫМ (070726-4) — прямой матч не срабатывает, данные (склад/дата
+    прибытия) не доезжают. Транзитные сообщения несут ОБА номера (юзер
+    подтвердил: в транзитном всегда 2 номера), из них строим алиас. Ранний
+    якорь: parsed-table ДО1 приходит в день представления с авиа-MAWB и
+    датой — привязка работает БЕЗ ожидания ДО2. См. [[svh transit alias]].
+
+    Надёжность: транзитный номер берём ТОЛЬКО из сообщений, где ЕДИНСТВЕННЫЙ
+    авиа-MAWB = наш (иначе к какому авиа относится транзит — неоднозначно;
+    ранние транзитные сообщения перечисляют несколько авиа без транзитных
+    номеров — их пропускаем). Резолвим лишь если получается РОВНО один Cargo.
+    """
+    svh_mawb = (svh_mawb or '').strip()
+    if not svh_mawb:
+        return None
+    c = Cargo.objects.filter(awb_number__iexact=svh_mawb).first()
+    if c:
+        return c
+    if not _AIR_MAWB_RE.match(svh_mawb):
+        return None
+    transit_nums: set[str] = set()
+    for raw in (AltaInboxMessage.objects
+                .filter(msg_type__in=_TRANSIT_MSG_TYPES,
+                        raw_xml__contains=svh_mawb)
+                .values_list('raw_xml', flat=True)[:40]):
+        raw = raw or ''
+        if set(_AIR_MAWB_RE_G.findall(raw)) == {svh_mawb}:  # единств. авиа = наш
+            transit_nums.update(_TRANSIT_NUM_RE.findall(raw))
+    if not transit_nums:
+        return None
+    cargos = list(Cargo.objects.filter(awb_number__in=list(transit_nums)))
+    return cargos[0] if len(cargos) == 1 else None
+
+
 def match_svh(msg: AltaInboxMessage) -> Optional[Cargo]:
     """Подбирает Cargo для СВХ-сообщения через MAWB из parsed_meta.
 
     Альта пишет MAWB с разделителем-точкой (`222-.40333075`), наш Cargo
     хранит его без точки (`222-40333075`). Нормализация уже сделана в
-    парсере — берём `parsed_meta['svh_mawb']`.
+    парсере — берём `parsed_meta['svh_mawb']`. Резолв авиа→транзит внутри
+    _resolve_svh_cargo (svh_mawb может быть авиа-номером).
     """
     parsed = msg.parsed_meta or {}
     mawb = (parsed.get('svh_mawb') or '').strip()
     if not mawb:
         return None
-    return Cargo.objects.filter(awb_number__iexact=mawb).first()
+    return _resolve_svh_cargo(mawb)
 
 
 def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[AltaInboxMessage]]:
@@ -1473,7 +1524,7 @@ def match_svh_do1(msg: AltaInboxMessage) -> tuple[Optional[Cargo], Optional[Alta
     # совпадение = наша партия, ложный матч исключён.
     mawb = (pm.get('svh_mawb') or '').strip()
     if mawb:
-        c = Cargo.objects.filter(awb_number__iexact=mawb).first()
+        c = _resolve_svh_cargo(mawb)  # прямой + авиа→транзит алиас
         if c:
             return (c, None)
 
@@ -2062,7 +2113,7 @@ def _apply_svh_do1_from_parsed_table(msg: AltaInboxMessage) -> bool:
     reg_number = (pm.get('svh_do1_reg_number') or '').strip()
     if not mawb or not reg_number:
         return False
-    cargo = Cargo.objects.filter(awb_number__iexact=mawb).first()
+    cargo = _resolve_svh_cargo(mawb)  # прямой + авиа→транзит алиас
     if not cargo:
         logger.info('svh_do1 parsed: Cargo %s не найден — пропускаем', mawb)
         msg.cargo = None

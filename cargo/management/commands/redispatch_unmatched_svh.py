@@ -34,23 +34,22 @@ class Command(BaseCommand):
                             help='Сколько за прогон (0 = все)')
 
     def handle(self, *args, **opts):
-        from cargo.services.alta.inbox import dispatch, _retry_on_locked
-
-        # Множество awb_number существующих партий — чтобы отобрать только
-        # доматчиваемые (svh_mawb указывает на нашу партию), не гоняя чужие.
-        cargo_awbs = {a.strip().lower()
-                      for a in Cargo.objects.values_list('awb_number', flat=True)
-                      if a}
+        from cargo.services.alta.inbox import (dispatch, _retry_on_locked,
+                                               _resolve_svh_cargo)
 
         qs = (AltaInboxMessage.objects
               .filter(cargo__isnull=True, msg_kind__in=SVH_KINDS)
               .order_by('prepared_at'))
 
+        # Отбираем сообщения, у которых svh_mawb резолвится в НАШ Cargo —
+        # напрямую по awb_number ИЛИ через авиа→транзит алиас (_resolve_svh_cargo,
+        # svh_mawb может быть авиа-номером, а Cargo под транзитным). Чужие не
+        # гоняем.
         candidates = []
         for m in qs.iterator():
             pm = m.parsed_meta or {}
             mawb = (pm.get('svh_mawb') or pm.get('svh_mawb_raw') or '').strip()
-            if mawb and mawb.lower() in cargo_awbs:
+            if mawb and _resolve_svh_cargo(mawb):
                 candidates.append(m)
                 if opts['limit'] and len(candidates) >= opts['limit']:
                     break
