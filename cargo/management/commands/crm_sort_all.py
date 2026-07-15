@@ -375,6 +375,30 @@ class Command(BaseCommand):
             _retry(ss.batch_update, {'requests': [req_pass2]},
                    label=f'{ws.title} sort pass2')
 
+        # ── СРАЗУ восстанавливаем скрытие (пофикшено 15.07.2026) ──
+        # pass-1 снимает скрытие со ВСЕХ строк (Google не сортирует скрытые).
+        # Раньше вернуть скрытие полагались на минутный sync_hide_state — но
+        # после массовой сортировки он не успевал вернуть скрытие тысячам
+        # строк по 12 вкладкам → «все скрытые списки раскрыты». Теперь
+        # скрываем прямо здесь по index.last_hidden на ЖИВЫХ позициях
+        # (sort-proof). sync_hide_state остаётся как доводчик по свежему
+        # want_hidden.
+        try:
+            from cargo.services.sheets.crm_realtime import live_row_map
+            hidden_nums = set(CrmHawbIndex.objects.filter(
+                tab_name=ws.title, last_hidden=True)
+                .values_list('hawb_number', flat=True))
+            if hidden_nums:
+                lm = live_row_map(ws)
+                rows_h = sorted({lm[hn] for hn in hidden_nums if hn in lm})
+                reqs = _build_dim_requests(ws.id, rows_h, True)
+                if reqs:
+                    _retry(ss.batch_update, {'requests': reqs},
+                           label=f'{ws.title} re-hide')
+                    self.stdout.write(f'  re-hide: {len(rows_h)} rows')
+        except Exception:
+            logger.exception('crm_sort re-hide failed for %s', ws.title)
+
         # row_index в CrmHawbIndex обновится через _reindex_tab после.
         # Hide перенесли в _reindex_tab — после обновления row_index
         # знаем какие новые ряды надо скрыть.
