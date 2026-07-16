@@ -737,6 +737,116 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
     return total
 
 
+def batch_write_tsd_from_mawb_for_hawbs(hawbs: list, dry_run: bool = False):
+    """Пишет номер партии (Cargo.awb_number) в ПУСТУЮ колонку «ТСД» «Общее».
+
+    Зачем: колонку «CargoTrack: номер партии» удалили (26.05.2026) с расчётом
+    «MAWB виден в ТСД». Но ТСД — РУЧНАЯ колонка специалиста, а для партий,
+    рождённых из СВХ (adopt_svh_orphans / match_svh_do1 svh_mawb-ветка), никто
+    ТСД не вводит → номер партии не виден нигде. Эта функция закрывает разрыв:
+    берёт awb_number партии, к которой HAWB уже привязана, и кладёт в ТСД.
+
+    Страховки:
+    - Пишем ТОЛЬКО в ПУСТУЮ ячейку ТСД (не перетираем ручной ввод).
+    - Зеркалим в HAWB.tsd_number (иначе matcher видит diff «лист≠БД»).
+    - Sort-proof: ряд из ЖИВОЙ колонки «Накладная СДЭК», не по кэшу индекса.
+    - Колонку ТСД только НАХОДИМ, НЕ создаём (это колонка юзера).
+
+    Возвращает (n_written, planned), planned = list[(hawb_number, awb, row)]
+    — точный превью (учитывает live-ряд и пустоту ячейки) для dry-run.
+    """
+    from .mapping import GEN_TSD, normalize_hawb_number
+    planned: list[tuple] = []
+    if _sheets_writeback_disabled():
+        return 0, planned
+
+    # Кандидаты: привязка к партии есть, awb_number непустой, ТСД(БД) пусто.
+    cand: dict[str, tuple] = {}
+    for h in hawbs:
+        if not h.mawb_id:
+            continue
+        awb = ((h.mawb.awb_number or '').strip() if h.mawb else '')
+        if not awb:
+            continue
+        if (h.tsd_number or '').strip():
+            continue  # уже есть ручной ТСД — не трогаем
+        key = normalize_hawb_number(h.hawb_number)
+        if key:
+            cand[key] = (h, awb)
+    if not cand:
+        return 0, planned
+
+    total = 0
+    to_set_db: list[tuple] = []
+    for source in SheetSource.objects.filter(kind='general', is_active=True):
+        try:
+            ws = _retry_api(open_worksheet, source, label='tsd open')
+            header = _retry_api(ws.row_values, source.header_row,
+                                label='tsd header')
+        except (SheetsConfigError, gspread.exceptions.APIError):
+            logger.exception('tsd: open/header failed for %s', source.name)
+            continue
+        except Exception:
+            logger.exception('tsd: unexpected open error for %s', source.name)
+            continue
+
+        col_tsd = 0
+        for idx, val in enumerate(header, start=1):
+            if (val or '').strip() == GEN_TSD:
+                col_tsd = idx
+                break
+        if not col_tsd:
+            logger.info('tsd: колонка «%s» не найдена в %s, skip',
+                        GEN_TSD, source.name)
+            continue
+
+        try:
+            existing = _retry_api(ws.col_values, col_tsd, label='tsd read')
+        except Exception:
+            logger.exception('tsd: col read failed for %s', source.name)
+            continue
+
+        live = _hawb_live_rows(ws, source.header_row)
+        if not live:
+            logger.info('tsd: no live HAWB column in %s, skip', source.name)
+            continue
+
+        letter = _col_letter(col_tsd)
+        updates = []
+        for key, (h, awb) in cand.items():
+            row = live.get(key)
+            if not row:
+                continue  # HAWB нет в листе сейчас — писать некуда
+            cur = (existing[row - 1] if row - 1 < len(existing) else '').strip()
+            if cur:
+                continue  # ячейка ТСД занята — уважаем ручной ввод
+            planned.append((h.hawb_number, awb, row))
+            updates.append({'range': f'{letter}{row}', 'values': [[awb]]})
+            to_set_db.append((h, awb))
+
+        if dry_run or not updates:
+            continue
+        updates = _filter_inrange_updates(updates, ws, source.name)
+        if not updates:
+            continue
+        total += _chunked_batch_update(ws, updates, 'tsd', source.name)
+
+    # Зеркалим в БД только когда реально писали в лист.
+    if not dry_run and to_set_db:
+        objs = []
+        for h, awb in to_set_db:
+            h.tsd_number = awb[:64]
+            objs.append(h)
+        try:
+            from cargo.services.alta.inbox import _retry_on_locked
+            _retry_on_locked(HouseWaybill.objects.bulk_update, objs,
+                             ['tsd_number'], batch_size=200)
+        except Exception:
+            logger.exception('tsd: bulk_update tsd_number failed')
+
+    return total, planned
+
+
 def _read_sheet_hawbs(ws, header_row: int) -> list[str]:
     """Читает колонку «Накладная СДЭК» (GEN_HAWB_NUMBER) — возвращает список
     нормализованных HAWB-номеров. Индекс в списке = row_idx - 1.

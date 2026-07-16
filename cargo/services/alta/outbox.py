@@ -476,14 +476,17 @@ def _link_hawbs_to_cargo(hawb_nums: list, cargo: Cargo) -> None:
                     len(affected), cargo.awb_number)
         try:
             from cargo.services.sheets.writeback import (
-                batch_write_cargo_mawb_for_hawbs, signals_suppressed,
+                batch_write_tsd_from_mawb_for_hawbs, signals_suppressed,
             )
             if not signals_suppressed():
+                # Все affected привязаны к ЭТОМУ cargo — ставим FK в память,
+                # чтобы писатель не делал лишний refresh/запрос за awb_number.
                 for h in affected:
-                    h.refresh_from_db(fields=['mawb_id'])
-                batch_write_cargo_mawb_for_hawbs(affected)
+                    h.mawb = cargo
+                # Пишет awb_number в ПУСТУЮ ТСД + зеркалит в HAWB.tsd_number.
+                batch_write_tsd_from_mawb_for_hawbs(affected)
         except Exception:
-            logger.exception('cargo_mawb writeback failed')
+            logger.exception('tsd-from-mawb writeback failed')
 
 
 def _writeback_svh_for_cargo(cargo: Cargo) -> None:
