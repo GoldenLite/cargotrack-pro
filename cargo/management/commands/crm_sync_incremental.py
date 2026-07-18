@@ -443,6 +443,22 @@ class Command(BaseCommand):
 
         if not (updates_per_tab or hide_per_tab or show_per_tab):
             self.stdout.write('Nothing to write.')
+            # НО idx_to_save несёт last_synced_at-штампы (8b25050) — сохранить
+            # ОБЯЗАТЕЛЬНО, иначе no-diff строки (легаси-вкладки без DB-HAWB,
+            # напр. Алексеева 835/867) НИКОГДА не штампуются → вечно NULL →
+            # вечно в голове nulls_first-очереди → голодание. Ранний return
+            # без save = дыра сходимости (наблюдали 18.07.2026).
+            if idx_to_save:
+                from cargo.services.alta.inbox import _retry_on_locked
+                _retry_on_locked(
+                    CrmHawbIndex.objects.bulk_update,
+                    idx_to_save,
+                    fields=['last_decl', 'last_status', 'last_request',
+                            'last_arrival', 'last_warehouse', 'last_hidden',
+                            'last_t', 'last_synced_at'],
+                    batch_size=500,
+                )
+                self.stdout.write(f'  index updated: {len(idx_to_save)} rows')
             self.stdout.write(f'Elapsed: {time.time()-t0:.1f}s')
             return
 
