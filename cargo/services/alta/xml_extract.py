@@ -41,6 +41,19 @@ _DECL_TRIPLE_RE = re.compile(
 )
 
 
+# <pil:FirstDT> — ССЫЛКА на предшествующую ДТ внутри списка документов (гр.44),
+# а НЕ декларация этого сообщения. Содержит такую же тройку
+# CustomsCode/RegistrationDate/GTDNumber, поэтому без вырезания парсер принимал
+# её за «нашу» ДТ. Реальный кейс (20.07.2026): CMN.00106 «Документ успешно
+# зарегистрирован» вообще не содержал своей ДТ — только FirstDT от 2024-02-02,
+# и накладной 10281047057 (подана 17.07.2026) присвоился номер
+# 10005030/020224/3025355 двухлетней давности.
+_FIRSTDT_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?FirstDT\b[^>]*>.*?</(?:[a-zA-Z][\w-]*:)?FirstDT>',
+    re.S
+)
+
+
 def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
     """Возвращает (customs_code, registration_date, gtd_number) актуальной ДТ.
 
@@ -48,8 +61,13 @@ def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
     1. Тройка внутри <goom:GTDoutCustomsMark> — release stamp.
     2. Тройка с самой поздней RegistrationDate (новейшая корректировочная).
     3. Любая первая тройка (обычный случай — там одна ДТ).
+
+    Блоки <FirstDT> (ссылки на предшествующую ДТ в списке документов) из
+    рассмотрения ИСКЛЮЧАЮТСЯ — это чужой номер, не декларация сообщения.
+    Если после вырезания троек не осталось, возвращаем пусто: лучше не дать
+    номера вовсе, чем присвоить чужой (накладная сохранит свой прежний).
     """
-    # 1. Release stamp
+    # 1. Release stamp — самый жёсткий якорь, ищем ДО вырезания.
     mark_block = re.search(
         r'<(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark>',
         xml_text, re.S
@@ -59,13 +77,16 @@ def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
         if m:
             return (m.group(1).strip(), m.group(2).strip(), m.group(3).strip())
 
+    # Вырезаем ссылки на предшествующие ДТ — дальше работаем только по «своим».
+    scrubbed = _FIRSTDT_BLOCK_RE.sub('', xml_text)
+
     # 2/3. Все тройки в документе → выбрать самую позднюю
-    all_triples = _DECL_TRIPLE_RE.findall(xml_text)
+    all_triples = _DECL_TRIPLE_RE.findall(scrubbed)
     if not all_triples:
-        # совсем нет тройки — fallback на отдельные теги
-        return (_first(xml_text, 'CustomsCode'),
-                _first(xml_text, 'RegistrationDate'),
-                _first(xml_text, 'GTDNumber'))
+        # совсем нет тройки — fallback на отдельные теги (тоже без FirstDT)
+        return (_first(scrubbed, 'CustomsCode'),
+                _first(scrubbed, 'RegistrationDate'),
+                _first(scrubbed, 'GTDNumber'))
 
     # Все тройки — выбираем максимум по дате. Дата формата 2026-04-09 сравнима как строка.
     best = max(all_triples, key=lambda t: t[1].strip())

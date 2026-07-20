@@ -330,6 +330,18 @@ _DECL_TRIPLE_RE = re.compile(
 )
 
 
+# <pil:FirstDT> — ССЫЛКА на предшествующую ДТ в списке документов (гр.44),
+# а НЕ декларация этого сообщения. Тройка тегов там такая же, поэтому без
+# вырезания парсер принимал чужой номер за свой. Реальный кейс (20.07.2026):
+# CMN.00106 «Документ успешно зарегистрирован» своей ДТ не содержал вовсе —
+# только FirstDT от 2024-02-02 — и накладной 10281047057, поданной 17.07.2026,
+# присвоился номер 10005030/020224/3025355 двухлетней давности.
+_FIRSTDT_BLOCK_RE = re.compile(
+    r'<(?:[a-zA-Z][\w-]*:)?FirstDT\b[^>]*>.*?</(?:[a-zA-Z][\w-]*:)?FirstDT>',
+    re.S
+)
+
+
 def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
     """В CMN.11309 (КДТ-уведомление о выпуске) в одном XML может лежать
     несколько разных ДТ — старая и новая корректировочная. Старый парсер брал
@@ -339,6 +351,10 @@ def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
     1. Тройка внутри <goom:GTDoutCustomsMark> (release stamp) — актуальная.
     2. Тройка с самой поздней RegistrationDate (новая КДТ).
     3. Fallback на плоские теги (обычное сообщение с одной ДТ).
+
+    Блоки <FirstDT> ИСКЛЮЧАЮТСЯ: это ссылка на предшествующую ДТ, чужой номер.
+    Если после вырезания троек не осталось — возвращаем пусто (лучше без
+    номера, чем чужой: накладная сохранит свой прежний).
     """
     mark_block = re.search(
         r'<(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark\b[^>]*>(.*?)</(?:[a-zA-Z][\w-]*:)?GTDoutCustomsMark>',
@@ -349,14 +365,16 @@ def _pick_effective_decl(xml_text: str) -> tuple[str, str, str]:
         if m:
             return (m.group(1).strip(), m.group(2).strip(), m.group(3).strip())
 
-    triples = _DECL_TRIPLE_RE.findall(xml_text)
+    scrubbed = _FIRSTDT_BLOCK_RE.sub('', xml_text)
+
+    triples = _DECL_TRIPLE_RE.findall(scrubbed)
     if triples:
         best = max(triples, key=lambda t: t[1].strip())
         return (best[0].strip(), best[1].strip(), best[2].strip())
 
-    return (_xml_field(xml_text, 'CustomsCode'),
-            _xml_field(xml_text, 'RegistrationDate'),
-            _xml_field(xml_text, 'GTDNumber'))
+    return (_xml_field(scrubbed, 'CustomsCode'),
+            _xml_field(scrubbed, 'RegistrationDate'),
+            _xml_field(scrubbed, 'GTDNumber'))
 
 
 def _parse_inbox_xml(xml_text: str) -> dict:
