@@ -168,11 +168,67 @@ class MoscowCargoClient:
         flight_list = data.get('flightinfo') or []
         flight = flight_list[0] if flight_list else {}
 
+        # ── Сверка «заявлено по авианакладной» vs «фактически принято складом» ──
+        # Груз прилетает НЕ ЦЕЛИКОМ регулярно (часть мест остаётся в аэропорту
+        # вылета / летит следующим рейсом). Тогда ДО1 оформляется только на
+        # прилетевшую часть, и разливать его на ВСЕ накладные партии нельзя —
+        # неизвестно, какие именно места приехали (кейс 784-84705375, 20.07.2026:
+        # заявлено 43 места / 238 кг, принято 26 / 90, ДО1 на 26).
+        awbinfo = data.get('awbinfo') or {}
+        wh_list = data.get('warehouse') or []
+        wh = wh_list[0] if wh_list else {}
+
+        declared_pieces = _to_int(awbinfo.get('pieces'))
+        declared_weight = _to_float(awbinfo.get('weight'))
+        # Фактическое: приоритет orig_* из самого ДО1, иначе блок warehouse.
+        arrived_pieces = _to_int(do1.get('orig_pieces'))
+        if arrived_pieces is None:
+            arrived_pieces = _to_int(wh.get('pieces'))
+        arrived_weight = _to_float(do1.get('orig_weight'))
+        if arrived_weight is None:
+            arrived_weight = _to_float(wh.get('weight'))
+
+        is_partial = (declared_pieces is not None
+                      and arrived_pieces is not None
+                      and arrived_pieces < declared_pieces)
+        if is_partial:
+            logger.warning(
+                'moscow-cargo: ЧАСТИЧНОЕ прибытие %s — заявлено %s мест/%s кг, '
+                'принято %s мест/%s кг. ДО1 к партии НЕ применяем.',
+                awb_number, declared_pieces, declared_weight,
+                arrived_pieces, arrived_weight)
+
         return {
             'do1_number_internal': (do1.get('do1_number') or '').strip(),
             'do1_date':            (do1.get('do1_date') or '').strip(),
             'license':             (do1.get('license') or '').strip(),
             'reg_number':          (do1.get('customs_num') or '').strip(),
-            'awb_info':            data.get('awbinfo') or {},
+            'awb_info':            awbinfo,
             'flight':              flight,
+            # Сверка мест/веса
+            'declared_pieces':     declared_pieces,
+            'declared_weight':     declared_weight,
+            'arrived_pieces':      arrived_pieces,
+            'arrived_weight':      arrived_weight,
+            'is_partial':          is_partial,
         }
+
+
+def _to_int(v) -> Optional[int]:
+    """'26' / 26 / '' / None → int | None (без падений на мусоре)."""
+    if v is None or v == '':
+        return None
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(v) -> Optional[float]:
+    """'90.000' / 90 / '' / None → float | None."""
+    if v is None or v == '':
+        return None
+    try:
+        return float(str(v).strip().replace(',', '.'))
+    except (TypeError, ValueError):
+        return None
