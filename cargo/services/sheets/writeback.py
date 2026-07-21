@@ -632,6 +632,36 @@ def write_svh_placement_for_cargo(cargo: Cargo) -> int:
     return batch_write_svh_for_cargos([cargo])
 
 
+def partial_svh_suppressed_hawbs(cargos=None) -> set:
+    """HAWB-номера, которым НЕ положены СВХ/ДО1: накладные БЕЗ per-HAWB
+    ДО1-данных в ЧАСТИЧНО размещённой партии.
+
+    Частичное размещение (груз прилетел не целиком, ДО1 подан только на
+    прилетевшие места): у попавших в ДО1 накладных стоит svh_do1_place_count /
+    svh_do1_sent_at, у остальных пусто. Лицензия/ДО1/scan_into_bond хранятся на
+    уровне Cargo и по умолчанию раздаются ВСЕМ накладным партии — из-за этого
+    непрлетевшие показывались «на складе». Здесь собираем те, кому СВХ надо
+    ПОДАВИТЬ (пусто). Партия считается частичной, только если у ОДНИХ накладных
+    per-HAWB данные есть, а у ДРУГИХ нет; полные (все/никто) — не трогаем.
+
+    cargos=None → по всей БД (для audit); список → только эти партии.
+    """
+    from collections import defaultdict
+    qs = HouseWaybill.objects.exclude(mawb__isnull=True)
+    if cargos is not None:
+        qs = qs.filter(mawb_id__in=[c.pk for c in cargos])
+    per_cargo = defaultdict(lambda: {'in': [], 'out': []})
+    for hn, mid, pc, sent in qs.values_list(
+            'hawb_number', 'mawb_id', 'svh_do1_place_count', 'svh_do1_sent_at'):
+        per_cargo[mid]['in' if (pc is not None or sent is not None)
+                       else 'out'].append(hn)
+    suppressed = set()
+    for d in per_cargo.values():
+        if d['in'] and d['out']:            # партия ЧАСТИЧНАЯ
+            suppressed.update(d['out'])
+    return suppressed
+
+
 def batch_write_svh_for_cargos(cargos: list) -> int:
     """Batch-writeback СВХ-полей (лицензия / дата ДО1 / рег.номер ДО1) в «Общее».
 
@@ -663,6 +693,12 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
                 hawb_to_cargo[key] = c
     if not hawb_to_cargo:
         return 0
+
+    # Частичный ДО1: накладным вне ДО1 в частично размещённой партии СВХ НЕ
+    # положен — пишем пусто (иначе Cargo-уровневая лицензия/ДО1 «прилетает»
+    # всем 18, хотя на складе только 5). Кейс 235-50096185.
+    suppressed = {normalize_hawb_number(h)
+                  for h in partial_svh_suppressed_hawbs(cargos)}
 
     total = 0
     for source in SheetSource.objects.filter(kind='general', is_active=True):
@@ -705,9 +741,13 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
             row_idx = live_rows.get(hawb_norm)
             if not row_idx:
                 continue  # HAWB нет в этом листе сейчас — писать некуда
-            lic = (cargo.warehouse_license or '').strip()
-            placed_str = _local_date_str(cargo.scan_into_bond)
-            do1_reg = (cargo.svh_do1_reg_number or '').strip()
+            if hawb_norm in suppressed:
+                # накладной нет в частичном ДО1 → СВХ/ДО1 пусто
+                lic = placed_str = do1_reg = ''
+            else:
+                lic = (cargo.warehouse_license or '').strip()
+                placed_str = _local_date_str(cargo.scan_into_bond)
+                do1_reg = (cargo.svh_do1_reg_number or '').strip()
             # NB: чужие лицензии (10005/...) — легитимные данные с
             # moscow-cargo.com (refresh_moscow_cargo), не фильтруем.
             cur_lic = (existing_lic[row_idx - 1]

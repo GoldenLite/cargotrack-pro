@@ -70,15 +70,27 @@ def _mawb(h):
     return (h.mawb.awb_number if h.mawb_id and h.mawb else '') or ''
 
 
+# Накладные, которым НЕ положены СВХ/ДО1 (нет в частичном ДО1 партии).
+# Заполняется в handle() ОДИН раз перед циклом. См. writeback.partial_svh_
+# suppressed_hawbs. Для таких аудит ожидает ПУСТО → активно стирает лишнее.
+_SVH_SUPPRESSED: set = set()
+
+
 def _lic(h):
+    if h.hawb_number in _SVH_SUPPRESSED:
+        return ''
     return (h.mawb.warehouse_license if h.mawb_id and h.mawb else '') or ''
 
 
 def _scan_into_bond(h):
+    if h.hawb_number in _SVH_SUPPRESSED:
+        return ''
     return _local_date_str(h.mawb.scan_into_bond if h.mawb_id and h.mawb else None)
 
 
 def _svh_do1_reg(h):
+    if h.hawb_number in _SVH_SUPPRESSED:
+        return ''
     return (h.mawb.svh_do1_reg_number if h.mawb_id and h.mawb else '') or ''
 
 
@@ -296,6 +308,15 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.WARNING(
                         f'  [{source.name}] import_sheets {age_min} мин назад — '
                         f'аудит sort-proof таргетит живые строки, продолжаю'))
+
+        # Частичный ДО1: собираем накладные, которым СВХ/ДО1 подавлен (нет в
+        # ДО1 частично размещённой партии) — ОДИН раз перед циклом. Геттеры
+        # _lic/_scan_into_bond/_svh_do1_reg вернут для них ПУСТО → аудит сотрёт
+        # лишнее Cargo-уровневое СВХ, раздутое на всю партию. Кейс 235-50096185.
+        global _SVH_SUPPRESSED
+        from cargo.services.sheets.writeback import partial_svh_suppressed_hawbs
+        _SVH_SUPPRESSED = partial_svh_suppressed_hawbs()
+        self.stdout.write(f'СВХ-подавлено (частичный ДО1): {len(_SVH_SUPPRESSED)}')
 
         # Батч-кэш ed_status: per-cargo пред-агрегация вместо per-HAWB
         # raw_xml-LIKE — без него аудит на 14k+ HAWB не влезал в лимит
