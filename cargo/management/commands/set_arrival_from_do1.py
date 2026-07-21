@@ -49,12 +49,41 @@ class Command(BaseCommand):
             self.stderr.write(f'колонки не найдены (hawb={hawb_col} arrive={arr_col})')
             return
 
-        # HAWB -> дата ДО1 (дд.мм.гггг), только у кого ДО1 есть
+        # HAWB -> дата ДО1 (дд.мм.гггг), только у кого ДО1 есть.
+        #
+        # ЧАСТИЧНЫЙ ДО1 (20.07.2026): груз прилетает не целиком, ДО1 подаётся
+        # только на прилетевшие места. Тогда per-HAWB поля (svh_do1_place_count
+        # / svh_do1_sent_at) стоят ТОЛЬКО у накладных, реально попавших в ДО1, а
+        # Cargo.scan_into_bond — на уровне партии. Раньше мы ставили прибытие
+        # ВСЕМ накладным партии по mawb.scan_into_bond → «прибыли» и те, кого на
+        # складе нет (кейс 235-50096185: ДО1 на 5 из 18, прибытие проставилось
+        # всем 18). Правило: если у партии ХОТЬ ОДНА накладная имеет per-HAWB
+        # ДО1-данные — считаем ДО1 пофакт-накладным и ставим прибытие ТОЛЬКО
+        # тем, у кого эти данные есть. Если ни у кого нет (сплошной ДО1 на всю
+        # партию, тонкий CMN.13010 без перечня) — ставим всем, как раньше.
+        from collections import defaultdict
+        rows_db = list(HouseWaybill.objects
+                       .filter(mawb__scan_into_bond__isnull=False)
+                       .values_list('hawb_number', 'mawb_id',
+                                    'mawb__scan_into_bond',
+                                    'svh_do1_place_count', 'svh_do1_sent_at'))
+        cargo_has_perhawb = defaultdict(bool)
+        for hn, mid, bond, pc, sent in rows_db:
+            if pc is not None or sent is not None:
+                cargo_has_perhawb[mid] = True
+
         hawb_date = {}
-        for hn, sib in (HouseWaybill.objects
-                        .filter(mawb__scan_into_bond__isnull=False)
-                        .values_list('hawb_number', 'mawb__scan_into_bond')):
-            hawb_date[hn] = timezone.localtime(sib).strftime('%d.%m.%Y')
+        skipped_partial = 0
+        for hn, mid, bond, pc, sent in rows_db:
+            has_evidence = (pc is not None) or (sent is not None)
+            if cargo_has_perhawb[mid] and not has_evidence:
+                # партия частичная, этой накладной в ДО1 нет → прибытие НЕ ставим
+                skipped_partial += 1
+                continue
+            hawb_date[hn] = timezone.localtime(bond).strftime('%d.%m.%Y')
+        if skipped_partial:
+            self.stdout.write(
+                f'пропущено (частичный ДО1, накладной нет в ДО1): {skipped_partial}')
 
         updates = []
         for ri in range(gen.header_row, len(vals)):
