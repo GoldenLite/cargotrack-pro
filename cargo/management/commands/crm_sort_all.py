@@ -385,6 +385,14 @@ class Command(BaseCommand):
         # want_hidden.
         try:
             from cargo.services.sheets.crm_realtime import live_row_map
+            # _build_dim_requests живёт в crm_sync_incremental — БЕЗ этого
+            # импорта тут был NameError на КАЖДОМ прогоне (15-21.07.2026):
+            # except его проглатывал, sort шёл дальше, а строки, раскрытые
+            # pass-1, так и оставались видимыми. Именно поэтому «скрытия
+            # выпущенных не работали» — re-hide не отрабатывал ни разу.
+            from cargo.management.commands.crm_sync_incremental import (
+                _build_dim_requests,
+            )
             hidden_nums = set(CrmHawbIndex.objects.filter(
                 tab_name=ws.title, last_hidden=True)
                 .values_list('hawb_number', flat=True))
