@@ -25,7 +25,12 @@ logger = logging.getLogger('cargo.external.moscow_cargo')
 
 # Префиксы AWB которые приходят в Москва-Карго (Шереметьево).
 # Грузы с этими префиксами размещаются на их СВХ; остальные — на наших.
-MOSCOW_CARGO_PREFIXES = ('784', '555', '826', '537', '880')
+# 978 = VietJet (DAD→SVO), добавлен 22.07.2026 после кейса 978-23917423:
+# ДО1 висел на Москва-Карго с 11.07, а мы его не видели 11 дней, потому что
+# префикса не было в списке. Чтобы это не повторялось для СЛЕДУЮЩЕЙ новой
+# авиакомпании, список перестал быть единственным входом — см.
+# `discovery_candidates()` ниже.
+MOSCOW_CARGO_PREFIXES = ('784', '555', '826', '537', '880', '978')
 
 # Префиксы AWB которые приходят в Шереметьево-Карго (shercargo.ru).
 # Тот же терминал что Москва-Карго, но другой оператор — публичный портал
@@ -53,6 +58,45 @@ def is_shercargo_candidate(cargo: Cargo) -> bool:
     if len(awb) < 4 or awb[3] != '-':
         return False
     return awb[:3] in SHERCARGO_PREFIXES
+
+
+def discovery_candidates(days: int = 45):
+    """Свежие партии-«классические MAWB» с НЕИЗВЕСТНЫМ префиксом и без ДО1.
+
+    Зачем: белый список префиксов — единственная точка отказа. Появляется новая
+    авиакомпания (978/VietJet, 22.07.2026) — её грузы лежат на Москва-Карго с
+    оформленным ДО1, а мы их не опрашиваем и молча ничего не показываем. Узнаём
+    об этом только когда специалист вручную заметит.
+
+    Поэтому список префиксов теперь = быстрый путь, а не фильтр: вдобавок к нему
+    каждый прогон вслепую пробуем НЕИЗВЕСТНЫЕ префиксы. Это безопасно и дёшево:
+    - партии Внуково (наш Alta-СВХ) просто вернут None — лишний GET, не более;
+    - окно `days` держит объём в единицах запросов (на 22.07.2026: 326 партий
+      без ДО1 всего, но лишь 10 за 45 дней);
+    - как только ДО1 найден, партия выпадает из выборки навсегда.
+
+    При попадании вызывающий код логирует префикс как новый — это сигнал
+    добавить его в MOSCOW_CARGO_PREFIXES (быстрый путь), но даже без правки
+    кода данные уже подтянутся.
+    """
+    from datetime import timedelta
+
+    from django.db.models import Q
+    from django.utils import timezone
+
+    known = set(MOSCOW_CARGO_PREFIXES) | set(SHERCARGO_PREFIXES)
+    since = timezone.now() - timedelta(days=days)
+    qs = (Cargo.objects
+          .filter(Q(svh_do1_reg_number='') | Q(svh_do1_reg_number__isnull=True))
+          .filter(created_at__gte=since)
+          .order_by('-created_at'))
+    out = []
+    for cargo in qs:
+        awb = (cargo.awb_number or '').strip()
+        if not _CLASSIC_MAWB_RE.match(awb) or awb[:3] in known:
+            continue
+        out.append(cargo)
+    return out
 
 
 def is_far_east_candidate(cargo: Cargo) -> bool:

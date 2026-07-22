@@ -22,7 +22,7 @@ from django.db.models import Q
 
 from cargo.models import Cargo
 from cargo.services.external_warehouse.applier import (
-    MOSCOW_CARGO_PREFIXES, apply_to_cargo,
+    MOSCOW_CARGO_PREFIXES, apply_to_cargo, discovery_candidates,
 )
 from cargo.services.external_warehouse.moscow_cargo import MoscowCargoClient
 
@@ -39,6 +39,10 @@ class Command(BaseCommand):
                             help='Только показать кандидатов, без HTTP')
         parser.add_argument('--include-filled', action='store_true',
                             help='Не пропускать партии с уже заполненным svh_do1_reg_number')
+        parser.add_argument('--no-discover', action='store_true',
+                            help='Не пробовать партии с неизвестными префиксами')
+        parser.add_argument('--discover-days', type=int, default=45,
+                            help='Окно discovery-прохода в днях (default 45)')
 
     def handle(self, *args, **opts):
         # Партии с подходящими префиксами
@@ -54,16 +58,37 @@ class Command(BaseCommand):
             qs = qs[:opts['limit']]
 
         cargos = list(qs)
+        known_ids = {c.pk for c in cargos}
         self.stdout.write(
             f'Кандидаты: {len(cargos)} (префиксы={MOSCOW_CARGO_PREFIXES})'
         )
+
+        # ── Discovery: свежие партии с НЕИЗВЕСТНЫМ префиксом ────────────────
+        # Белый список префиксов — единственная точка отказа (кейс 978-23917423,
+        # 22.07.2026: ДО1 висел у Москва-Карго 11 дней, мы не опрашивали).
+        # Пробуем вслепую — партии Внуково просто вернут None.
+        discovered = []
+        if not opts['no_discover'] and not opts['include_filled']:
+            discovered = [c for c in discovery_candidates(opts['discover_days'])
+                          if c.pk not in known_ids]
+            if opts['limit']:
+                discovered = discovered[:opts['limit']]
+            self.stdout.write(
+                f'Discovery-кандидаты (неизвестный префикс, '
+                f'<={opts["discover_days"]}д): {len(discovered)}'
+            )
 
         if opts['dry_run']:
             for c in cargos[:30]:
                 self.stdout.write(f'  {c.awb_number}')
             if len(cargos) > 30:
                 self.stdout.write(f'  ... и ещё {len(cargos) - 30}')
+            for c in discovered:
+                self.stdout.write(f'  [discovery] {c.awb_number}')
             return
+
+        cargos = cargos + discovered
+        discovered_ids = {c.pk for c in discovered}
 
         if not cargos:
             return
@@ -73,6 +98,7 @@ class Command(BaseCommand):
         n_empty = 0
         n_error = 0
         applied_cargos: list = []
+        new_prefixes: set = set()
         with MoscowCargoClient() as client:
             for i, cargo in enumerate(cargos, 1):
                 try:
@@ -87,6 +113,16 @@ class Command(BaseCommand):
                     n_empty += 1
                 else:
                     n_found += 1
+                    if cargo.pk in discovered_ids:
+                        # Москва-Карго знает партию, а префикса нет в списке —
+                        # значит появилась новая авиакомпания. Данные подтянутся
+                        # и без правки кода, но префикс стоит добавить в
+                        # MOSCOW_CARGO_PREFIXES, чтобы попадать в быстрый путь.
+                        new_prefixes.add(cargo.awb_number[:3])
+                        self.stdout.write(self.style.WARNING(
+                            f'  НОВЫЙ ПРЕФИКС {cargo.awb_number[:3]} '
+                            f'({cargo.awb_number}) — добавь в MOSCOW_CARGO_PREFIXES'
+                        ))
                     # writeback=False — собираем applied и делаем batch ниже,
                     # иначе на 100+ партий упираемся в Google API 300 read/min.
                     if apply_to_cargo(cargo, parsed, writeback=False,
@@ -111,6 +147,13 @@ class Command(BaseCommand):
             f'BD update done. processed={len(cargos)} found={n_found} '
             f'applied={n_applied} no_do1_yet={n_empty} errors={n_error}'
         ))
+        if new_prefixes:
+            import logging
+            logging.getLogger('cargo.external.moscow_cargo').warning(
+                'moscow-cargo: обнаружены НОВЫЕ префиксы %s — добавь в '
+                'MOSCOW_CARGO_PREFIXES', sorted(new_prefixes))
+            self.stdout.write(self.style.WARNING(
+                f'НОВЫЕ ПРЕФИКСЫ: {sorted(new_prefixes)}'))
 
         if not applied_cargos:
             return
