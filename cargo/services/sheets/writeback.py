@@ -1453,9 +1453,18 @@ def _customs_requests_text(hawb) -> str:
     # дробит длинный текст на N запросов с одинаковым request_dt_msk и
     # последовательным request_position. Без вторичных ключей SQLite на
     # B-tree даёт reverse-id и текст склеивается в обратном порядке.
-    requests = _dedup_customs_requests(list(hawb.customs_requests.filter(
-        request_dt_msk__isnull=False).order_by(
-            'request_dt_msk', 'request_position', 'envelope_id', 'received_at')))
+    # ⚠ Фильтруем/сортируем в PYTHON, а не через .filter().order_by(): любой
+    # .filter() по связи ИГНОРИРУЕТ prefetch_related и уходит в БД отдельным
+    # запросом на КАЖДУЮ накладную. В crm_sync_incremental это давало N+1 на
+    # ~5.5к строк индекса (22.07.2026: ~0.4 с/строку, за бюджет 420 с успевало
+    # лишь 1048 из 5552 — полный обход занимал ~5 прогонов). `.all()` берёт
+    # уже загруженный prefetch-кэш и не ходит в БД вовсе.
+    requests = [r for r in hawb.customs_requests.all() if r.request_dt_msk]
+    requests.sort(key=lambda r: (r.request_dt_msk,
+                                 r.request_position or 0,
+                                 r.envelope_id or '',
+                                 r.received_at))
+    requests = _dedup_customs_requests(requests)
     if not requests:
         return ''
     import html as _html
