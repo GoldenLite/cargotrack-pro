@@ -112,32 +112,13 @@ def _heartbeat_session() -> bool:
 
 
 def _acquire_lock() -> bool:
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-    if os.path.exists(LOCK_PATH):
-        try:
-            age = time.time() - os.path.getmtime(LOCK_PATH)
-        except OSError:
-            age = 0
-        if age < LOCK_STALE_AFTER_SEC:
-            return False
-        try:
-            os.remove(LOCK_PATH)
-        except OSError:
-            pass
-    try:
-        with open(LOCK_PATH, 'w') as f:
-            f.write(f'pid={os.getpid()} at={datetime.datetime.now().isoformat()}\n')
-        return True
-    except OSError:
-        return False
+    from cargo.services.cron_lock import acquire
+    return acquire(LOCK_PATH, LOCK_STALE_AFTER_SEC)
 
 
 def _release_lock() -> None:
-    try:
-        if os.path.exists(LOCK_PATH):
-            os.remove(LOCK_PATH)
-    except OSError:
-        pass
+    from cargo.services.cron_lock import release
+    release(LOCK_PATH)
 
 
 class Command(BaseCommand):

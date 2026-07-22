@@ -39,31 +39,14 @@ LOCK_STALE_AFTER_SEC = 30 * 60  # 30 минут
 
 
 def _acquire_lock() -> bool:
-    """Возвращает True если lock захвачен, False если уже занят."""
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-    if os.path.exists(LOCK_PATH):
-        age = time.time() - os.path.getmtime(LOCK_PATH)
-        if age < LOCK_STALE_AFTER_SEC:
-            return False
-        # Stale lock — удаляем
-        try:
-            os.remove(LOCK_PATH)
-        except OSError:
-            pass
-    try:
-        with open(LOCK_PATH, 'w') as f:
-            f.write(f'pid={os.getpid()} at={datetime.datetime.now().isoformat()}\n')
-        return True
-    except OSError:
-        return False
+    """Возвращает True если lock захвачен, False если им владеет ЖИВОЙ процесс."""
+    from cargo.services.cron_lock import acquire
+    return acquire(LOCK_PATH, LOCK_STALE_AFTER_SEC)
 
 
 def _release_lock() -> None:
-    try:
-        if os.path.exists(LOCK_PATH):
-            os.remove(LOCK_PATH)
-    except OSError:
-        pass
+    from cargo.services.cron_lock import release
+    release(LOCK_PATH)
 
 
 class Command(BaseCommand):
