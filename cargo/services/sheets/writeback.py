@@ -1406,6 +1406,36 @@ def batch_write_goods_count_for_hawbs(hawbs: list) -> int:
     )
 
 
+def _dedup_customs_requests(requests: list) -> list:
+    """Убирает дубли запросов таможни.
+
+    Один и тот же запрос приходит к нам ДВАЖДЫ: в сводном ED.11003 (несёт все
+    N <RequestedDoc> сразу) и в per-position split-копии, которую Альта-ГТД
+    делает для своего UI. У копий РАЗНЫЕ `envelope_id`, поэтому unique_together
+    (envelope_id, request_position_id) их не ловит — в БД оседают обе строки.
+
+    Истинный идентификатор запроса — `request_position_id` (UUID <RequestedDoc>):
+    он одинаков у оригинала и копии, а при повторном запросе таможни (даже с тем
+    же текстом) выдаётся новый — так что схлопывать по нему безопасно.
+
+    Замер 22.07.2026: 961 из 1277 запросов задвоены, затронуто 328 накладных
+    (напр. 10269195198 показывала 54 запроса вместо 27).
+
+    Строки без `request_position_id` (легаси) не схлопываем — идентифицировать
+    их нечем.
+    """
+    seen = set()
+    out = []
+    for r in requests:
+        key = (r.request_position_id or '').strip()
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(r)
+    return out
+
+
 def _customs_requests_text(hawb) -> str:
     """Собирает текст ячейки «Запросы таможни» из всех HawbCustomsRequest.
 
@@ -1423,11 +1453,12 @@ def _customs_requests_text(hawb) -> str:
     # дробит длинный текст на N запросов с одинаковым request_dt_msk и
     # последовательным request_position. Без вторичных ключей SQLite на
     # B-tree даёт reverse-id и текст склеивается в обратном порядке.
-    requests = list(hawb.customs_requests.filter(
+    requests = _dedup_customs_requests(list(hawb.customs_requests.filter(
         request_dt_msk__isnull=False).order_by(
-            'request_dt_msk', 'envelope_id', 'request_position', 'received_at'))
+            'request_dt_msk', 'request_position', 'envelope_id', 'received_at')))
     if not requests:
         return ''
+    import html as _html
     from collections import OrderedDict
     from django.utils import timezone as _tz
     grouped: 'OrderedDict[str, list]' = OrderedDict()
@@ -1435,8 +1466,11 @@ def _customs_requests_text(hawb) -> str:
         local = (_tz.localtime(r.request_dt_msk)
                  if _tz.is_aware(r.request_dt_msk) else r.request_dt_msk)
         d = local.strftime('%d.%m.%Y')
-        grouped.setdefault(d, []).append((local.strftime('%H:%M:%S'),
-                                          (r.request_text or '').strip()))
+        # split-копии приходят с неразэкранированными сущностями (&quot; и т.п.)
+        # — в ячейке это видно как мусор. Разэкранируем на выводе.
+        grouped.setdefault(d, []).append(
+            (local.strftime('%H:%M:%S'),
+             _html.unescape((r.request_text or '').strip())))
     lines: list[str] = []
     for date, items in grouped.items():
         if lines:
@@ -1448,7 +1482,7 @@ def _customs_requests_text(hawb) -> str:
 
 
 def _customs_requests_count(hawb) -> str:
-    n = hawb.customs_requests.count()
+    n = len(_dedup_customs_requests(list(hawb.customs_requests.all())))
     return '' if n == 0 else str(n)
 
 
