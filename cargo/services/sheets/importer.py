@@ -209,6 +209,19 @@ class SheetImporter:
 
     # ─── дедуп ──
 
+    @staticmethod
+    def _save_row_retry(obj, fields: list) -> None:
+        """save(update_fields=) с ретраем на 'database is locked'.
+
+        Дедуп идёт ПОСЛЕ чанкового импорта, когда конкуренты (audit/crm_sync/
+        agent) уже пишут вовсю. Голый save() тут ронял ВЕСЬ прогон уже после
+        успешного импорта — в логе `Sheet import crashed ... _mark_duplicates
+        ... r.save(update_fields=['match_status'])`. Запись идемпотентна
+        (UPDATE по pk), повтор безопасен.
+        """
+        from cargo.services.alta.inbox import _retry_on_locked
+        _retry_on_locked(obj.save, update_fields=fields, attempts=6)
+
     def _mark_duplicates(self) -> None:
         """Помечает дубли по hawb_number_norm в рамках одного источника.
 
@@ -228,6 +241,7 @@ class SheetImporter:
         Победителю если он был 'duplicate' (с прошлого прогона) — восстанавливаем
         исходный match_status (берём из matcher свежий результат).
         """
+        _save = self._save_row_retry
         from collections import defaultdict
         from .matcher import match_row
 
@@ -251,8 +265,8 @@ class SheetImporter:
                 only = rows[0]
                 if only.match_status == 'duplicate':
                     match_row(only)
-                    only.save(update_fields=['match_status', 'matched_hawb',
-                                             'matched_cargo', 'diff_summary'])
+                    _save(only, ['match_status', 'matched_hawb',
+                                 'matched_cargo', 'diff_summary'])
                     restored += 1
                 continue
 
@@ -266,13 +280,13 @@ class SheetImporter:
                     if r.match_status == 'duplicate':
                         # Это новый победитель, ранее помеченный duplicate
                         match_row(r)
-                        r.save(update_fields=['match_status', 'matched_hawb',
-                                              'matched_cargo', 'diff_summary'])
+                        _save(r, ['match_status', 'matched_hawb',
+                                  'matched_cargo', 'diff_summary'])
                         restored += 1
                     continue
                 if r.match_status != 'duplicate':
                     r.match_status = 'duplicate'
-                    r.save(update_fields=['match_status'])
+                    _save(r, ['match_status'])
                     marked_dup += 1
 
         if marked_dup or restored:
