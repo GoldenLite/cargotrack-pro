@@ -8,7 +8,7 @@ import traceback
 from typing import Optional
 
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 
 from cargo.models import ImportedSheetRow, SheetImportRun, SheetSource
@@ -116,14 +116,24 @@ class SheetImporter:
         # Идемпотентно — _process_row делает upsert по (source, row_index),
         # поэтому частичный коммит безопасен: следующий прогон до-импортирует
         # остаток. sync-delete не сработает если цикл упадёт (он после loop).
-        for chunk_start in range(0, len(rows), self.IMPORT_CHUNK_SIZE):
-            chunk = rows[chunk_start:chunk_start + self.IMPORT_CHUNK_SIZE]
+        # Ретрай на 'database is locked'. SQLite — один писатель, а по нам
+        # одновременно работают audit/crm_sync/reconcile/auto_sync, поэтому
+        # окна лока регулярны (22.07.2026: 10-36 «database is locked» в час,
+        # ВСЕ падения в логе — именно `Sheet import crashed`). Без ретрая один
+        # залоченный чанк ронял ВЕСЬ прогон: остальные чанки пропускались, а
+        # _mark_duplicates/_sync_delete/_auto_promote_orphans не выполнялись
+        # вовсе — новые строки не доезжали до БД до следующего крона, и CRM
+        # отставала. Чанк идемпотентен (upsert по (source,row_index)), поэтому
+        # повтор безопасен.
+        from cargo.services.alta.inbox import _retry_on_locked
+
+        def _commit_chunk(chunk, chunk_start):
             with transaction.atomic():
                 for offset, raw in enumerate(chunk):
                     i = chunk_start + offset + 1
-                    row_index = raw.pop('_row_index')
+                    row_index = raw.get('_row_index')
                     seen_row_indices.add(row_index)
-                    data = {k: v for k, v in raw.items() if k}
+                    data = {k: v for k, v in raw.items() if k and k != '_row_index'}
                     ch = _content_hash(data)
                     self._process_row(row_index, data, ch)
                     if i % 500 == 0:
@@ -133,9 +143,42 @@ class SheetImporter:
                             self.run.rows_new, self.run.rows_unchanged,
                         )
 
+        failed_chunks = 0
+        for chunk_start in range(0, len(rows), self.IMPORT_CHUNK_SIZE):
+            chunk = rows[chunk_start:chunk_start + self.IMPORT_CHUNK_SIZE]
+            try:
+                _retry_on_locked(_commit_chunk, chunk, chunk_start, attempts=6)
+            except OperationalError as e:
+                # Чанк не дался даже после ретраев — пропускаем ЕГО, но прогон
+                # продолжаем: остальные чанки и пост-обработка важнее, а этот
+                # до-импортируется следующим прогоном (upsert идемпотентен).
+                if 'locked' not in str(e).lower():
+                    raise
+                failed_chunks += 1
+                logger.warning(
+                    'import %s: чанк %d-%d не записан (lock), продолжаем',
+                    self.source.name, chunk_start,
+                    chunk_start + len(chunk))
+        if failed_chunks:
+            logger.warning('import %s: чанков пропущено по локу: %d',
+                           self.source.name, failed_chunks)
+
         if not self.dry_run:
             self._mark_duplicates()
-            self._sync_delete(run_start_ts, rows_before, len(seen_row_indices))
+            # ⚠ sync-delete судит по `last_imported_at < run_start_ts`. У строк
+            # ПРОПУЩЕННОГО чанка отметка не обновилась — для sync-delete они
+            # выглядят «исчезнувшими из Sheets» и были бы удалены. Порог
+            # SYNC_DELETE_SAFETY_THRESHOLD тут не спасает: один чанк на фоне
+            # тысяч строк в него не упирается. Поэтому при любом пропуске
+            # удаление НЕ выполняем — снимок заведомо неполный.
+            if failed_chunks:
+                logger.warning(
+                    'sync-delete ПРОПУЩЕН для %s: снимок неполный '
+                    '(%d чанков не записаны по локу)',
+                    self.source.name, failed_chunks)
+            else:
+                self._sync_delete(run_start_ts, rows_before,
+                                  len(seen_row_indices))
             if self.auto_promote and self.source.kind == 'general':
                 self._auto_promote_orphans()
 
