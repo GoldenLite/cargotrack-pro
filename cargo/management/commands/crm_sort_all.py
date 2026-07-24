@@ -175,6 +175,7 @@ class Command(BaseCommand):
             h.hawb_number: h for h in HouseWaybill.objects
             .filter(hawb_number__in=list(hawb_set))
             .select_related('mawb')
+            .prefetch_related('customs_requests', 'declaration_attempts')
         }
 
         to_create: list[CrmHawbIndex] = []

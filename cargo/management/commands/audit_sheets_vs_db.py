@@ -373,10 +373,14 @@ class Command(BaseCommand):
         self.stdout.write(f'  HAWB в Sheets: {len(items)}')
 
         # Все HAWB-объекты одной выборкой (батч-prefetch)
+        # prefetch связей, которые читает compute_ed_status/_customs_requests_*:
+        # без них каждый .all()/.count() по связи = отдельный SQL на HAWB (N+1,
+        # 320с на 14.8к HAWB). С prefetch — 0 запросов per-HAWB.
         hawbs_db = {
             h.hawb_number: h for h in HouseWaybill.objects
             .filter(hawb_number__in=[hn for _, hn in items])
             .select_related('mawb')
+            .prefetch_related('customs_requests', 'declaration_attempts')
         }
 
         # Категории несоответствий

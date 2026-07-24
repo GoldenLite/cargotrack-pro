@@ -198,6 +198,17 @@ class _EdStatusBatchCache:
     def __init__(self):
         # cargo_id → ({hawb_pk: _MsgLite}, {hawb_pk партии на момент снапшота})
         self._latest_by_cargo: dict[int, tuple[dict, set]] = {}
+        # Ленивый кэш outbox-подач: (set hawb_id, set hawb_number). Строится
+        # один раз за контекст (не за процесс — иначе realtime-путь получил бы
+        # стейл по свежим подачам). Живёт только пока активен ed_status_batch.
+        self._outbox: 'tuple[set, set] | None' = None
+
+    def outbox_has(self, hawb) -> bool:
+        """Есть ли по HAWB outbox-подача (FK hawb_id или в parsed_meta.hawbs)."""
+        if self._outbox is None:
+            self._outbox = _build_outbox_index()
+        ids, nums = self._outbox
+        return hawb.pk in ids or hawb.hawb_number in nums
 
     # ── шаг 1.5 ──
 
@@ -249,6 +260,50 @@ class _EdStatusBatchCache:
         entry = (latest, hawb_ids)
         self._latest_by_cargo[cargo_id] = entry
         return entry
+
+
+def _outbox_refs_ready() -> bool:
+    """Заполнена ли денормализованная таблица AltaOutboxWaybill (бэкфилл прошёл).
+
+    Поэтапное внедрение (safe):
+    - таблицы ЕЩЁ НЕТ (миграция 0070 не применена) → OperationalError →
+      возвращаем False → чтение идёт по старому parsed_meta-пути (= класс-1,
+      проверенное поведение). Код можно деплоить/коммитить ДО миграции.
+    - таблица есть, но пуста (бэкфилл не прогнан) → False → тот же fallback.
+    - таблица заполнена → True → быстрый путь без raw_xml.
+    """
+    from django.db import OperationalError
+    from cargo.models import AltaOutboxWaybill
+    try:
+        return AltaOutboxWaybill.objects.exists()
+    except OperationalError:
+        return False
+
+
+def _build_outbox_index() -> 'tuple[set, set]':
+    """(set hawb_id, set hawb_number) для всех outbox-подач.
+
+    FK-часть — через колонку `hawb_id` (дёшево, индекс). Номера:
+    - БЫСТРЫЙ ПУТЬ (после бэкфилла): из денормализованной AltaOutboxWaybill —
+      только номера, БЕЗ raw_xml. Индексировано, дёшево.
+    - FALLBACK (до бэкфилла, таблица пуста): старый проход по parsed_meta.
+      ⚠ он тянет raw_xml до 4МБ на строку → память; временно, до бэкфилла.
+    """
+    from cargo.models import AltaOutboxObservation, AltaOutboxWaybill
+    base = AltaOutboxObservation.objects.filter(msg_type__in=_SUBMISSION_TYPES)
+    ids = set(base.filter(hawb_id__isnull=False)
+              .values_list('hawb_id', flat=True))
+    if _outbox_refs_ready():
+        nums = set(AltaOutboxWaybill.objects
+                   .filter(observation__msg_type__in=_SUBMISSION_TYPES)
+                   .values_list('hawb_number', flat=True))
+    else:
+        nums = set()
+        for pm in base.values_list('parsed_meta', flat=True).iterator():
+            for hn in ((pm or {}).get('hawbs') or []):
+                if hn:
+                    nums.add(hn.strip())
+    return ids, nums
 
 
 def _has_resubmission(hawb, baseline_ts) -> bool:
@@ -358,8 +413,14 @@ def compute_ed_status(hawb) -> str:
     main = ''
     cur_decl = (hawb.customs_declaration_number or '').strip()
     if cur_decl:
-        cur_attempt = hawb.declaration_attempts.filter(
-            declaration_number=cur_decl).first()
+        # ⚠ .all() (prefetch-кэш), НЕ .filter(): любой .filter() по связи
+        # игнорирует prefetch и уходит в БД отдельным запросом на КАЖДУЮ HAWB.
+        # На батч-аудите (14.8к HAWB) это был главный пожиратель времени
+        # (320с, N+1). Meta.ordering=['hawb','attempt_number'] → первый матч
+        # по .all() = наименьший attempt_number, как у .filter().first().
+        cur_attempt = next(
+            (a for a in hawb.declaration_attempts.all()
+             if a.declaration_number == cur_decl), None)
         if cur_attempt:
             if cur_attempt.status == 'RELEASED':
                 main = 'Выпуск разрешен'
@@ -367,6 +428,19 @@ def compute_ed_status(hawb) -> str:
                 main = 'Отказано в выпуске'
             # FILED для current — релиз был от ДРУГОЙ (старой) ДТ,
             # не используем release_date. Падаем дальше в latest CMN.
+        elif hawb.customs_status == 'RELEASED' and hawb.release_date:
+            # Sibling ДТЭГ: current ДТ есть, выпуск в БД есть (RELEASED +
+            # release_date проброшены с головной накладной), но собственной
+            # HawbDeclarationAttempt под эту ДТ НЕ создалось. Без этой ветки
+            # шаг 1 не находит attempt → падает на latest CMN, а туда для
+            # multi-HAWB ДТЭГ прилетает rejected CMN.11350 по ДРУГОЙ ДТ той же
+            # партии (упоминает нашу накладную в raw_xml как sibling) → ложно
+            # «Идет проверка» на реально выпущенной накладной.
+            # Кейс 141-53626160 (23.07.2026): 10289221453/10289234703 — ДТ
+            # 0026559 выпущена 17.07, а rejected 0026862/0026874 от 20.07
+            # перебивал. Защита от кейса переподачи: там customs_status !=
+            # RELEASED (REJECTED/пусто), поэтому эта ветка их не трогает.
+            main = 'Выпуск разрешен'
     elif hawb.release_date:
         # Нет current decl, но есть release_date — легаси-кейс,
         # сохраняем старое поведение.
@@ -427,24 +501,33 @@ def compute_ed_status(hawb) -> str:
         # если уже есть customs_declaration_number, иначе "Открытие процедуры".
         # Outbox может быть FK-привязан к HAWB ИЛИ упомянут только через
         # parsed_meta.hawbs (multi-HAWB ДТ). Проверяем оба пути.
-        outbox_qs = AltaOutboxObservation.objects.filter(
-            msg_type__in=('CMN.11335', 'CMN.11349', 'CMN.11024', 'CMN.11023'),
-        )
-        has_outbox = outbox_qs.filter(hawb=hawb).exists()
-        if not has_outbox:
-            # Кеш: hawb_number → True. Считаем один раз на процесс.
-            # Без кеша для каждой HAWB без FK мы итерировали все ~10k
-            # outbox-наблюдений (~130M операций при batch-audit на 13k HAWB).
-            cache = getattr(compute_ed_status, '_outbox_hawb_cache', None)
-            if cache is None:
-                cache = set()
-                for o in outbox_qs.values_list('parsed_meta', flat=True):
-                    for hn in ((o or {}).get('hawbs') or []):
-                        if hn:
-                            cache.add(hn.strip())
-                compute_ed_status._outbox_hawb_cache = cache
-            if hawb.hawb_number in cache:
-                has_outbox = True
+        if batch is not None:
+            # Батч-режим: единый кэш (FK hawb_id + hawb_number) за ОДИН проход,
+            # живёт только в контексте. Раньше тут был per-HAWB
+            # `filter(hawb=hawb).exists()` — N+1 SQL на каждую HAWB без статуса
+            # (свежеподанные, которых на аудите тысячи).
+            has_outbox = batch.outbox_has(hawb)
+        else:
+            # Realtime-путь (вне ed_status_batch): FK — свежим запросом (стейл
+            # недопустим для только что поданной HAWB).
+            outbox_qs = AltaOutboxObservation.objects.filter(
+                msg_type__in=_SUBMISSION_TYPES)
+            has_outbox = outbox_qs.filter(hawb=hawb).exists()
+            if not has_outbox and _outbox_refs_ready():
+                # Точечный запрос по индексированному номеру — мгновенный,
+                # raw_xml не трогает (это и есть цель денормализации).
+                from cargo.models import AltaOutboxWaybill
+                has_outbox = AltaOutboxWaybill.objects.filter(
+                    observation__msg_type__in=_SUBMISSION_TYPES,
+                    hawb_number=hawb.hawb_number).exists()
+            elif not has_outbox:
+                # Fallback до бэкфилла: process-кэш номеров (как в оригинале).
+                nums = getattr(compute_ed_status, '_outbox_nums_cache', None)
+                if nums is None:
+                    nums = _build_outbox_index()[1]
+                    compute_ed_status._outbox_nums_cache = nums
+                if hawb.hawb_number in nums:
+                    has_outbox = True
         if has_outbox:
             if (hawb.customs_declaration_number or '').strip():
                 main = 'Присвоен номер'
@@ -459,8 +542,10 @@ def compute_ed_status(hawb) -> str:
     # номер». Применяется только если main всё ещё пуст после inbox/outbox
     # проверок (регрессия для других путей исключена).
     if not main and cur_decl:
-        has_filed_attempt = hawb.declaration_attempts.filter(
-            declaration_number=cur_decl, status='FILED').exists()
+        # .all() (prefetch), не .filter().exists() (N+1 на каждую HAWB).
+        has_filed_attempt = any(
+            a.declaration_number == cur_decl and a.status == 'FILED'
+            for a in hawb.declaration_attempts.all())
         if has_filed_attempt:
             main = 'Присвоен номер'
 
@@ -476,7 +561,8 @@ def compute_ed_status(hawb) -> str:
     flags: list[str] = []
     if not is_final:
         try:
-            n_req = hawb.customs_requests.count()
+            # len(.all()) (prefetch), не .count() (N+1 SELECT COUNT на HAWB).
+            n_req = len(hawb.customs_requests.all())
             if n_req and 'Запрошены' not in main:
                 flags.append('Запрошены док-ты!')
         except Exception:

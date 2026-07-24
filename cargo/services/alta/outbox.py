@@ -22,6 +22,37 @@ from cargo.models import AltaOutboxObservation, Cargo, HouseWaybill
 logger = logging.getLogger('cargo.alta.outbox')
 
 
+def sync_waybill_refs(obs: AltaOutboxObservation) -> int:
+    """Синхронизирует AltaOutboxWaybill с parsed_meta['hawbs'] наблюдения.
+
+    Денормализация: выносим список накладных из parsed_meta (там же raw_xml до
+    4МБ) в индексированную таблицу, чтобы точечные/батч-запросы не тянули
+    raw_xml. Идемпотентно: приводит refs к текущему hawbs. parsed_meta НЕ
+    трогаем — источник цел.
+
+    Возвращает число refs после синхронизации. Ошибки НЕ роняют вызывающего
+    (запись outbox важнее, refs добьёт backfill_outbox_waybills).
+    """
+    from cargo.models import AltaOutboxWaybill
+    try:
+        hawbs = (obs.parsed_meta or {}).get('hawbs') or []
+        want = {str(h).strip() for h in hawbs if str(h).strip()}
+        have = set(obs.waybill_refs.values_list('hawb_number', flat=True))
+        to_del = have - want
+        to_add = want - have
+        if to_del:
+            obs.waybill_refs.filter(hawb_number__in=to_del).delete()
+        if to_add:
+            AltaOutboxWaybill.objects.bulk_create(
+                [AltaOutboxWaybill(observation=obs, hawb_number=n)
+                 for n in to_add],
+                ignore_conflicts=True)
+        return len(want)
+    except Exception:
+        logger.exception('sync_waybill_refs failed for %s', obs.envelope_id)
+        return -1
+
+
 def _autocreate_disabled() -> bool:
     """Process-wide kill-switch для auto-create EXPORT HouseWaybill веток.
     Включается env ALTA_INBOX_AUTOCREATE_DISABLED=1 на время backfill,

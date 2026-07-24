@@ -3479,6 +3479,10 @@ def api_alta_outbox_post(request):
             'parsed_meta': parsed_meta,
         },
     )
+    # Денормализация списка накладных в индексированную таблицу (не трогает
+    # parsed_meta). Чтобы точечные/батч-запросы ЭД-статуса не тянули raw_xml.
+    from .services.alta.outbox import sync_waybill_refs
+    sync_waybill_refs(obs)
     # Для типов которые мы обрабатываем post-link (ED.DO1 → svh_do1_sent_at,
     # CMN.11023/CMN.11349 → filed_date) dispatch идемпотентен (только
     # update_fields + writeback diff) — вызываем всегда, чтобы после

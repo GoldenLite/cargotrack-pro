@@ -2057,6 +2057,43 @@ class AltaOutboxObservation(models.Model):
         return f'{self.msg_type} {self.envelope_id}{link}'
 
 
+class AltaOutboxWaybill(models.Model):
+    """Денормализованная связь исходящей копии → номер накладной в ней.
+
+    Зачем: в multi-HAWB ДТ (ДТЭГ) один исходящий CMN.11349/11023 несёт десятки
+    накладных, и их список лежит в `AltaOutboxObservation.parsed_meta['hawbs']`
+    — ВНУТРИ того же JSON, где агент хранит `raw_xml` (до 4МБ на строку).
+    Любое чтение этого списка (и точечное `parsed_meta__hawbs`, и батч-проход
+    по `parsed_meta`) заставляет тянуть/парсить гигантский raw_xml → на батч-
+    аудите это N+1 либо MemoryError (23.07.2026, реконструкция ЭД-статуса).
+
+    Эта таблица выносит номера в отдельную индексированную колонку, не трогая
+    parsed_meta (источник цел — откат тривиален: удалить таблицу). После неё
+    и точечный запрос по списку накладных, и батч-проход — мгновенны и не
+    касаются raw_xml.
+
+    Заполняется при записи outbox (см. views.api_alta_outbox_post) и разово
+    командой backfill_outbox_waybills.
+    """
+    observation = models.ForeignKey(
+        AltaOutboxObservation, on_delete=models.CASCADE,
+        related_name='waybill_refs', verbose_name='Исходящая копия')
+    hawb_number = models.CharField('Номер накладной', max_length=64,
+                                   db_index=True)
+
+    class Meta:
+        verbose_name = 'Накладная в исходящей копии'
+        verbose_name_plural = 'Накладные в исходящих копиях'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['observation', 'hawb_number'],
+                name='uniq_outbox_waybill'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.hawb_number} @ {self.observation_id}'
+
+
 class HawbDeclarationAttempt(models.Model):
     """Одна попытка подачи декларации (одна ДТ) для HAWB.
 

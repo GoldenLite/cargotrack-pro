@@ -139,6 +139,7 @@ class Command(BaseCommand):
             h.hawb_number: h for h in HouseWaybill.objects
             .filter(hawb_number__in=list(hawb_rows.keys()))
             .select_related('mawb')
+            .prefetch_related('customs_requests', 'declaration_attempts')
         }
         self.stdout.write(f'  DB match: {len(hawbs_db)}/{len(hawb_rows)}')
 

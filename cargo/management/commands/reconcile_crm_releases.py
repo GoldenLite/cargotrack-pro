@@ -43,7 +43,8 @@ class Command(BaseCommand):
                .exclude(last_status__contains='Выпуск разрешен'))
         cand_nums = list({e.hawb_number for e in idx})
         hawbs = {h.hawb_number: h for h in HouseWaybill.objects
-                 .filter(hawb_number__in=cand_nums).select_related('mawb')}
+                 .filter(hawb_number__in=cand_nums).select_related('mawb')
+                 .prefetch_related('customs_requests', 'declaration_attempts')}
 
         stuck = []
         seen = set()

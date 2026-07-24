@@ -87,7 +87,9 @@ class Command(BaseCommand):
             tab_name__in=list(ws_by_title.keys())))
         hawb_nums = list({e.hawb_number for e in all_entries})
         hawbs_db = {h.hawb_number: h for h in HouseWaybill.objects
-                    .filter(hawb_number__in=hawb_nums)}
+                    .filter(hawb_number__in=hawb_nums)
+                    .select_related('mawb')
+                    .prefetch_related('customs_requests', 'declaration_attempts')}
 
         # Метаданные hidden по каждой вкладке.
         sheet_hidden: dict[str, list[bool]] = {}
