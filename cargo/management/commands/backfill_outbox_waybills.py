@@ -42,38 +42,44 @@ class Command(BaseCommand):
         if not opts['all_types']:
             qs = qs.filter(msg_type__in=HAWBS_TYPES)
 
-        # Тянем ТОЛЬКО id + json_extract('$.hawbs'), без parsed_meta целиком.
-        ids_hawbs = list(
-            qs.values_list('id', 'parsed_meta__hawbs').order_by('id'))
-        self.stdout.write(f'наблюдений к обработке: {len(ids_hawbs)}')
+        # ⚠ Тянем id СНАЧАЛА (дёшево), потом json_extract('$.hawbs') ЧАНКАМИ по
+        # id. Массовый `values_list('parsed_meta__hawbs')` заставлял SQLite
+        # json_extract парсить raw_xml (4МБ) по всем строкам разом → OOM.
+        # Чанк по 100-200 id держит парсинг в единицах строк за раз.
+        all_ids = list(qs.values_list('id', flat=True).order_by('id'))
+        self.stdout.write(f'наблюдений к обработке: {len(all_ids)}')
 
         existing_before = AltaOutboxWaybill.objects.count()
         self.stdout.write(f'refs в таблице сейчас: {existing_before}')
 
         n_obs = 0
         n_refs = 0
-        pending: list = []
         chunk = opts['chunk']
 
-        def _flush():
-            nonlocal pending, n_refs
+        for i in range(0, len(all_ids), chunk):
+            id_chunk = all_ids[i:i + chunk]
+            pending: list = []
+            # json_extract только на этих id — SQLite парсит parsed_meta
+            # построчно, память освобождается после чанка.
+            for oid, hlist in (AltaOutboxObservation.objects
+                               .filter(id__in=id_chunk)
+                               .values_list('id', 'parsed_meta__hawbs')):
+                nums = {str(h).strip() for h in (hlist or []) if str(h).strip()}
+                if not nums:
+                    continue
+                n_obs += 1
+                for num in nums:
+                    pending.append(AltaOutboxWaybill(observation_id=oid,
+                                                     hawb_number=num))
             if pending and not opts['dry_run']:
-                AltaOutboxWaybill.objects.bulk_create(
-                    pending, ignore_conflicts=True, batch_size=1000)
+                from cargo.services.alta.inbox import _retry_on_locked
+                _retry_on_locked(AltaOutboxWaybill.objects.bulk_create,
+                                 pending, ignore_conflicts=True,
+                                 batch_size=1000, attempts=6)
             n_refs += len(pending)
-            pending = []
-
-        for oid, hlist in ids_hawbs:
-            nums = {str(h).strip() for h in (hlist or []) if str(h).strip()}
-            if not nums:
-                continue
-            n_obs += 1
-            for num in nums:
-                pending.append(AltaOutboxWaybill(observation_id=oid,
-                                                 hawb_number=num))
-            if len(pending) >= chunk:
-                _flush()
-        _flush()
+            if (i // chunk) % 5 == 0:
+                self.stdout.write(f'  progress: {i+len(id_chunk)}/{len(all_ids)} '
+                                  f'obs_с_hawbs={n_obs} refs={n_refs}')
 
         existing_after = AltaOutboxWaybill.objects.count()
         self.stdout.write(self.style.SUCCESS(
