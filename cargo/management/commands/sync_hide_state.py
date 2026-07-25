@@ -5,6 +5,8 @@
 применяет batchUpdate hide где расходится.
 """
 import logging
+import os
+import sys
 import time
 
 from django.core.management.base import BaseCommand
@@ -15,6 +17,25 @@ from cargo.services.sheets.client import get_client
 
 
 logger = logging.getLogger('cargo.sync_hide')
+
+
+# Лок против наложения PT5M-запусков. Команда только Sheets (не лочит SQLite),
+# но БЕЗ лока при длинном прогоне (12 вкладок × sleep(2) + 429-ретраи > 5 мин)
+# следующий крон стартует поверх → два экземпляра молотят Sheets API → 429 у
+# обоих → пилятся. Лок с проверкой ЖИВОСТИ PID (см. cron_lock).
+LOCK_DIR = os.path.join(os.path.dirname(sys.executable), '..', '..', 'tmp')
+LOCK_PATH = os.path.join(os.path.abspath(LOCK_DIR), 'sync_hide_state.lock')
+LOCK_STALE_AFTER_SEC = 20 * 60  # = ExecutionTimeLimit крона (PT20M)
+
+
+def _acquire_lock() -> bool:
+    from cargo.services.cron_lock import acquire
+    return acquire(LOCK_PATH, LOCK_STALE_AFTER_SEC)
+
+
+def _release_lock() -> None:
+    from cargo.services.cron_lock import release
+    release(LOCK_PATH)
 
 
 CRM_ID = '1H7AdXuo_zalnalgrWfVhm0Lau1MdXtFuFbg5pPGfcfI'
@@ -56,18 +77,29 @@ def _retry(fn, *args, label='', **kwargs):
 class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--tab', help='Только эта вкладка')
+        parser.add_argument('--no-lock', action='store_true',
+                            help='Игнорировать lockfile (ручной прогон)')
 
     def handle(self, *args, **opts):
-        client = get_client()
-        ss = client.open_by_key(CRM_ID)
+        if not opts['no_lock']:
+            if not _acquire_lock():
+                self.stdout.write(self.style.WARNING(
+                    'Предыдущий прогон ещё работает (lock занят). Выхожу.'))
+                return
+        try:
+            client = get_client()
+            ss = client.open_by_key(CRM_ID)
 
-        for ws in ss.worksheets():
-            if ws.title not in SPECIALIST_TABS:
-                continue
-            if opts['tab'] and ws.title != opts['tab']:
-                continue
-            self._sync_tab(ss, ws)
-            time.sleep(2)
+            for ws in ss.worksheets():
+                if ws.title not in SPECIALIST_TABS:
+                    continue
+                if opts['tab'] and ws.title != opts['tab']:
+                    continue
+                self._sync_tab(ss, ws)
+                time.sleep(2)
+        finally:
+            if not opts['no_lock']:
+                _release_lock()
 
     def _sync_tab(self, ss, ws):
         self.stdout.write(self.style.NOTICE(f'\n=== {ws.title} ==='))

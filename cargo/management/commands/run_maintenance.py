@@ -146,6 +146,17 @@ class Command(BaseCommand):
             self.stdout.write(f'ИТОГО шагов: {len(steps)}')
             return
 
+        # Пропускаем шаги, чьей команды нет на этом инстансе (напр. CDEK на
+        # паузе — sync_cdek_statuses не задеплоен). Это SKIP, а не FAILED —
+        # чтобы сводка FAILED означала РЕАЛЬНЫЕ сбои, а не отсутствие фичи.
+        from django.core.management import get_commands
+        available = set(get_commands())
+        for label, cmd, _kw in steps:
+            if cmd not in available:
+                self.stdout.write(self.style.WARNING(
+                    f'  SKIP {label} ({cmd}) — команда не установлена'))
+        steps = [s for s in steps if s[1] in available]
+
         started = datetime.datetime.now()
         self.stdout.write(f'[{started.isoformat()}] run_maintenance start '
                           f'(full={opts["full"]}, шагов={len(steps)})')
