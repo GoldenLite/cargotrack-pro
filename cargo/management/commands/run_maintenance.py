@@ -77,7 +77,12 @@ INGEST_STEPS = [
 
 RECONCILE_STEPS = [
     ('crm_releases',     'reconcile_crm_releases',          {'apply': True}),
-    ('stuck_finals',     'redispatch_stuck_finals',         {'apply': True}),
+    # lean=True: bulk_update вместо полного re-dispatch. Без lean один
+    # проблемный финал (большой raw_xml ДТЭГ) держит write-транзакцию минуты,
+    # бьётся с realtime crm_sync за SQLite-лок → 6 ретраев × ~3.5мин = ~20 мин
+    # на ОДНУ накладную (кейс 10274180730, 26.07). lean пишет статус коротким
+    # bulk_update; листы догонит audit_general (следующий шаг) + crm_sync.
+    ('stuck_finals',     'redispatch_stuck_finals',         {'apply': True, 'lean': True}),
     ('consign_releases', 'reconcile_consignment_releases',  {'apply': True}),
     ('missing_decl',     'reconcile_missing_decl',          {'apply': True}),
     ('adopt_svh',        'adopt_svh_orphans',               {'apply': True}),
