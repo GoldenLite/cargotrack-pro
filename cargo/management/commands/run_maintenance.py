@@ -88,9 +88,17 @@ RECONCILE_STEPS = [
 
 # audit --force: gate «import свежее 5 мин» теперь soft-warning (аудит
 # sort-proof, таргетит живые строки), но import был в начале ЭТОГО же прогона
-# — force убирает лишний warning в логах. Оба audit ПОСЛЕ реконсайла.
+# — force убирает лишний warning в логах. audit ПОСЛЕ реконсайла.
 FINALIZE_STEPS = [
     ('audit_general',    'audit_sheets_vs_db',  {'fix': True, 'kind': 'general', 'force': True}),
+]
+
+# Тяжёлые Sheets-шаги экспорта — ТОЛЬКО в --full (PT6H). В hourly они раздували
+# прогон: audit_export + покраска 3653 ячеек = ~4 мин Sheets-вызовов, а под
+# 429-throttling (общая квота Sheets исчерпана: конвейер + realtime + reindex)
+# растягивались до убийства по лимиту. Экспортная статистика — отчётная
+# вкладка, ежечасная свежесть не нужна; 6ч достаточно.
+FULL_EXPORT_STEPS = [
     ('audit_export',     'audit_sheets_vs_db',  {'fix': True, 'kind': 'export',  'force': True}),
     ('writeback_export', 'writeback_all_export', {}),
 ]
@@ -128,6 +136,8 @@ class Command(BaseCommand):
         if opts['full']:
             steps.append(FULL_STEP)
         steps += RECONCILE_STEPS + FINALIZE_STEPS
+        if opts['full']:
+            steps += FULL_EXPORT_STEPS  # тяжёлый экспорт-хвост только в --full
         only = {s.strip() for s in opts['only'].split(',') if s.strip()}
         if only:
             steps = [s for s in steps if s[0] in only or s[1] in only]
