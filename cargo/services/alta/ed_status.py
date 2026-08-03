@@ -272,11 +272,13 @@ def _outbox_refs_ready() -> bool:
     - таблица есть, но пуста (бэкфилл не прогнан) → False → тот же fallback.
     - таблица заполнена → True → быстрый путь без raw_xml.
     """
-    from django.db import OperationalError
+    from django.db import OperationalError, ProgrammingError
     from cargo.models import AltaOutboxWaybill
     try:
         return AltaOutboxWaybill.objects.exists()
-    except OperationalError:
+    except (OperationalError, ProgrammingError):
+        # SQLite «нет таблицы» → OperationalError; Postgres → ProgrammingError
+        # (relation does not exist). Оба = миграция 0070 не применена → fallback.
         return False
 
 
@@ -459,7 +461,7 @@ def compute_ed_status(hawb) -> str:
         # построения кэша) → одиночный путь ниже.
         latest = batch.latest_for(hawb)
     if latest is _MISSING:
-        from django.db.models import Q
+        from django.db.models import Q, F
         cond = Q(hawb=hawb)
         if hawb.mawb_id and hawb.hawb_number:
             cond = cond | (Q(raw_xml__icontains=hawb.hawb_number)
@@ -469,7 +471,13 @@ def compute_ed_status(hawb) -> str:
         ).exclude(msg_kind__in=_INSIGNIFICANT_KINDS)
         # '-pk' — детерминированный тай-брейк при равных датах (в батч-пути
         # так же, см. _MsgLite._sort_key).
-        latest = msgs.order_by('-prepared_at', '-received_at', '-pk').first()
+        # nulls_last: на Postgres NULL под DESC идёт ПЕРВЫМ → сообщение с
+        # prepared_at IS NULL иначе стало бы «последним» и тихо сменило ЭД-статус.
+        # На SQLite NULL и так последний → no-op. Совпадает с батч-путём
+        # (_MsgLite._sort_key: prepared_at or _DT_MIN → NULL как «-беск»).
+        latest = msgs.order_by(
+            F('prepared_at').desc(nulls_last=True),
+            F('received_at').desc(nulls_last=True), '-pk').first()
     if not main:
         main = _status_from_msg(latest, hawb.hawb_number) if latest else ''
 

@@ -135,19 +135,21 @@ class Command(BaseCommand):
             # 1) кидаем нужные записи в negative temp (точно уникальные).
             # 2) выставляем финальный row_idx.
             from django.db import connection
+            # %s-плейсхолдеры (не ?): Django-обёртка SQLite сама переписывает
+            # %s→?, а Postgres принимает %s нативно — один raw SQL для обеих БД.
             with connection.cursor() as cur:
                 # Фаза 1: temp = 10_000_000 + pk (выше реальных индексов,
                 # без нарушения CHECK constraint >= 0).
                 for pk, _new in to_move:
                     cur.execute(
-                        'UPDATE cargo_importedsheetrow SET source_row_index = ? '
-                        'WHERE id = ?',
+                        'UPDATE cargo_importedsheetrow SET source_row_index = %s '
+                        'WHERE id = %s',
                         [10_000_000 + pk, pk])
                 # Фаза 2: финальный
                 for pk, new_idx in to_move:
                     cur.execute(
-                        'UPDATE cargo_importedsheetrow SET source_row_index = ? '
-                        'WHERE id = ?',
+                        'UPDATE cargo_importedsheetrow SET source_row_index = %s '
+                        'WHERE id = %s',
                         [new_idx, pk])
             self.stdout.write(self.style.SUCCESS(
                 f'  обновлено: {len(to_move)}, без изменений: {untouched}, '

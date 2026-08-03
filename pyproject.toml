@@ -15,4 +15,5 @@ dependencies = [
     "gspread>=6.1",
     "google-auth>=2.32",
     "qrcode[pil]>=8.2",
+    "psycopg[binary]>=3.3.4",
 ]

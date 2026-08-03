@@ -98,15 +98,51 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'cargotrack.wsgi.application'
 
-DATABASES = {
-    'default': {
+# ── База данных ──────────────────────────────────────────────────────────────
+# По умолчанию SQLite (dev + текущий prod) — поведение как раньше.
+# DJANGO_DB_ENGINE=postgres переключает DEFAULT на PostgreSQL (cutover миграции,
+# см. postgres-migration). Алиас 'pg' поднимается когда заданы POSTGRES_* — он
+# нужен на этапе КОПИРОВАНИЯ, пока default ещё SQLite, а данные льются в PG
+# через .using('pg'). Без env-переменных ни одна строка ниже не меняет прод.
+def _sqlite_db():
+    return {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # str, не Path: portable (Django сам делает str()), а backfill-снапшот
+        # (shutil.copy) и VACUUM INTO ждут строковый путь.
+        'NAME': str(BASE_DIR / 'db.sqlite3'),
         # SQLite concurrency настраивается через PRAGMA в cargo/apps.py
         # (connection_created signal: WAL + busy_timeout=60s). Это надёжнее
         # OPTIONS['timeout'] — PRAGMA повторяется на каждом новом соединении.
     }
-}
+
+
+def _postgres_db():
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'cargotrack'),
+        'USER': os.environ.get('POSTGRES_USER', 'cargotrack'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', ''),
+        'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        # Персистентные соединения: waitress-воркеры и кроны не переустанавливают
+        # TCP на каждый запрос (SQLite такого не имел — там был file-open).
+        'CONN_MAX_AGE': int(os.environ.get('DJANGO_CONN_MAX_AGE', '60') or 0),
+        'OPTIONS': {'connect_timeout': 10},
+    }
+
+
+_db_engine = os.environ.get('DJANGO_DB_ENGINE', 'sqlite').strip().lower()
+if _db_engine in ('postgres', 'postgresql', 'pg'):
+    # Cutover: DEFAULT = PostgreSQL. SQLite остаётся под алиасом 'sqlite' для
+    # read-only отката/сверки в первые дни после переключения.
+    DATABASES = {'default': _postgres_db(), 'sqlite': _sqlite_db()}
+else:
+    # Обычный режим: DEFAULT = SQLite. Алиас 'pg' объявляем ТОЛЬКО если заданы
+    # POSTGRES_* (этап копирования перед cutover) — иначе Django мог бы попытаться
+    # достучаться до несуществующего PG. Нет env → ровно старый один-БД конфиг.
+    DATABASES = {'default': _sqlite_db()}
+    if os.environ.get('POSTGRES_HOST') or os.environ.get('POSTGRES_DB'):
+        DATABASES['pg'] = _postgres_db()
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
