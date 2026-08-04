@@ -89,6 +89,12 @@ RECONCILE_STEPS = [
     ('rematch_svh',      'redispatch_unmatched_svh',        {'apply': True}),
     ('arrival_from_do1', 'set_arrival_from_do1',            {'apply': True}),
     ('tsd_from_cargo',   'backfill_tsd_from_cargo',         {'apply': True}),
+    # Бизнес-правило: при отказе/отзыве рег.номер ДТ анулирован — стираем
+    # customs_declaration_number (с фильтром переподачи: если после отказа
+    # пришла новая регистрация — ДТ валидна, не трогаем). Иначе «Общее»
+    # показывает «Отказано» + номер ДТ (номер валиден только при выпуске,
+    # как в CRM-вкладках). Идёт ПОСЛЕ реконсиляций, присваивающих ДТ.
+    ('cleanup_rej_decls', 'cleanup_rejected_decls',         {}),
 ]
 
 # audit --force: gate «import свежее 5 мин» теперь soft-warning (аудит
