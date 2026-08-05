@@ -330,9 +330,29 @@ class SheetImporter:
             self.run.error_message = (self.run.error_message or '') + '\n' + warn
             return
 
+        # «Общее»: пропавшая строка = сигнал «накладную убрали → не прилетела».
+        # Захватываем HAWB-номера ДО удаления ISR, затем мягко архивируем
+        # (отвязка от партии + CRM + аудит-событие), с предохранителями внутри
+        # (только нулевой таможенный след, абс. кап). Обратимо: запись HAWB
+        # сохраняется, а если пропажа была глюком чтения — строка всё ещё в
+        # «Общее», следующий импорт восстановит связь сам.
+        archive_nums = (list(stale.values_list('hawb_number_norm', flat=True))
+                        if self.source.kind == 'general' else [])
+
         deleted, _ = stale.delete()
         logger.info('sync-delete %s: удалено %d ImportedSheetRow (%.1f%%)',
                     self.source.name, deleted, ratio * 100)
+
+        if archive_nums:
+            try:
+                from cargo.services.sheets.archive import (
+                    archive_missing_general_hawbs,
+                )
+                archive_missing_general_hawbs(archive_nums, apply=True,
+                                              verify_absent=False)
+            except Exception:
+                logger.exception(
+                    'sync-delete: archive_missing_general_hawbs hook failed')
 
     def _process_row(self, row_index: int, data: dict, ch: str) -> None:
         if self.dry_run:
