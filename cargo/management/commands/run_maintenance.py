@@ -151,7 +151,14 @@ class Command(BaseCommand):
         parser.add_argument('--no-lock', action='store_true',
                             help='Игнорировать lockfile (для ручного прогона)')
         parser.add_argument('--full', action='store_true',
-                            help='+ reparse_alta_inbox --force-dispatch (медленно)')
+                            help='+ экспорт-аудит в конце (FULL_EXPORT_STEPS)')
+        parser.add_argument('--reparse', action='store_true',
+                            help='+ reparse_alta_inbox --unapplied (широкая сетка по '
+                                 'застрявшим, МЕДЛЕННО — держит общий лок минуты, '
+                                 'ставит на паузу hourly-конвейер). Race-выпуски и '
+                                 'так лечит hourly-шаг redispatch_matched, поэтому в '
+                                 'штатном --full НЕ включается. Полный переразбор '
+                                 'после смены парсера: reparse_alta_inbox --force-dispatch')
         parser.add_argument('--only', default='',
                             help='Только эти шаги (label или команда), через запятую')
         parser.add_argument('--list', action='store_true',
@@ -159,7 +166,11 @@ class Command(BaseCommand):
 
     def _steps(self, opts):
         steps = list(INGEST_STEPS)
-        if opts['full']:
+        # reparse — ТОЛЬКО по явному --reparse (не по --full). Он держит общий
+        # лок минуты и пауз ит hourly-конвейер (freshness ≤20 мин), а его
+        # ценность (пере-диспатч race-застрявших) закрыта hourly-шагом
+        # redispatch_matched. Штатный Full остаётся лёгким (~12 мин).
+        if opts.get('reparse'):
             steps.append(FULL_STEP)
         steps += RECONCILE_STEPS + FINALIZE_STEPS
         if opts['full']:
