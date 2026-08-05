@@ -76,6 +76,14 @@ INGEST_STEPS = [
 ]
 
 RECONCILE_STEPS = [
+    # Пере-диспатч race-застрявших сообщений на СУЩЕСТВУЮЩИЕ HAWB. Гонка
+    # (особенно ЭКСПОРТ): таможенный выпуск CMN.11341 приходит на секунды
+    # раньше, чем наша исходящая подача создаёт HAWB → dispatch не нашёл
+    # HAWB → status_applied=False; а из-за пустого initial_envelope обычные
+    # re-dispatch-свиперы это не ловят. Идёт ПЕРВЫМ — чтобы применённые
+    # выпуски/статусы прошли через остальные реконсайлы и audit в ЭТОМ же
+    # прогоне. Дёшево: трогает только сообщения, чей waybill = наш HAWB.
+    ('redispatch_matched', 'redispatch_matched_unapplied',  {'apply': True}),
     ('crm_releases',     'reconcile_crm_releases',          {'apply': True}),
     # lean=True: bulk_update вместо полного re-dispatch. Без lean один
     # проблемный финал (большой raw_xml ДТЭГ) держит write-транзакцию минуты,
@@ -114,9 +122,16 @@ FULL_EXPORT_STEPS = [
     ('writeback_export', 'writeback_all_export', {}),
 ]
 
-# Опциональный тяжёлый шаг (--full): переразбор всех CMN/ED.DO1. Ставится
-# ПОСЛЕ ингеста, ДО реконсайла — чтобы свиперы увидели свежий dispatch.
-FULL_STEP = ('reparse', 'reparse_alta_inbox', {'force_dispatch': True})
+# Опциональный шаг (--full): переразбор + пере-диспатч ТОЛЬКО unapplied
+# сообщений (status_applied=False). Раньше был --force-dispatch по ВСЕМ ~52k
+# сообщениям → reparse не укладывался в лимит PT1H и Full убивался (rc=267014),
+# из-за чего FULL_EXPORT_STEPS (экспорт-аудит) вообще не доходили. --unapplied
+# режет набор до застрявших (~34k, из них почти всё чужой трафик, match=no-op)
+# и служит широкой сеткой для race-стрелков, чей waybill только в consignments
+# (redispatch_matched в hourly ловит по waybill_number_raw — быстрый путь).
+# Полный переразбор всех сообщений (при обновлении парсера) — вручную:
+#   manage.py reparse_alta_inbox --force-dispatch
+FULL_STEP = ('reparse', 'reparse_alta_inbox', {'unapplied': True})
 
 
 def _acquire_lock() -> bool:
