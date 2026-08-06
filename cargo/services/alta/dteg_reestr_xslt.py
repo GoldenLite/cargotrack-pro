@@ -57,6 +57,18 @@ _EDGE_CANDIDATES = [
     r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
 ]
 
+_WKHTMLTOPDF_CANDIDATES = [
+    r'C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe',
+    r'C:\Program Files (x86)\wkhtmltopdf\bin\wkhtmltopdf.exe',
+]
+
+
+def _wkhtmltopdf_exe():
+    for p in _WKHTMLTOPDF_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return None
+
 
 def _q(tag: str) -> str:
     return '{%s}%s' % (NS, tag)
@@ -180,9 +192,9 @@ def _marks_for_hawb(hawb_number: str) -> dict:
         reg_full = h.customs_declaration_number or ''
 
     cm = find_custommark_for_hawb(hawb_number)
-    code = (cm or {}).get('decision_code') or '10'
     return {
-        'design': DECISION_TEXT.get(code, DECISION_TEXT['']),
+        # Текст решения (design) считается по режиму в build_print_ecd.
+        'decision_code': (cm or {}).get('decision_code') or '10',
         'decision_date': (cm or {}).get('decision_date') or release_iso,
         'inspector': (cm or {}).get('inspector') or '',
         'lnp': (cm or {}).get('lnp') or '',
@@ -310,32 +322,53 @@ def render_html(hawb_number: str) -> str | None:
     return html
 
 
+def _html_to_pdf_bytes(html: str) -> bytes:
+    """HTML → PDF. Предпочитаем wkhtmltopdf (надёжен под SYSTEM/session 0, где
+    Edge headless падает rc=1002); Edge — fallback для интерактивного контекста."""
+    workdir = tempfile.mkdtemp(prefix='reestr_')
+    html_path = os.path.join(workdir, 'reestr.html')
+    pdf_path = os.path.join(workdir, 'reestr.pdf')
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    try:
+        wk = _wkhtmltopdf_exe()
+        if wk:
+            cmd = [wk, '--enable-local-file-access', '--encoding', 'utf-8',
+                   '--orientation', 'Landscape', '--page-size', 'A4',
+                   '-B', '6mm', '-T', '6mm', '-L', '6mm', '-R', '6mm',
+                   '--quiet', html_path, pdf_path]
+            proc = subprocess.run(cmd, timeout=120, capture_output=True)
+            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+                with open(pdf_path, 'rb') as f:
+                    return f.read()
+            err = (proc.stderr or b'')[-600:].decode('utf-8', 'replace')
+            raise RuntimeError(f'wkhtmltopdf не создал PDF (rc={proc.returncode}): {err}')
+
+        edge = _edge_exe()
+        if edge:
+            profile = os.path.join(workdir, 'profile')
+            url = 'file:///' + html_path.replace('\\', '/')
+            cmd = [edge, '--headless=new', '--disable-gpu', '--no-sandbox',
+                   '--disable-dev-shm-usage', '--no-first-run',
+                   '--no-default-browser-check', '--no-pdf-header-footer',
+                   f'--user-data-dir={profile}', f'--crash-dumps-dir={workdir}',
+                   f'--print-to-pdf={pdf_path}', url]
+            proc = subprocess.run(cmd, timeout=120, capture_output=True)
+            if os.path.exists(pdf_path):
+                with open(pdf_path, 'rb') as f:
+                    return f.read()
+            err = (proc.stderr or b'')[-600:].decode('utf-8', 'replace')
+            raise RuntimeError(f'Edge не создал PDF (rc={proc.returncode}): {err}')
+
+        raise RuntimeError('Не найден движок HTML→PDF (wkhtmltopdf/Edge)')
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def render_pdf(hawb_number: str) -> bytes | None:
     """Полный per-HAWB реестр в PDF (родной бланк Альты + отметки). None если нет данных."""
     html = render_html(hawb_number)
     if html is None:
         return None
-    edge = _edge_exe()
-    if not edge:
-        raise RuntimeError('Microsoft Edge не найден для HTML→PDF')
-    workdir = tempfile.mkdtemp(prefix='reestr_')
-    html_path = os.path.join(workdir, 'reestr.html')
-    pdf_path = os.path.join(workdir, 'reestr.pdf')
-    profile = os.path.join(workdir, 'profile')
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    url = 'file:///' + html_path.replace('\\', '/')
-    cmd = [
-        edge, '--headless', '--disable-gpu', '--no-sandbox',
-        '--no-pdf-header-footer', f'--user-data-dir={profile}',
-        f'--print-to-pdf={pdf_path}', url,
-    ]
-    try:
-        subprocess.run(cmd, timeout=120, capture_output=True)
-        if not os.path.exists(pdf_path):
-            raise RuntimeError('Edge не создал PDF')
-        with open(pdf_path, 'rb') as f:
-            return f.read()
-    finally:
-        import shutil
-        shutil.rmtree(workdir, ignore_errors=True)
+    return _html_to_pdf_bytes(html)
