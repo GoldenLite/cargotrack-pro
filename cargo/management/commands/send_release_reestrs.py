@@ -70,19 +70,34 @@ class Command(BaseCommand):
 
     # ── отрисовка + отправка одной накладной ──────────────────────────────
     def _process_one(self, h, to, dry, force=False):
-        """Возвращает 'sent' | 'dry' | 'skipped' | 'failed' | 'already'."""
+        """Возвращает 'sent' | 'dry' | 'skipped' | 'failed' | 'already'.
+
+        В режиме dry в БД НЕ пишем (не создаём строк, не крутим attempts) —
+        только показываем, что было бы отправлено.
+        """
         from cargo.models import ReleaseReestrNotification
         from cargo.services.alta.dteg_reestr import reestr_data_for_hawb
         from cargo.services.alta.dteg_reestr_pdf import render_reestr_pdf
 
         hn = h.hawb_number
-        notif, _created = ReleaseReestrNotification.objects.get_or_create(
-            hawb_number=hn,
-            defaults={'to_email': to, 'status': ReleaseReestrNotification.STATUS_SKIPPED})
-        if notif.status == ReleaseReestrNotification.STATUS_SENT and not force:
+        notif = ReleaseReestrNotification.objects.filter(hawb_number=hn).first()
+        if notif and notif.status == ReleaseReestrNotification.STATUS_SENT and not force:
             return 'already'
 
         data = reestr_data_for_hawb(hn)
+
+        # Dry-run: ничего не пишем в БД.
+        if dry:
+            if not data:
+                self.stdout.write(f'  DRY-SKIP {hn}: подача ДТЭГ не найдена')
+                return 'skipped'
+            self.stdout.write(f'  DRY {hn}: PDF будет собран → {to} ({data["msg_type"]}, '
+                              f'товаров {len(data["house_shipment"].get("goods", []))})')
+            return 'dry'
+
+        # Реальный прогон: создаём/обновляем строку и считаем попытку.
+        if notif is None:
+            notif = ReleaseReestrNotification(hawb_number=hn)
         notif.to_email = to
         notif.release_date = h.release_date
         notif.attempts = (notif.attempts or 0) + 1
@@ -114,11 +129,6 @@ class Command(BaseCommand):
 
         reg = h.customs_declaration_number or ''
         subject = f'Реестр ДТЭГ {hn}' + (f' — {reg}' if reg else '')
-        if dry:
-            self.stdout.write(f'  DRY {hn}: PDF {len(pdf)}b → {to} ({data["msg_type"]}, '
-                              f'товаров {len(data["house_shipment"].get("goods", []))})')
-            return 'dry'
-
         try:
             msg = EmailMessage(
                 subject=subject,
