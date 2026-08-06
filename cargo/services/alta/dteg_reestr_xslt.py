@@ -87,85 +87,59 @@ def _edge_exe() -> str | None:
 
 # ── источник отметок ─────────────────────────────────────────────────────────
 
-def find_custommark_for_hawb(hawb_number: str):
-    """Ищет CMN.11350 (ExpressCargoDeclarationCustomMark) с решением по накладной.
+def find_release_message(hawb_number: str):
+    """CMN.11350 с решением ВЫПУСК (decision_code=10) по этой накладной.
 
-    Возвращает dict{decision_code, decision_date, reg_customs, reg_date, reg_gtd,
-    inspector, lnp} или None. Матч по Consignment/IndividualWayBill/PrDocumentNumber.
+    Быстрый JSONB-поиск по parsed_meta.consignments (LIKE по raw_xml медленный —
+    1795 больших текстов). По накладной бывает несколько CMN.11350 (позже код 70
+    «продлён»/90 «отказ») — матчим ИМЕННО выпуск (10). None если выпуска нет.
     """
     from cargo.models import AltaInboxMessage
+    return (AltaInboxMessage.objects
+            .filter(msg_type='CMN.11350',
+                    parsed_meta__consignments__contains=[
+                        {'decision_code': '10', 'waybills': [hawb_number]}])
+            .order_by('-id').first())
 
-    def _ln(el):
-        return el.tag.rsplit('}', 1)[-1]
 
-    def _find_ln(el, name):
-        for e in el.iter():
-            if _ln(e) == name:
-                return e
+def find_custommark_for_hawb(hawb_number: str):
+    """Отметки выпуска (decision_code=10) по накладной.
+
+    Дата решения и рег.№ — из parsed_meta (быстро); инспектор/ЛНП — из raw_xml
+    найденного сообщения (один парс, не скан). None если решения-выпуска нет.
+    Возвращает dict{decision_code, decision_date, reg_customs, reg_date, reg_gtd,
+    inspector, lnp}.
+    """
+    msg = find_release_message(hawb_number)
+    if msg is None:
         return None
-
-    def _text_ln(el, name):
-        e = _find_ln(el, name)
-        return (e.text or '').strip() if (e is not None and e.text) else ''
-
-    qs = (AltaInboxMessage.objects
-          .filter(msg_type='CMN.11350', raw_xml__contains=hawb_number)
-          .order_by('-id')[:20])
-    for msg in qs:
-        rx = msg.raw_xml or ''
-        if 'ExpressCargoDeclarationCustomMark' not in rx:
-            continue
+    pm = msg.parsed_meta or {}
+    cons = next((c for c in pm.get('consignments', [])
+                 if hawb_number in (c.get('waybills') or [])
+                 and (c.get('decision_code') or '') == '10'), {})
+    # инспектор/ЛНП есть только в raw_xml (в parsed_meta их нет)
+    insp, lnp = '', ''
+    rx = msg.raw_xml or ''
+    if rx:
         try:
             root = etree.fromstring(rx.encode('utf-8') if isinstance(rx, str) else rx)
+            for e in root.iter():
+                ln = e.tag.rsplit('}', 1)[-1]
+                if ln == 'PersonName' and not insp:
+                    insp = (e.text or '').strip()
+                elif ln == 'LNP' and not lnp:
+                    lnp = (e.text or '').strip()
         except etree.XMLSyntaxError:
-            continue
-        cm = None
-        for e in root.iter():
-            if _ln(e) == 'ExpressCargoDeclarationCustomMark':
-                cm = e
-                break
-        if cm is None:
-            continue
-        # рег.№ (ApplicationRegNumber → CustomsCode/RegistrationDate/GTDNumber)
-        reg = {'customs': '', 'date': '', 'gtd': ''}
-        arn = None
-        for e in cm.iter():
-            if _ln(e) == 'ApplicationRegNumber':
-                arn = e
-                break
-        if arn is not None:
-            reg = {'customs': _text_ln(arn, 'CustomsCode'),
-                   'date': _text_ln(arn, 'RegistrationDate'),
-                   'gtd': _text_ln(arn, 'GTDNumber')}
-        # инспектор/ЛНП (CustomsPerson)
-        insp, lnp = '', ''
-        for e in cm.iter():
-            ln = _ln(e)
-            if ln == 'PersonName' and not insp:
-                insp = (e.text or '').strip()
-            elif ln == 'LNP' and not lnp:
-                lnp = (e.text or '').strip()
-        # нужная накладная + ИМЕННО решение о выпуске (код 10). По одной накладной
-        # может быть несколько CMN.11350 (напр. позже код 70 «продлён»/запрос) —
-        # для рассылки-по-выпуску берём только выпуск (10), иначе пропускаем.
-        for cons in cm.iter():
-            if _ln(cons) != 'Consignment':
-                continue
-            iwb = None
-            for e in cons.iter():
-                if _ln(e) == 'IndividualWayBill':
-                    iwb = e
-                    break
-            num = _text_ln(iwb, 'PrDocumentNumber') if iwb is not None else ''
-            code = _text_ln(cons, 'DecisionCode')
-            if num == hawb_number and code == '10':
-                return {
-                    'decision_code': code,
-                    'decision_date': _text_ln(cons, 'DecisionDate'),
-                    'reg_customs': reg['customs'], 'reg_date': reg['date'], 'reg_gtd': reg['gtd'],
-                    'inspector': insp, 'lnp': lnp,
-                }
-    return None
+            pass
+    return {
+        'decision_code': '10',
+        'decision_date': cons.get('decision_date') or '',
+        'reg_customs': pm.get('customs_code') or '',
+        'reg_date': pm.get('registration_date') or '',
+        'reg_gtd': pm.get('gtd_number') or '',
+        'inspector': insp,
+        'lnp': lnp,
+    }
 
 
 def _marks_for_hawb(hawb_number: str) -> dict:

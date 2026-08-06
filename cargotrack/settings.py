@@ -204,8 +204,10 @@ REESTR_MAILER_TO = os.environ.get('REESTR_MAILER_TO', 'andylapshin@yandex.ru')
 REESTR_MAILER_SINCE = os.environ.get('REESTR_MAILER_SINCE', '')
 # Максимум писем за один прогон конвейера (защита от флуда/SMTP-лимитов).
 REESTR_MAILER_CAP = int(os.environ.get('REESTR_MAILER_CAP', '25'))
-# Сколько раз пытаться, если подача ДТЭГ ещё не найдена / отправка упала.
-REESTR_MAILER_MAX_ATTEMPTS = int(os.environ.get('REESTR_MAILER_MAX_ATTEMPTS', '6'))
+# Сколько прогонов пытаться, если ещё нет решения-выпуска (CMN.11350 приходит
+# ПОЗЖЕ статуса RELEASED) / нет подачи / упала отправка. При hourly-конвейере
+# 48 ≈ 2 суток — с запасом на позднее прибытие отметки, потом «исчерпано».
+REESTR_MAILER_MAX_ATTEMPTS = int(os.environ.get('REESTR_MAILER_MAX_ATTEMPTS', '48'))
 
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'

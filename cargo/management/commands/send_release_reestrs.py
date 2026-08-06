@@ -78,6 +78,7 @@ class Command(BaseCommand):
         from cargo.models import ReleaseReestrNotification
         from cargo.services.alta.dteg_reestr import find_submission_for_hawb
         from cargo.services.alta.dteg_reestr_xslt import render_pdf as xslt_render_pdf
+        from cargo.services.alta.dteg_reestr_xslt import find_release_message
 
         hn = h.hawb_number
         notif = ReleaseReestrNotification.objects.filter(hawb_number=hn).first()
@@ -86,11 +87,17 @@ class Command(BaseCommand):
 
         # Наличие поданной ДТЭГ (без неё реестр не собрать) + тип сообщения.
         rx, mt, _obs = find_submission_for_hawb(hn)
+        # Слать ТОЛЬКО по решению ВЫПУСК (DecisionCode=10). Без code-10 CMN.11350
+        # — не выпуск (или ещё нет отметки) → не шлём.
+        has_release = find_release_message(hn) is not None
 
         # Dry-run: ничего не пишем в БД.
         if dry:
             if not rx:
                 self.stdout.write(f'  DRY-SKIP {hn}: подача ДТЭГ не найдена')
+                return 'skipped'
+            if not has_release:
+                self.stdout.write(f'  DRY-SKIP {hn}: нет решения о выпуске (DecisionCode=10)')
                 return 'skipped'
             self.stdout.write(f'  DRY {hn}: PDF будет собран → {to} ({mt})')
             return 'dry'
@@ -101,6 +108,13 @@ class Command(BaseCommand):
         notif.to_email = to
         notif.release_date = h.release_date
         notif.attempts = (notif.attempts or 0) + 1
+
+        if not has_release:
+            notif.status = ReleaseReestrNotification.STATUS_SKIPPED
+            notif.error = 'нет решения о выпуске (DecisionCode=10) в CMN.11350'
+            notif.save()
+            self.stdout.write(f'  SKIP {hn}: нет DecisionCode=10 (попытка {notif.attempts})')
+            return 'skipped'
 
         if not rx:
             notif.status = ReleaseReestrNotification.STATUS_SKIPPED
