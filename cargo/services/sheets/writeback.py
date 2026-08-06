@@ -805,7 +805,12 @@ def batch_write_tsd_from_mawb_for_hawbs(hawbs: list, dry_run: bool = False):
     for h in hawbs:
         if not h.mawb_id:
             continue
-        awb = ((h.mawb.awb_number or '').strip() if h.mawb else '')
+        # Для сборных авто-транзитов ТСД = транзитный документ (СМР, напр.
+        # 300726-1), иначе — номер партии (авиа-MAWB). relink распознаёт оба.
+        awb = ''
+        if h.mawb:
+            awb = ((h.mawb.transit_doc or '').strip()
+                   or (h.mawb.awb_number or '').strip())
         if not awb:
             continue
         if (h.tsd_number or '').strip():

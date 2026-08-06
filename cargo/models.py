@@ -197,6 +197,11 @@ class Cargo(models.Model):
     scan_out_of_bond = models.DateTimeField('Выезд со склада', null=True, blank=True)
     svh_do1_reg_number = models.CharField('Рег. номер ДО1', max_length=64, blank=True,
                                           help_text='10001020/220526/5005840 — из CMN.13029 (опись СВХ)')
+    # Транзитный документ (СМР/CMR) для авто-транзитов. Если задан — писать в ТСД
+    # ВМЕСТО номера партии (при сборном авиа-MAWB настоящий ТСД = СМР, напр.
+    # 300726-1). НЕ ключ привязки: relink считает ТСД==transit_doc «уже верным».
+    transit_doc = models.CharField('Транзитный документ (СМР)', max_length=64,
+                                   blank=True, db_index=True)
     # Маркер источника СВХ-данных (для аудита и арбитража провайдеров).
     # Альта-СВХ — Внуково (CMN.13010), moscow_cargo — Шереметьево (внешний СВХ),
     # deklarant — Дальний Восток / склад «Таможенный портал»,

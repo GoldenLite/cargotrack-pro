@@ -1615,6 +1615,17 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
                     ' (override moscow-cargo)' if override_moscow else '')
         _writeback_svh_cargo(cargo)
 
+    # Авто-транзит: если в описи есть СМР (transit_doc, из блока mode 02015) —
+    # сохраняем его в Cargo.transit_doc (fill-empty). Тогда ТСД в листе покажет
+    # СМР вместо сборного авиа-MAWB, а relink это распознаёт (ТСД==transit_doc).
+    # У обычных авиапартий СМР нет → поле остаётся пустым, поведение не меняется.
+    tdoc = (parsed.get('svh_transit_doc') or '').strip()
+    if tdoc and not (cargo.transit_doc or '').strip():
+        Cargo.objects.filter(pk=cargo.pk).update(transit_doc=tdoc)
+        cargo.transit_doc = tdoc
+        logger.info('apply_svh_placement: cargo %s transit_doc(СМР)=%s',
+                    cargo.pk, tdoc)
+
     _backfill_do1_for_presentation(msg, cargo)
     return None
 

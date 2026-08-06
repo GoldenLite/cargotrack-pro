@@ -117,7 +117,12 @@ class Command(BaseCommand):
                 stats['no_tsd_in_sheets'] += 1
                 continue
             current_mawb = h.mawb.awb_number if h.mawb_id and h.mawb else ''
-            if current_mawb == tsd:
+            current_transit = h.mawb.transit_doc if h.mawb_id and h.mawb else ''
+            # ТСД может быть номером партии (авиа-MAWB) ИЛИ транзитным документом
+            # (СМР — для сборных авто-транзитов, напр. 300726-1). Оба случая =
+            # «привязан правильно» → НЕ перепривязывать (иначе СМР-ТСД уводил бы
+            # накладные в фиктивную партию-СМР).
+            if current_mawb == tsd or (current_transit and current_transit == tsd):
                 stats['already_correct'] += 1
                 continue
             actions.append((h, tsd, current_mawb))
