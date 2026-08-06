@@ -11,10 +11,16 @@ namespace-префиксов cat_ru/RUScat_ru/RUDECLcat/... — привязыв
 """
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 
 # Типы исходящих сообщений, несущих подачу ДТЭГ с товарами (по покрытию 06.08).
 SUBMISSION_MSG_TYPES = ['CMN.11349', 'CMN.11023', 'CMN.11335', 'CMN.11024']
+
+# ТН ВЭД корреспонденции (печатная продукция без коммерческой ценности).
+# По накладной с одним таким товаром отдельный ДТЭГ не требуется → из рассылки
+# реестров такие исключаем (см. is_correspondence_hawb).
+CORRESPONDENCE_TNVED = '4911990000'
 
 
 def _lt(el) -> str:
@@ -259,6 +265,32 @@ def find_submission_for_hawb(hawb_number: str):
         if 'ExpressCargoDeclaration' in rx:
             return rx, mt, obs
     return None, None, None
+
+
+def is_correspondence_hawb(hawb_number: str, rx=None) -> bool:
+    """True, если по накладной РОВНО один товар с кодом ТН ВЭД 4911 99 000 0.
+
+    Это корреспонденция (печатная продукция) — по каждой такой накладной
+    отдельный ДТЭГ не требуется, поэтому из рассылки реестров их исключаем.
+    rx можно передать заранее (уже найденный raw_xml подачи), чтобы не
+    перезапрашивать БД. Любая неопределённость (нет подачи/накладной) → False,
+    т.е. по умолчанию НЕ исключаем.
+    """
+    if rx is None:
+        rx, _mt, _obs = find_submission_for_hawb(hawb_number)
+    if not rx:
+        return False
+    parsed = parse_express_cargo_declaration(rx)
+    if not parsed:
+        return False
+    hs = select_house_shipment(parsed, hawb_number)
+    if hs is None:
+        return False
+    goods = hs.get('goods') or []
+    if len(goods) != 1:
+        return False
+    tnved = re.sub(r'\D', '', goods[0].get('tnved') or '')
+    return tnved == CORRESPONDENCE_TNVED
 
 
 def reestr_data_for_hawb(hawb_number: str) -> dict | None:

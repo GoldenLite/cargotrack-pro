@@ -2583,10 +2583,12 @@ class ReleaseReestrNotification(models.Model):
     STATUS_SENT = 'SENT'
     STATUS_FAILED = 'FAILED'
     STATUS_SKIPPED = 'SKIPPED'     # подача ДТЭГ не найдена — попробуем позже
+    STATUS_EXCLUDED = 'EXCLUDED'   # терминально не шлём (корреспонденция и т.п.)
     STATUS_CHOICES = [
         (STATUS_SENT, 'Отправлено'),
         (STATUS_FAILED, 'Ошибка отправки'),
         (STATUS_SKIPPED, 'Отложено (нет подачи)'),
+        (STATUS_EXCLUDED, 'Исключено (не требуется)'),
     ]
     hawb_number         = models.CharField('Накладная', max_length=64, unique=True, db_index=True)
     to_email            = models.CharField('Кому', max_length=255, blank=True)

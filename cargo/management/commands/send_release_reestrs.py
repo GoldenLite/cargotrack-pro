@@ -70,13 +70,14 @@ class Command(BaseCommand):
 
     # ── отрисовка + отправка одной накладной ──────────────────────────────
     def _process_one(self, h, to, dry, force=False):
-        """Возвращает 'sent' | 'dry' | 'skipped' | 'failed' | 'already'.
+        """Возвращает 'sent' | 'dry' | 'skipped' | 'excluded' | 'failed' | 'already'.
 
         В режиме dry в БД НЕ пишем (не создаём строк, не крутим attempts) —
         только показываем, что было бы отправлено.
         """
         from cargo.models import ReleaseReestrNotification
-        from cargo.services.alta.dteg_reestr import find_submission_for_hawb
+        from cargo.services.alta.dteg_reestr import (
+            find_submission_for_hawb, is_correspondence_hawb, CORRESPONDENCE_TNVED)
         from cargo.services.alta.dteg_reestr_xslt import render_pdf as xslt_render_pdf
         from cargo.services.alta.dteg_reestr_xslt import find_release_message
 
@@ -87,6 +88,9 @@ class Command(BaseCommand):
 
         # Наличие поданной ДТЭГ (без неё реестр не собрать) + тип сообщения.
         rx, mt, _obs = find_submission_for_hawb(hn)
+        # Корреспонденция: 1 товар с ТН ВЭД 4911990000 — отдельный ДТЭГ на такую
+        # накладную не требуется → терминально исключаем из рассылки.
+        is_corr = bool(rx) and is_correspondence_hawb(hn, rx)
         # Слать ТОЛЬКО по решению ВЫПУСК (DecisionCode=10). Без code-10 CMN.11350
         # — не выпуск (или ещё нет отметки) → не шлём.
         has_release = find_release_message(hn) is not None
@@ -96,6 +100,9 @@ class Command(BaseCommand):
             if not rx:
                 self.stdout.write(f'  DRY-SKIP {hn}: подача ДТЭГ не найдена')
                 return 'skipped'
+            if is_corr:
+                self.stdout.write(f'  DRY-EXCLUDE {hn}: корреспонденция (1 товар, ТН ВЭД {CORRESPONDENCE_TNVED})')
+                return 'excluded'
             if not has_release:
                 self.stdout.write(f'  DRY-SKIP {hn}: нет решения о выпуске (DecisionCode=10)')
                 return 'skipped'
@@ -108,6 +115,15 @@ class Command(BaseCommand):
         notif.to_email = to
         notif.release_date = h.release_date
         notif.attempts = (notif.attempts or 0) + 1
+
+        # Корреспонденция — терминально исключаем (больше не трогаем).
+        if is_corr:
+            notif.status = ReleaseReestrNotification.STATUS_EXCLUDED
+            notif.error = (f'корреспонденция: 1 товар, ТН ВЭД {CORRESPONDENCE_TNVED} '
+                           f'— отдельный ДТЭГ не требуется')
+            notif.save()
+            self.stdout.write(f'  EXCLUDE {hn}: корреспонденция (ТН ВЭД {CORRESPONDENCE_TNVED})')
+            return 'excluded'
 
         if not has_release:
             notif.status = ReleaseReestrNotification.STATUS_SKIPPED
@@ -197,24 +213,25 @@ class Command(BaseCommand):
                 'бэклогу выхожу. Задай cutover-метку в .env.'))
             return
 
-        # Исключаем уже отправленные и исчерпавшие попытки.
+        # Исключаем уже отправленные, терминально исключённые и исчерпавшие попытки.
         done = (ReleaseReestrNotification.objects
-                .filter(status=ReleaseReestrNotification.STATUS_SENT)
+                .filter(status__in=[ReleaseReestrNotification.STATUS_SENT,
+                                    ReleaseReestrNotification.STATUS_EXCLUDED])
                 .values_list('hawb_number', flat=True))
         exhausted = (ReleaseReestrNotification.objects
                      .filter(attempts__gte=max_attempts)
                      .exclude(status=ReleaseReestrNotification.STATUS_SENT)
                      .values_list('hawb_number', flat=True))
-        # Только ИМПОРТ (DeclarationKindCode=ИМ) — экспорт (ЭК) не шлём.
-        # shipment_type='IMPORT' — наш канонический признак импорта.
+        # Шлём по ВСЕМ реестрам — и импорт (ИМ/ДТЭГ), и экспорт (ЭК/ПТДЭГ).
+        # Фильтра по shipment_type больше нет; отбор — по наличию выпуска
+        # (DecisionCode=10 в CMN.11350) внутри _process_one.
         candidates = (HouseWaybill.objects
-                      .filter(customs_status='RELEASED', release_date__gte=since,
-                              shipment_type='IMPORT')
+                      .filter(customs_status='RELEASED', release_date__gte=since)
                       .exclude(hawb_number__in=list(done))
                       .exclude(hawb_number__in=list(exhausted))
                       .order_by('release_date'))
 
-        counts = {'sent': 0, 'skipped': 0, 'failed': 0, 'dry': 0, 'already': 0}
+        counts = {'sent': 0, 'skipped': 0, 'failed': 0, 'dry': 0, 'already': 0, 'excluded': 0}
         processed = 0
         for h in candidates.iterator():
             if counts['sent'] + counts['dry'] >= cap:
@@ -227,5 +244,5 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f'send_release_reestrs: обработано {processed}, отправлено {counts["sent"]}, '
-            f'dry {counts["dry"]}, отложено {counts["skipped"]}, ошибок {counts["failed"]}, '
-            f'уже были {counts["already"]}'))
+            f'dry {counts["dry"]}, отложено {counts["skipped"]}, исключено {counts["excluded"]}, '
+            f'ошибок {counts["failed"]}, уже были {counts["already"]}'))
