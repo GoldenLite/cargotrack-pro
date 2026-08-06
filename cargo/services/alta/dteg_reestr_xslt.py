@@ -38,13 +38,19 @@ NS_CAT = 'urn:customs.ru:CommonAggregateTypes:5.24.0'  # PrDocumentNumber и т.
 XSLT_PATH = os.path.join(os.path.dirname(__file__), 'templates_ed',
                          'EXPRESSCARGODECLARATION4.xslt')
 
-# Код решения → текст штампа (гр. решения в реестре). 10 = выпуск разрешён.
-DECISION_TEXT = {
-    '10': '10 - Выпуск разрешён',
-    '11': '11 - Условный выпуск',
-    '90': '90 - Отказано в выпуске',
-    '': '10 - Выпуск разрешён',
+# Текст решения о выпуске (ecd:Design) — как в бланке Альты, зависит от режима:
+# экспорт (10) — «без уплаты таможенных платежей», импорт (40) — «для свободного
+# обращения». Мы шлём только по выпуску (decision_code=10).
+RELEASE_DESIGN_BY_MODE = {
+    '10': '10-выпуск товаров без уплаты таможенных платежей',     # экспорт
+    '40': '10-выпуск товаров разрешен для свободного обращения',  # импорт
 }
+RELEASE_DESIGN_DEFAULT = '10-выпуск товаров разрешен'
+
+# Сентинел в ObjectOrdinal служебного GoodsShipment[2] (нужен XSLT для блока C):
+# for-each товаров рисует по нему ДВЕ артефактные строки (пустая строка товара +
+# «Всего по инд.накладной») — вычищаем их из HTML по этому маркеру.
+_GS2_SENTINEL = '§C§'
 
 _EDGE_CANDIDATES = [
     r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
@@ -224,15 +230,20 @@ def build_print_ecd(hawb_number: str):
             gs.remove(hs)
 
     marks = _marks_for_hawb(hawb_number)
+    # Текст решения — по режиму декларации (как в бланке Альты).
+    mode = (ecd.findtext(_q('CustomsModeCode')) or '').strip()
+    design = RELEASE_DESIGN_BY_MODE.get(mode, RELEASE_DESIGN_DEFAULT)
 
-    # штамп по накладной
-    etree.SubElement(target, _q('Design')).text = marks['design']
+    # штамп по накладной (кол.13-15 строки «Всего по инд.накладной»)
+    etree.SubElement(target, _q('Design')).text = design
     etree.SubElement(target, _q('TaxBase_DecisionDate')).text = marks['decision_date']
 
-    # блок C: второй GoodsShipment
+    # блок C: XSLT читает решение из GoodsShipment[2]/HouseShipment[1]. Помечаем
+    # его ObjectOrdinal сентинелом — по нему потом чистим артефактные строки.
     gs2 = etree.SubElement(ecd, _q('GoodsShipment'))
     hs2 = etree.SubElement(gs2, _q('HouseShipment'))
-    etree.SubElement(hs2, _q('Design')).text = marks['design']
+    etree.SubElement(hs2, _q('ObjectOrdinal')).text = _GS2_SENTINEL
+    etree.SubElement(hs2, _q('Design')).text = design
     etree.SubElement(hs2, _q('TaxBase_DecisionDate')).text = marks['decision_date']
 
     # инспектор/ЛНП
@@ -255,25 +266,32 @@ _PRINT_STYLE = ('<style>@page{size:A4 landscape;margin:6mm;}'
                 'body{-webkit-print-color-adjust:exact;}</style>')
 
 
-def _strip_stray_summary_rows(html: str, keep: int) -> str:
-    """Убирает лишние (пустые) строки «Всего по индивидуальной накладной».
+def _strip_block_c_rows(html: str, keep: int) -> str:
+    """Вычищает артефактные строки служебного GoodsShipment[2] (для блока C).
 
-    GoodsShipment[2] (для блока C) добавляет одну такую пустую строку — for-each
-    товаров идёт по всем GoodsShipment/HouseShipment. Оставляем `keep` первых.
+    For-each товаров идёт по ВСЕМ GoodsShipment/HouseShipment, поэтому GS[2]
+    рисует ДВЕ лишние строки: (1) пустую строку-товар (та самая «полоска» под
+    накладной) — помечена сентинелом в ObjectOrdinal; (2) пустую
+    «Всего по инд.накладной». Убираем обе, оставляя `keep` настоящих итогов.
     """
-    marker = 'Всего по индивидуальной накладной'
     try:
         doc = etree.HTML(html)
     except etree.XMLSyntaxError:
         return html
-    matches = [tr for tr in doc.iter('tr')
-               if marker in ''.join(tr.itertext())]
+    # (1) пустая строка-товар GS[2] — по сентинелу
+    for tr in list(doc.iter('tr')):
+        if _GS2_SENTINEL in ''.join(tr.itertext()):
+            parent = tr.getparent()
+            if parent is not None:
+                parent.remove(tr)
+    # (2) лишние «Всего по инд.накладной» сверх keep (последняя — от GS[2])
+    marker = 'Всего по индивидуальной накладной'
+    matches = [tr for tr in doc.iter('tr') if marker in ''.join(tr.itertext())]
     for tr in matches[keep:]:
         parent = tr.getparent()
         if parent is not None:
             parent.remove(tr)
-    out = etree.tostring(doc, method='html', encoding='unicode')
-    return out
+    return etree.tostring(doc, method='html', encoding='unicode')
 
 
 def render_html(hawb_number: str) -> str | None:
@@ -283,7 +301,7 @@ def render_html(hawb_number: str) -> str | None:
     transform = etree.XSLT(etree.parse(XSLT_PATH))
     res = transform(etree.ElementTree(ecd))
     html = str(res)
-    html = _strip_stray_summary_rows(html, keep=n_house)
+    html = _strip_block_c_rows(html, keep=n_house)
     # печатные стили (landscape) в <head>
     if '<head>' in html:
         html = html.replace('<head>', '<head>' + _PRINT_STYLE, 1)
