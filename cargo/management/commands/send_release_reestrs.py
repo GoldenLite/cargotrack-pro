@@ -131,9 +131,7 @@ class Command(BaseCommand):
             msg = EmailMessage(
                 subject=subject,
                 body=(f'Реестр ДТЭГ по накладной {hn}.\n'
-                      f'Регистрационный номер ДТ: {reg or "—"}.\n'
-                      f'Сформировано автоматически системой CargoTrack при выпуске груза '
-                      f'на основании поданной ДТЭГ ({mt}).'),
+                      f'Регистрационный номер ДТ: {reg or "—"}.'),
                 to=[to])
             msg.attach(f'reestr_{hn}.pdf', pdf, 'application/pdf')
             msg.send(fail_silently=False)
@@ -193,8 +191,11 @@ class Command(BaseCommand):
                      .filter(attempts__gte=max_attempts)
                      .exclude(status=ReleaseReestrNotification.STATUS_SENT)
                      .values_list('hawb_number', flat=True))
+        # Только ИМПОРТ (DeclarationKindCode=ИМ) — экспорт (ЭК) не шлём.
+        # shipment_type='IMPORT' — наш канонический признак импорта.
         candidates = (HouseWaybill.objects
-                      .filter(customs_status='RELEASED', release_date__gte=since)
+                      .filter(customs_status='RELEASED', release_date__gte=since,
+                              shipment_type='IMPORT')
                       .exclude(hawb_number__in=list(done))
                       .exclude(hawb_number__in=list(exhausted))
                       .order_by('release_date'))
