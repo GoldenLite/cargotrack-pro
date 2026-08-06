@@ -1588,11 +1588,38 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
     """
     parsed = msg.parsed_meta or {}
     lic = (parsed.get('svh_warehouse_license') or '').strip()
-    if lic and not (cargo.warehouse_license or '').strip():
-        Cargo.objects.filter(pk=cargo.pk).update(warehouse_license=lic)
-        cargo.warehouse_license = lic
-        logger.info('apply_svh_placement: cargo %s warehouse_license=%s '
-                    'set from CMN.13029', cargo.pk, lic)
+    cur = (cargo.warehouse_license or '').strip()
+    # Наш склад из описи (CMN.13029) ПЕРЕБИВАЕТ чужой, ошибочно застампованный
+    # moscow-cargo по совпадению 3-значного префикса СБОРНОГО авиа-MAWB. Кейс
+    # 555-16183366: транзит от многих получателей под одним MAWB, реально приехал
+    # на НАШ СВХ Внуково (СМР 300726-1), а поллер moscow-cargo (префикс 555)
+    # первым проставил свой Шереметьево-склад 10005/... в пустое поле, и наша
+    # достоверная опись его не перезаписывала (fill-empty). Перебиваем ТОЛЬКО
+    # такой случай: наш склад из описи vs чужой из moscow_cargo — нормальные
+    # партии (пустой/уже наш склад/не-moscow источник) не трогаем.
+    override_moscow = (lic == OUR_WAREHOUSE_LICENSE and bool(cur)
+                       and cur != OUR_WAREHOUSE_LICENSE
+                       and cargo.svh_source == 'moscow_cargo')
+    if lic and (not cur or override_moscow):
+        upd = {'warehouse_license': lic}
+        if override_moscow:
+            upd['svh_source'] = 'alta'
+            # дата размещения по описи → scan_into_bond (перебивает moscow-cargo)
+            iid = (parsed.get('svh_inventory_instance_date') or '').strip()
+            if iid:
+                try:
+                    from datetime import datetime as _dt
+                    _d = _dt.strptime(iid[:10], '%Y-%m-%d')
+                    upd['scan_into_bond'] = timezone.make_aware(
+                        _d, timezone.get_current_timezone())
+                except Exception:
+                    pass
+        Cargo.objects.filter(pk=cargo.pk).update(**upd)
+        for _k, _v in upd.items():
+            setattr(cargo, _k, _v)
+        logger.info('apply_svh_placement: cargo %s warehouse_license=%s from '
+                    'CMN.13029%s', cargo.pk, lic,
+                    ' (override moscow-cargo)' if override_moscow else '')
         _writeback_svh_cargo(cargo)
 
     _backfill_do1_for_presentation(msg, cargo)

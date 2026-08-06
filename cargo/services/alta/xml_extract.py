@@ -286,6 +286,10 @@ _REG_NUMBER_BLOCK_RE = re.compile(
     re.S
 )
 
+# Индивидуальные накладные в описи CMN.13029 — только текстом внутри
+# GoodsDescription: «ИНД. НАКЛАДНАЯ 10294647372 …». Отдельного поля нет.
+_SVH_INV_HAWB_RE = re.compile(r'ИНД\.?\s*НАКЛАДНАЯ\s*(\d{9,13})')
+
 
 def normalize_mawb(raw: str) -> str:
     """`222-.40333075` → `222-40333075`. Убирает точки и пробелы.
@@ -344,6 +348,30 @@ def parse_svh_inventory(xml_text: str) -> dict:
     iid = _first(xml_text, 'InventoryInstanceDate')
     if iid:
         out['svh_inventory_instance_date'] = iid
+
+    # СМР (транзитный документ авто-транзита): среди GoodsShipment-блоков ищем тот,
+    # где PresentedDocumentModeCode=02015 (это СМР/CMR, а НЕ авиа-MAWB — авиа-MAWB
+    # обычно в первом блоке с mode 02017/02020). Сохраняем отдельно, чтобы не
+    # путать со сборным авиа-MAWB и позже использовать как ТСД.
+    for _gsm in _GOODS_SHIPMENT_BLOCK_RE.finditer(xml_text):
+        _gb = _gsm.group(1)
+        if _first(_gb, 'PresentedDocumentModeCode') == '02015':
+            out['svh_transit_doc'] = _first(_gb, 'PrDocumentNumber')
+            break
+
+    # Индивидуальные накладные из описи. В CMN.13029 они лежат ТЕКСТОМ внутри
+    # GoodsDescription («ИНД. НАКЛАДНАЯ <номер> …»), а не отдельным полем. Нужны,
+    # чтобы из СБОРНОЙ описи (много получателей под одним MAWB) выделить ИМЕННО
+    # наши накладные и не привязывать чужой трафик по совпадению MAWB.
+    inv_hawbs = _SVH_INV_HAWB_RE.findall(xml_text)
+    if inv_hawbs:
+        seen = set()
+        uniq = []
+        for h in inv_hawbs:
+            if h not in seen:
+                seen.add(h)
+                uniq.append(h)
+        out['svh_inv_hawbs'] = uniq
 
     # Якорь связи: DocumentID представления = RefDocumentID в CMN.13010
     doc_id = _first(xml_text, 'DocumentID')
