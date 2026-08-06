@@ -111,6 +111,78 @@ def _goods_item(g) -> dict:
     }
 
 
+def _money(el, name: str) -> dict:
+    """Узел с CurrencyQuantity/CurrencyCode → {value, currency}."""
+    c = _kid(el, name)
+    if c is None:
+        return {'value': '', 'currency': ''}
+    return {'value': _txt(c, 'CurrencyQuantity'), 'currency': _txt(c, 'CurrencyCode')}
+
+
+def _quantity(el, name: str) -> dict:
+    """Узел с GoodsQuantity/MeasureUnitQualifier* → {value, unit, code}."""
+    c = _kid(el, name)
+    if c is None:
+        return {'value': '', 'unit': '', 'code': ''}
+    return {
+        'value': _txt(c, 'GoodsQuantity'),
+        'unit': _txt(c, 'MeasureUnitQualifierName'),
+        'code': _txt(c, 'MeasureUnitQualifierCode'),
+    }
+
+
+def _broker(ecd) -> dict:
+    """BrokerName + BrokerRegistryDocDetails → декларант-ТП (шапка блока B)."""
+    reg = _kid(ecd, 'BrokerRegistryDocDetails')
+    return {
+        'name': _txt(ecd, 'BrokerName'),
+        'registry_doc_kind': _txt(reg, 'DocKindCode') if reg is not None else '',
+        'registry_number': _txt(reg, 'RegistrationNumberId') if reg is not None else '',
+    }
+
+
+def _signatory(ecd) -> dict:
+    """SignatoryPerson → подписант декларации (блок B: ФИО, паспорт, доверенность)."""
+    sp = _kid(ecd, 'SignatoryPerson')
+    if sp is None:
+        return {}
+    sd = _kid(sp, 'SigningDetails')
+    comm = _kid(sd, 'CommunicationDetails') if sd is not None else None
+    idc = _kid(sp, 'SignatoryPersonIdentityDetails')
+    poa = _kid(sp, 'PowerOfAttorneyDetails')
+    passport = {}
+    if idc is not None:
+        passport = {
+            'name': _txt(idc, 'IdentityCardName'),
+            'full_name': _txt(idc, 'FullIdentityCardName'),
+            'series': _txt(idc, 'IdentityCardSeries'),
+            'number': _txt(idc, 'IdentityCardNumber'),
+            'date': _txt(idc, 'IdentityCardDate'),
+            'issued_by': _txt(idc, 'OrganizationName'),
+            'country': _txt(idc, 'CountryCode'),
+        }
+    power = {}
+    if poa is not None:
+        power = {
+            'name': _txt(poa, 'PrDocumentName'),
+            'number': _txt(poa, 'PrDocumentNumber'),
+            'date': _txt(poa, 'PrDocumentDate'),
+            'start': _txt(poa, 'DocStartDate'),
+            'valid': _txt(poa, 'DocValidityDate'),
+            'kind': _txt(poa, 'DocKindCode'),
+        }
+    return {
+        'surname': _txt(sd, 'PersonSurname') if sd is not None else '',
+        'name': _txt(sd, 'PersonName') if sd is not None else '',
+        'middle': _txt(sd, 'PersonMiddleName') if sd is not None else '',
+        'post': _txt(sd, 'PersonPost') if sd is not None else '',
+        'phone': _txt(comm, 'Phone') if comm is not None else '',
+        'signing_date': _txt(sd, 'SigningDate') if sd is not None else '',
+        'passport': passport,
+        'power_of_attorney': power,
+    }
+
+
 def _house_shipment(hs) -> dict:
     hwd = _kid(hs, 'HouseWaybillDetails')
     uw = _kid(hs, 'UnifiedGrossWeightQuantity')
@@ -147,9 +219,19 @@ def parse_express_cargo_declaration(xml_text) -> dict | None:
         'decl_kind': _txt(ecd, 'DeclarationKindCode'),           # ЭК / ИМ
         'customs_mode': _txt(ecd, 'CustomsModeCode'),            # 10 / 40
         'customs_office': _txt(loc, 'CustomsOfficeCode') if loc is not None else '',
-        'customs_place': _txt(loc, 'PlaceName') if loc is not None else '',
+        'customs_place': (_txt(loc, 'PlaceName') or _address(loc)) if loc is not None else '',
         'consignor': _subject(_kid(gs, 'ConsignorDetails')),     # общий
         'consignee': _subject(_kid(gs, 'ConsigneeDetails')),     # общий
+        'broker': _broker(ecd),                                  # декларант-ТП (блок B)
+        'signatory': _signatory(ecd),                            # подписант (блок B)
+        # Итоги «Всего по ДТЭГ»:
+        'total_gross': _quantity(gs, 'UnifiedGrossWeightQuantity'),
+        'total_value': _money(gs, 'CAValueAmount'),
+        'customs_cost': _money(gs, 'CustomsCost'),
+        'total_payment': {                                       # блок D (импорт)
+            'value': _txt(_kid(gs, 'TotalPaymentAmountDetails'), 'Amount'),
+            'currency': _txt(_kid(gs, 'TotalPaymentAmountDetails'), 'CurrencyCode'),
+        } if _kid(gs, 'TotalPaymentAmountDetails') is not None else {'value': '', 'currency': ''},
         'house_shipments': [_house_shipment(hs) for hs in _kids(gs, 'HouseShipment')],
     }
 
@@ -198,7 +280,9 @@ def reestr_data_for_hawb(hawb_number: str) -> dict | None:
         'msg_type': mt,
         'declaration': {k: parsed[k] for k in (
             'registry_kind', 'decl_kind', 'customs_mode',
-            'customs_office', 'customs_place', 'consignor', 'consignee')},
+            'customs_office', 'customs_place', 'consignor', 'consignee',
+            'broker', 'signatory', 'total_gross', 'total_value',
+            'customs_cost', 'total_payment')},
         'house_shipment': hs,
         'total_hawbs': len(parsed.get('house_shipments', [])),
     }
