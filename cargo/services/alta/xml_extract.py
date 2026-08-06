@@ -290,6 +290,12 @@ _REG_NUMBER_BLOCK_RE = re.compile(
 # GoodsDescription: «ИНД. НАКЛАДНАЯ 10294647372 …». Отдельного поля нет.
 _SVH_INV_HAWB_RE = re.compile(r'ИНД\.?\s*НАКЛАДНАЯ\s*(\d{9,13})')
 
+# СМР (CMR) в описи CMN.13029 лежит в InventDocument с InvDocCode=02015:
+# <whdi:InvDocCode>02015</whdi:InvDocCode><whdi:InvDocNumber>300726-1</whdi:InvDocNumber>
+_SVH_SMR_RE = re.compile(
+    r'InvDocCode>\s*02015\s*</(?:[a-zA-Z][\w-]*:)?InvDocCode>\s*'
+    r'<(?:[a-zA-Z][\w-]*:)?InvDocNumber>\s*([^<]+)', re.S)
+
 
 def normalize_mawb(raw: str) -> str:
     """`222-.40333075` → `222-40333075`. Убирает точки и пробелы.
@@ -349,15 +355,12 @@ def parse_svh_inventory(xml_text: str) -> dict:
     if iid:
         out['svh_inventory_instance_date'] = iid
 
-    # СМР (транзитный документ авто-транзита): среди GoodsShipment-блоков ищем тот,
-    # где PresentedDocumentModeCode=02015 (это СМР/CMR, а НЕ авиа-MAWB — авиа-MAWB
-    # обычно в первом блоке с mode 02017/02020). Сохраняем отдельно, чтобы не
-    # путать со сборным авиа-MAWB и позже использовать как ТСД.
-    for _gsm in _GOODS_SHIPMENT_BLOCK_RE.finditer(xml_text):
-        _gb = _gsm.group(1)
-        if _first(_gb, 'PresentedDocumentModeCode') == '02015':
-            out['svh_transit_doc'] = _first(_gb, 'PrDocumentNumber')
-            break
+    # СМР (транзитный документ авто-транзита): в описи лежит в InventDocument с
+    # InvDocCode=02015 (это СМР/CMR, а НЕ авиа-MAWB). Сохраняем отдельно как
+    # transit_doc → ТСД для сборных транзитов.
+    _smr = _SVH_SMR_RE.search(xml_text)
+    if _smr:
+        out['svh_transit_doc'] = _smr.group(1).strip()
 
     # Индивидуальные накладные из описи. В CMN.13029 они лежат ТЕКСТОМ внутри
     # GoodsDescription («ИНД. НАКЛАДНАЯ <номер> …»), а не отдельным полем. Нужны,
