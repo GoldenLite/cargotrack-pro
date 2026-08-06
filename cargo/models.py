@@ -2564,3 +2564,42 @@ class DeklarantSession(models.Model):
         """Обновляет last_used_at — вызывать после успешного запроса."""
         self.last_used_at = timezone.now()
         self.save(update_fields=['last_used_at'])
+
+
+class ReleaseReestrNotification(models.Model):
+    """Аудит и дедуп рассылки per-HAWB реестра ДТЭГ при выпуске.
+
+    Одна строка на накладную (hawb_number уникален). Гарантирует «шлём один
+    раз» (терминальный статус SENT) и хранит статус для повторов, если подача
+    ДТЭГ ещё не найдена (SKIPPED) или письмо упало (FAILED). Пишется командой
+    `send_release_reestrs` (шаг конвейера run_maintenance). См.
+    release-reestr-mailer в памяти.
+    """
+    STATUS_SENT = 'SENT'
+    STATUS_FAILED = 'FAILED'
+    STATUS_SKIPPED = 'SKIPPED'     # подача ДТЭГ не найдена — попробуем позже
+    STATUS_CHOICES = [
+        (STATUS_SENT, 'Отправлено'),
+        (STATUS_FAILED, 'Ошибка отправки'),
+        (STATUS_SKIPPED, 'Отложено (нет подачи)'),
+    ]
+    hawb_number         = models.CharField('Накладная', max_length=64, unique=True, db_index=True)
+    to_email            = models.CharField('Кому', max_length=255, blank=True)
+    status              = models.CharField('Статус', max_length=16,
+                                           choices=STATUS_CHOICES, default=STATUS_SENT, db_index=True)
+    msg_type            = models.CharField('Тип сообщения подачи', max_length=32, blank=True)
+    registration_number = models.CharField('Рег. номер ДТ', max_length=64, blank=True)
+    release_date        = models.DateTimeField('Дата выпуска', null=True, blank=True)
+    attempts            = models.PositiveIntegerField('Попыток', default=0)
+    error               = models.TextField('Последняя ошибка', blank=True)
+    created_at          = models.DateTimeField('Создано', auto_now_add=True)
+    sent_at             = models.DateTimeField('Отправлено в', null=True, blank=True)
+    updated_at          = models.DateTimeField('Обновлено', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Рассылка реестра при выпуске'
+        verbose_name_plural = 'Рассылки реестров при выпуске'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.hawb_number} [{self.status}]'

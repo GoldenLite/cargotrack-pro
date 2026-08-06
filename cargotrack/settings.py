@@ -192,6 +192,21 @@ DEFAULT_FROM_EMAIL = os.environ.get(
     'DEFAULT_FROM_EMAIL', 'CargoTrack Pro <noreply@cargotrack.local>'
 )
 
+# ── Рассылка per-HAWB реестров ДТЭГ при выпуске (release-reestr-mailer) ───────
+# Отдельный поток: на каждый выпущенный груз шлём реестр ДТЭГ на заданную почту,
+# независимо от кривой службы «Регистрация» Альты. Выключено по умолчанию —
+# включается REESTR_MAILER_ENABLED=True в .env.
+REESTR_MAILER_ENABLED = env_bool('REESTR_MAILER_ENABLED', False)
+REESTR_MAILER_TO = os.environ.get('REESTR_MAILER_TO', 'andylapshin@yandex.ru')
+# Cutover (ISO-дата/время): шлём ТОЛЬКО по выпускам с release_date >= этой метки.
+# Защита от «выстрела» по историческому бэклогу выпусков при первом включении.
+# Пусто → шлём с любого выпуска (осторожно; на проде всегда задаём метку старта).
+REESTR_MAILER_SINCE = os.environ.get('REESTR_MAILER_SINCE', '')
+# Максимум писем за один прогон конвейера (защита от флуда/SMTP-лимитов).
+REESTR_MAILER_CAP = int(os.environ.get('REESTR_MAILER_CAP', '25'))
+# Сколько раз пытаться, если подача ДТЭГ ещё не найдена / отправка упала.
+REESTR_MAILER_MAX_ATTEMPTS = int(os.environ.get('REESTR_MAILER_MAX_ATTEMPTS', '6'))
+
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 

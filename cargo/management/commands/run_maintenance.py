@@ -110,6 +110,12 @@ RECONCILE_STEPS = [
 # — force убирает лишний warning в логах. audit ПОСЛЕ реконсайла.
 FINALIZE_STEPS = [
     ('audit_general',    'audit_sheets_vs_db',  {'fix': True, 'kind': 'general', 'force': True}),
+    # Рассылка per-HAWB реестров ДТЭГ по свежим выпускам (отдельный поток,
+    # независимый от службы «Регистрация» Альты). Лёгкий: читает несколько
+    # RELEASED-строк, шлёт до REESTR_MAILER_CAP писем, дедуп через
+    # ReleaseReestrNotification. No-op пока REESTR_MAILER_ENABLED=False.
+    # Идёт ПОСЛЕ реконсайла — чтобы выпуск/номер ДТ уже были в БД.
+    ('release_reestrs',  'send_release_reestrs', {}),
 ]
 
 # Тяжёлые Sheets-шаги экспорта — ТОЛЬКО в --full (PT6H). В hourly они раздували
