@@ -1601,19 +1601,12 @@ def apply_svh_placement(msg: AltaInboxMessage, cargo: Cargo) -> Optional[str]:
                        and cur != OUR_WAREHOUSE_LICENSE
                        and cargo.svh_source == 'moscow_cargo')
     if lic and (not cur or override_moscow):
+        # Перебиваем ТОЛЬКО склад (+ источник). Дату прибытия (scan_into_bond)
+        # НЕ трогаем: по нашей логике «Дата прибытия» = дата РЕГИСТРАЦИИ ДО1
+        # (её ставит apply_svh_do1 из CMN.13010), а НЕ дата описи/приёмки.
         upd = {'warehouse_license': lic}
         if override_moscow:
             upd['svh_source'] = 'alta'
-            # дата размещения по описи → scan_into_bond (перебивает moscow-cargo)
-            iid = (parsed.get('svh_inventory_instance_date') or '').strip()
-            if iid:
-                try:
-                    from datetime import datetime as _dt
-                    _d = _dt.strptime(iid[:10], '%Y-%m-%d')
-                    upd['scan_into_bond'] = timezone.make_aware(
-                        _d, timezone.get_current_timezone())
-                except Exception:
-                    pass
         Cargo.objects.filter(pk=cargo.pk).update(**upd)
         for _k, _v in upd.items():
             setattr(cargo, _k, _v)
