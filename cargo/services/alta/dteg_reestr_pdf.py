@@ -270,10 +270,6 @@ def render_reestr_pdf(data: dict, *, master_awb: str = '', registration_number: 
     els.append(_para(
         f"<b>D. Таможенные платежи (всего по ДТЭГ):</b> "
         f"{_esc(tp.get('value','') or '—')} {_esc(tp.get('currency',''))}", small))
-    els.append(Spacer(1, 5))
-
-    els.append(_para("Реестр сформирован автоматически системой CargoTrack на основании поданной ДТЭГ. "
-                     "Документ носит информационный характер.", label))
 
     doc.build(els)
     return buf.getvalue()

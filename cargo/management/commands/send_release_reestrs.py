@@ -76,23 +76,23 @@ class Command(BaseCommand):
         только показываем, что было бы отправлено.
         """
         from cargo.models import ReleaseReestrNotification
-        from cargo.services.alta.dteg_reestr import reestr_data_for_hawb
-        from cargo.services.alta.dteg_reestr_pdf import render_reestr_pdf
+        from cargo.services.alta.dteg_reestr import find_submission_for_hawb
+        from cargo.services.alta.dteg_reestr_xslt import render_pdf as xslt_render_pdf
 
         hn = h.hawb_number
         notif = ReleaseReestrNotification.objects.filter(hawb_number=hn).first()
         if notif and notif.status == ReleaseReestrNotification.STATUS_SENT and not force:
             return 'already'
 
-        data = reestr_data_for_hawb(hn)
+        # Наличие поданной ДТЭГ (без неё реестр не собрать) + тип сообщения.
+        rx, mt, _obs = find_submission_for_hawb(hn)
 
         # Dry-run: ничего не пишем в БД.
         if dry:
-            if not data:
+            if not rx:
                 self.stdout.write(f'  DRY-SKIP {hn}: подача ДТЭГ не найдена')
                 return 'skipped'
-            self.stdout.write(f'  DRY {hn}: PDF будет собран → {to} ({data["msg_type"]}, '
-                              f'товаров {len(data["house_shipment"].get("goods", []))})')
+            self.stdout.write(f'  DRY {hn}: PDF будет собран → {to} ({mt})')
             return 'dry'
 
         # Реальный прогон: создаём/обновляем строку и считаем попытку.
@@ -102,30 +102,28 @@ class Command(BaseCommand):
         notif.release_date = h.release_date
         notif.attempts = (notif.attempts or 0) + 1
 
-        if not data:
+        if not rx:
             notif.status = ReleaseReestrNotification.STATUS_SKIPPED
             notif.error = 'подача ДТЭГ не найдена в БД'
             notif.save()
             self.stdout.write(f'  SKIP {hn}: подача ДТЭГ не найдена (попытка {notif.attempts})')
             return 'skipped'
 
-        master = ''
+        # Рендер per-HAWB реестра РОДНЫМ шаблоном Альты (XSLT) → Edge → PDF.
         try:
-            if getattr(h, 'mawb_id', None):
-                master = h.mawb.awb_number or ''
-        except Exception:
-            master = ''
-        try:
-            pdf = render_reestr_pdf(
-                data, master_awb=master,
-                registration_number=h.customs_declaration_number or '',
-                release_datetime=_release_iso(h))
+            pdf = xslt_render_pdf(hn)
         except Exception as e:
             notif.status = ReleaseReestrNotification.STATUS_FAILED
             notif.error = f'render: {e}'[:2000]
             notif.save()
             self.stdout.write(self.style.ERROR(f'  RENDER FAIL {hn}: {e}'))
             return 'failed'
+        if not pdf:
+            notif.status = ReleaseReestrNotification.STATUS_SKIPPED
+            notif.error = 'рендер не собрал PDF (нет подачи/накладной)'
+            notif.save()
+            self.stdout.write(f'  SKIP {hn}: рендер пустой (попытка {notif.attempts})')
+            return 'skipped'
 
         reg = h.customs_declaration_number or ''
         subject = f'Реестр ДТЭГ {hn}' + (f' — {reg}' if reg else '')
@@ -135,7 +133,7 @@ class Command(BaseCommand):
                 body=(f'Реестр ДТЭГ по накладной {hn}.\n'
                       f'Регистрационный номер ДТ: {reg or "—"}.\n'
                       f'Сформировано автоматически системой CargoTrack при выпуске груза '
-                      f'на основании поданной ДТЭГ ({data["msg_type"]}).'),
+                      f'на основании поданной ДТЭГ ({mt}).'),
                 to=[to])
             msg.attach(f'reestr_{hn}.pdf', pdf, 'application/pdf')
             msg.send(fail_silently=False)
@@ -147,12 +145,12 @@ class Command(BaseCommand):
             return 'failed'
 
         notif.status = ReleaseReestrNotification.STATUS_SENT
-        notif.msg_type = data['msg_type']
+        notif.msg_type = mt or ''
         notif.registration_number = reg
         notif.sent_at = timezone.now()
         notif.error = ''
         notif.save()
-        self.stdout.write(self.style.SUCCESS(f'  SENT {hn} → {to} ({data["msg_type"]})'))
+        self.stdout.write(self.style.SUCCESS(f'  SENT {hn} → {to} ({mt})'))
         return 'sent'
 
     def handle(self, *args, **opts):
