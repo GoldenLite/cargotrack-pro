@@ -77,7 +77,8 @@ class Command(BaseCommand):
         """
         from cargo.models import ReleaseReestrNotification
         from cargo.services.alta.dteg_reestr import (
-            find_submission_for_hawb, is_correspondence_hawb, CORRESPONDENCE_TNVED)
+            find_submission_for_hawb, is_correspondence_hawb, CORRESPONDENCE_TNVED,
+            has_regular_dt_submission)
         from cargo.services.alta.dteg_reestr_xslt import render_pdf as xslt_render_pdf
         from cargo.services.alta.dteg_reestr_xslt import find_release_message
 
@@ -98,6 +99,9 @@ class Command(BaseCommand):
         # Dry-run: ничего не пишем в БД.
         if dry:
             if not rx:
+                if has_regular_dt_submission(hn):
+                    self.stdout.write(f'  DRY-EXCLUDE {hn}: регулярная ДТ (ESADout_CU), не ДТЭГ')
+                    return 'excluded'
                 self.stdout.write(f'  DRY-SKIP {hn}: подача ДТЭГ не найдена')
                 return 'skipped'
             if is_corr:
@@ -125,18 +129,27 @@ class Command(BaseCommand):
             self.stdout.write(f'  EXCLUDE {hn}: корреспонденция (ТН ВЭД {CORRESPONDENCE_TNVED})')
             return 'excluded'
 
-        if not has_release:
-            notif.status = ReleaseReestrNotification.STATUS_SKIPPED
-            notif.error = 'нет решения о выпуске (DecisionCode=10) в CMN.11350'
-            notif.save()
-            self.stdout.write(f'  SKIP {hn}: нет DecisionCode=10 (попытка {notif.attempts})')
-            return 'skipped'
-
+        # Нет ДТЭГ-подачи: либо это регулярная ДТ (ESADout_CU) — другой бланк,
+        # отдельная рассылка, терминально исключаем; либо подача ещё не дошла —
+        # SKIPPED с ретраем.
         if not rx:
+            if has_regular_dt_submission(hn):
+                notif.status = ReleaseReestrNotification.STATUS_EXCLUDED
+                notif.error = 'регулярная ДТ (ESADout_CU) — не ДТЭГ, отдельная рассылка'
+                notif.save()
+                self.stdout.write(f'  EXCLUDE {hn}: регулярная ДТ (ESADout_CU)')
+                return 'excluded'
             notif.status = ReleaseReestrNotification.STATUS_SKIPPED
             notif.error = 'подача ДТЭГ не найдена в БД'
             notif.save()
             self.stdout.write(f'  SKIP {hn}: подача ДТЭГ не найдена (попытка {notif.attempts})')
+            return 'skipped'
+
+        if not has_release:
+            notif.status = ReleaseReestrNotification.STATUS_SKIPPED
+            notif.error = 'нет решения о выпуске (DecisionCode=10) в CMN.11350/11341'
+            notif.save()
+            self.stdout.write(f'  SKIP {hn}: нет DecisionCode=10 (попытка {notif.attempts})')
             return 'skipped'
 
         # Рендер per-HAWB реестра РОДНЫМ шаблоном Альты (XSLT) → Edge → PDF.

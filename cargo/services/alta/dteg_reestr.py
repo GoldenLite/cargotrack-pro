@@ -267,6 +267,25 @@ def find_submission_for_hawb(hawb_number: str):
     return None, None, None
 
 
+def has_regular_dt_submission(hawb_number: str) -> bool:
+    """True, если по накладной есть подача РЕГУЛЯРНОЙ ДТ (ESADout_CU), а не ДТЭГ.
+
+    Регулярная ДТ (декларация на товары) — другой документ с другим печатным
+    бланком; её обслуживает отдельная рассылка, а НЕ ДТЭГ-реестр. Отличаем по
+    корню сохранённого raw_xml (ESADout_CU vs ExpressCargoDeclaration). CMN.11023
+    несёт оба типа, поэтому смотрим содержимое, а не только msg_type.
+    """
+    from cargo.models import AltaOutboxObservation
+    for mt in SUBMISSION_MSG_TYPES:
+        for obs in (AltaOutboxObservation.objects
+                    .filter(msg_type=mt, parsed_meta__hawbs__contains=[hawb_number])
+                    .order_by('-received_at')[:5]):
+            rx = (obs.parsed_meta or {}).get('raw_xml') or ''
+            if 'ESADout_CU' in rx:
+                return True
+    return False
+
+
 def is_correspondence_hawb(hawb_number: str, rx=None) -> bool:
     """True, если по накладной РОВНО один товар с кодом ТН ВЭД 4911 99 000 0.
 

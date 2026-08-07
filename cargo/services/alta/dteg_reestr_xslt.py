@@ -87,16 +87,24 @@ def _edge_exe() -> str | None:
 
 # ── источник отметок ─────────────────────────────────────────────────────────
 
-def find_release_message(hawb_number: str):
-    """CMN.11350 с решением ВЫПУСК (decision_code=10) по этой накладной.
+# Сообщения с отметкой ВЫПУСК ДТЭГ. CMN.11350 (ExpressCargoDeclarationCustomMark)
+# несёт выпуск ИМПОРТА; ЭКСПОРТ (ПТДЭГ) выпускается через CMN.11341 — оно
+# CMN.11350 НЕ шлёт, но parsed_meta.consignments у него ТОЙ ЖЕ формы
+# (decision_code/waybills/decision_date) и raw_xml несёт инспектора/ЛНП/рег.№.
+RELEASE_MSG_TYPES = ['CMN.11350', 'CMN.11341']
 
-    Быстрый JSONB-поиск по parsed_meta.consignments (LIKE по raw_xml медленный —
-    1795 больших текстов). По накладной бывает несколько CMN.11350 (позже код 70
-    «продлён»/90 «отказ») — матчим ИМЕННО выпуск (10). None если выпуска нет.
+
+def find_release_message(hawb_number: str):
+    """Сообщение с решением ВЫПУСК (decision_code=10) по этой накладной.
+
+    Ищем в CMN.11350 (импорт) и CMN.11341 (экспорт/ПТДЭГ) — см. RELEASE_MSG_TYPES.
+    Быстрый JSONB-поиск по parsed_meta.consignments (LIKE по raw_xml медленный).
+    По накладной бывает несколько сообщений (позже код 70 «продлён»/90 «отказ») —
+    матчим ИМЕННО выпуск (10). None если выпуска нет.
     """
     from cargo.models import AltaInboxMessage
     return (AltaInboxMessage.objects
-            .filter(msg_type='CMN.11350',
+            .filter(msg_type__in=RELEASE_MSG_TYPES,
                     parsed_meta__consignments__contains=[
                         {'decision_code': '10', 'waybills': [hawb_number]}])
             .order_by('-id').first())
