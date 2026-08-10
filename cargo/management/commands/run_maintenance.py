@@ -116,6 +116,11 @@ FINALIZE_STEPS = [
     # ReleaseReestrNotification. No-op пока REESTR_MAILER_ENABLED=False.
     # Идёт ПОСЛЕ реконсайла — чтобы выпуск/номер ДТ уже были в БД.
     ('release_reestrs',  'send_release_reestrs', {}),
+    # Рассылка регулярных ДТ (печатный бланк-PDF из Альты). Лёгкий: берёт
+    # pending-документы IncomingDTDocument (их создаёт приём /api/v1/dt/pdf/),
+    # шлёт до DT_MAILER_CAP писем, ротирует старые PDF. No-op пока
+    # DT_MAILER_ENABLED=False.
+    ('release_dt',       'send_release_dt', {}),
 ]
 
 # Тяжёлые Sheets-шаги экспорта — ТОЛЬКО в --full (PT6H). В hourly они раздували

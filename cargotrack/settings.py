@@ -209,6 +209,23 @@ REESTR_MAILER_CAP = int(os.environ.get('REESTR_MAILER_CAP', '25'))
 # 48 ≈ 2 суток — с запасом на позднее прибытие отметки, потом «исчерпано».
 REESTR_MAILER_MAX_ATTEMPTS = int(os.environ.get('REESTR_MAILER_MAX_ATTEMPTS', '48'))
 
+# ── Рассылка регулярных ДТ (бланк-PDF) при выпуске (dt-mailer) ────────────────
+# Отдельный поток: печатный бланк ДТ (его печатает Альта, агент кладёт PDF в
+# C:\GTDSERV\ED\IN_PDF → залив на /api/v1/dt/pdf/) шлём на почту. Рег.№ ДТ — из
+# имени файла GTD_<пост>_<ддммгг>_<номер>. Выключено по умолчанию.
+DT_MAILER_ENABLED = env_bool('DT_MAILER_ENABLED', False)
+DT_MAILER_TO = os.environ.get('DT_MAILER_TO', 'andylapshin@yandex.ru')
+# Cutover (ISO-дата/время): шлём ТОЛЬКО по PDF, ПОЛУЧЕННЫМ (created_at) >= метки.
+DT_MAILER_SINCE = os.environ.get('DT_MAILER_SINCE', '')
+DT_MAILER_CAP = int(os.environ.get('DT_MAILER_CAP', '25'))
+DT_MAILER_MAX_ATTEMPTS = int(os.environ.get('DT_MAILER_MAX_ATTEMPTS', '12'))
+# Через сколько дней после отправки удалять PDF-файл с диска (аудит-строка
+# остаётся). Транзитные файлы — в бэкап БД не попадают (лежат в MEDIA_ROOT).
+DT_MAILER_PURGE_DAYS = int(os.environ.get('DT_MAILER_PURGE_DAYS', '14'))
+# NB: DATA_UPLOAD_MAX_MEMORY_SIZE НЕ поднимаем глобально (это усилило бы
+# unauth-DoS на публичный telegram-webhook, который парсит тело до auth).
+# api_dt_pdf_post читает PDF ограниченным request.read(MAX+1), минуя этот лимит.
+
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 

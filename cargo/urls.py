@@ -119,6 +119,7 @@ urlpatterns = [
     path('api/v1/alta/inbox/missing/',               views.api_alta_inbox_missing, name='api_alta_inbox_missing'),
     path('api/v1/alta/outbox/',                      views.api_alta_outbox_post, name='api_alta_outbox'),
     path('api/v1/alta/agent/download/',              views.api_alta_agent_download, name='api_alta_agent_download'),
+    path('api/v1/dt/pdf/',                           views.api_dt_pdf_post,      name='api_dt_pdf'),
 
     # ── Вебхук СДЭК (ORDER_STATUS) ──
     path('api/v1/cdek/webhook/<str:secret>/',        views.cdek_webhook,        name='cdek_webhook'),

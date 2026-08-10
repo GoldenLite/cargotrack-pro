@@ -2610,3 +2610,60 @@ class ReleaseReestrNotification(models.Model):
 
     def __str__(self) -> str:
         return f'{self.hawb_number} [{self.status}]'
+
+
+def incoming_dt_upload_to(instance, filename):
+    """PDF-бланки ДТ раскладываем по годам/месяцам, чтобы каталог не разрастался."""
+    d = timezone.now()
+    return f'incoming_dt/{d:%Y/%m}/{filename}'
+
+
+class IncomingDTDocument(models.Model):
+    """Входящий PDF-бланк регулярной ДТ (печатает Альта, агент кладёт в
+    C:\\GTDSERV\\ED\\IN_PDF → залив на /api/v1/dt/pdf/).
+
+    Файл хранится на диске (MEDIA_ROOT), НЕ в БД — чтобы не раздувать бэкапы PG
+    (транзитные данные: получил → разослал → удалил файл). Строка-аудит остаётся
+    после ротации файла. Идемпотентность приёма — по sha256 содержимого. Дедуп
+    рассылки — по declaration_number (одна ДТ = одно письмо). Рассылает команда
+    send_release_dt. См. dt-mailer в памяти.
+    """
+    STATUS_PENDING = 'pending'      # получен, ждёт рассылки
+    STATUS_SENT = 'sent'            # разослан (файл ещё на диске)
+    STATUS_FAILED = 'failed'        # отправка упала — ретрай
+    STATUS_PURGED = 'purged'        # разослан и файл удалён с диска / дубль
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'В очереди на рассылку'),
+        (STATUS_SENT, 'Разослан'),
+        (STATUS_FAILED, 'Ошибка отправки'),
+        (STATUS_PURGED, 'Файл удалён / дубль'),
+    ]
+    # Рег.№ ДТ из имени файла GTD_<пост>_<ддммгг>_<номер>. НЕ unique: повторная
+    # печать той же ДТ даёт другой sha256, но тот же рег.№ — дедуп в рассылке.
+    declaration_number = models.CharField('Рег.№ ДТ', max_length=64, blank=True, db_index=True)
+    hawb = models.ForeignKey('HouseWaybill', on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name='incoming_dt_docs',
+                             verbose_name='Накладная')
+    pdf = models.FileField('PDF-бланк ДТ', upload_to=incoming_dt_upload_to, max_length=255,
+                           blank=True)
+    filename = models.CharField('Имя файла', max_length=255, blank=True)
+    size_bytes = models.PositiveIntegerField('Размер, байт', default=0)
+    sha256 = models.CharField('SHA-256', max_length=64, unique=True, db_index=True)
+    status = models.CharField('Статус', max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_PENDING, db_index=True)
+    to_email = models.CharField('Кому разослан', max_length=255, blank=True)
+    attempts = models.PositiveIntegerField('Попыток', default=0)
+    error = models.TextField('Последняя ошибка', blank=True)
+    created_at = models.DateTimeField('Получен', auto_now_add=True, db_index=True)
+    sent_at = models.DateTimeField('Разослан в', null=True, blank=True)
+    purged_at = models.DateTimeField('Файл удалён', null=True, blank=True)
+    updated_at = models.DateTimeField('Обновлено', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Входящий PDF ДТ'
+        verbose_name_plural = 'Входящие PDF ДТ'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['status', 'created_at'])]
+
+    def __str__(self) -> str:
+        return f'ДТ {self.declaration_number or "?"} [{self.status}]'

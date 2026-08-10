@@ -3265,6 +3265,65 @@ def _check_alta_inbox_token(request) -> bool:
     return hmac.compare_digest(provided.encode(), expected.encode())
 
 
+MAX_DT_PDF_BYTES = 30 * 1024 * 1024  # предохранитель от заливки мусора
+
+
+@csrf_exempt
+@require_POST
+def api_dt_pdf_post(request):
+    """POST /api/v1/dt/pdf/ — приём готового PDF-бланка ДТ от агента Альты.
+
+    Бинарь (не JSON) → обычная Django-FBV, а не DRF @api_view (иначе DRF-парсеры
+    вернут 415 на application/pdf). Аутентификация — Bearer <ALTA_INBOX_TOKEN>
+    (тот же токен, что у inbox/outbox-потоков агента).
+
+    Тело: сырые байты PDF (Content-Type: application/pdf).
+    Заголовок X-Alta-Filename: имя файла (GTD_<пост>_<ддммгг>_<номер>.pdf) —
+      из него парсится рег.№ ДТ. Идемпотентность — по sha256 содержимого.
+    """
+    import os
+    if not _check_alta_inbox_token(request):
+        return HttpResponse('Unauthorized', status=401)
+
+    ctype = (request.META.get('CONTENT_TYPE') or '').split(';')[0].strip().lower()
+    if ctype and ctype != 'application/pdf':
+        return HttpResponse('expected application/pdf', status=415)
+
+    # Читаем тело ОГРАНИЧЕННО через request.read() — это минует глобальный
+    # DATA_UPLOAD_MAX_MEMORY_SIZE (оставляем его дефолтным, чтобы не расширять
+    # DoS-поверхность публичных webhook'ов) и сам служит лимитом размера.
+    try:
+        body = request.read(MAX_DT_PDF_BYTES + 1)
+    except Exception:
+        return HttpResponse('read error', status=400)
+    if not body:
+        return HttpResponse('empty body', status=400)
+    if len(body) > MAX_DT_PDF_BYTES:
+        return HttpResponse('file too large', status=413)
+    if body[:5] != b'%PDF-':
+        return HttpResponse('not a PDF', status=400)
+
+    raw_name = (request.headers.get('X-Alta-Filename') or '').strip()
+    filename = os.path.basename(raw_name)[:255] or 'dt.pdf'  # защита от path traversal
+
+    from .services.alta.dt_mailer import store_incoming_dt
+    try:
+        doc, created = store_incoming_dt(body, filename)
+    except Exception as e:
+        import logging
+        logging.getLogger('cargo.alta.dt_pdf').exception('store_incoming_dt failed')
+        return HttpResponse(f'store error: {e}'[:200], status=500)
+
+    return JsonResponse({
+        'id': doc.pk,
+        'created': created,
+        'declaration_number': doc.declaration_number,
+        'hawb': doc.hawb.hawb_number if doc.hawb_id else '',
+        'filename': doc.filename,
+        'size_bytes': doc.size_bytes,
+    }, status=201 if created else 200)
+
+
 @api_view(['POST'])
 @permission_classes([])
 @authentication_classes([])
