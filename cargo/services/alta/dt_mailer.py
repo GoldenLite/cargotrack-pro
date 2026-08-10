@@ -89,10 +89,13 @@ def dt_docs_for_hawb(hawb_number: str) -> tuple[str, str]:
 
 
 def dt_label_for_doc(doc) -> tuple[str, str]:
-    """Метка для темы/тела письма по документу ДТ: (label, kind).
+    """Метка для темы/тела письма по документу ДТ: (label, kind) — это НОМЕР
+    НАКЛАДНОЙ (не номер ДТ!).
 
-    Приоритет юзера: инд.накладная (02021); если нет — транспортный документ;
-    если и его нет — сам рег.№ ДТ. kind ∈ {'02021','transport','reg'}.
+    Приоритет: инд.накладная 02021 из подачи → номер сматченной накладной (HAWB,
+    к которой привязана эта ДТ по рег.№) → транспортный документ → рег.№ ДТ
+    (последний fallback, если накладная вообще не сматчена).
+    kind ∈ {'02021','hawb','transport','reg'}.
     """
     hn = doc.hawb.hawb_number if doc.hawb_id and doc.hawb else ''
     ind = transport = ''
@@ -100,6 +103,8 @@ def dt_label_for_doc(doc) -> tuple[str, str]:
         ind, transport = dt_docs_for_hawb(hn)
     if ind:
         return ind, '02021'
+    if hn:
+        return hn, 'hawb'          # номер накладной из нашей БД (матч по рег.№)
     if transport:
         return transport, 'transport'
     return doc.declaration_number or '(без номера)', 'reg'
