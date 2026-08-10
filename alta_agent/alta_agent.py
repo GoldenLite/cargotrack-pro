@@ -34,7 +34,7 @@ import time
 import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import urllib.error
 import urllib.request
@@ -128,6 +128,27 @@ def load_config() -> dict:
                 'endpoint':      sob.get('endpoint', '/api/v1/alta/outbox/').lstrip('/'),
             }
     cfg['svh_outbox'] = svh_outbox
+
+    # Опциональная dt_pdf-секция: наблюдение за готовыми PDF-бланками регулярных
+    # ДТ, которые Альта печатает в C:\GTDSERV\ED\IN_PDF. Plain-файлы GTD_*,
+    # дедуп по ИМЕНИ файла, POST сырых байтов на /api/v1/dt/pdf/.
+    dt_pdf = None
+    if 'dt_pdf' in cp:
+        dp = cp['dt_pdf']
+        watch_dir = Path(dp.get('watch_dir', '')) if dp.get('watch_dir') else None
+        token = dp.get('token', '').strip() or (inbox['token'] if inbox else '')
+        if watch_dir and token:
+            archive_dir = dp.get('archive_dir', '').strip()
+            dt_pdf = {
+                'watch_dir':     watch_dir,
+                'token':         token,
+                'poll_interval': int(dp.get('poll_interval', '15')),
+                'state_db':      Path(__file__).resolve().parent / dp.get('state_db', 'dt_pdf_state.sqlite'),
+                'endpoint':      dp.get('endpoint', '/api/v1/dt/pdf/').lstrip('/'),
+                'glob':          dp.get('glob', 'GTD_*'),
+                'archive_dir':   Path(archive_dir) if archive_dir else None,
+            }
+    cfg['dt_pdf'] = dt_pdf
 
     # Опциональная db_reconcile-секция (опрос Postgres БД Альты и докачка
     # пропущенных сообщений). Включается флагом enabled=true. Если psycopg2
@@ -902,6 +923,27 @@ def _post_outbox(cfg: dict, payload: dict) -> tuple[int, bytes]:
         return e.code, body
 
 
+def _post_dt_pdf(cfg: dict, filename: str, pdf_bytes: bytes) -> tuple[int, bytes]:
+    """POST сырых байтов PDF-бланка ДТ. Имя файла — в X-Alta-Filename (quote,
+    т.к. заголовки latin-1; сервер делает unquote). Тело запроса = сам PDF."""
+    url = urljoin(cfg['base_url'], cfg['dt_pdf']['endpoint'])
+    req = urllib.request.Request(url, method='POST', data=pdf_bytes)
+    req.add_header('Authorization', f'Bearer {cfg["dt_pdf"]["token"]}')
+    req.add_header('Content-Type', 'application/pdf')
+    req.add_header('X-Alta-Filename', quote(filename))
+    req.add_header('User-Agent', 'CargoTrack-AltaAgent-DTPdf/1.0')
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        body = b''
+        try:
+            body = e.read() if e.fp else b''
+        except Exception:
+            pass
+        return e.code, body
+
+
 def _outbox_process_file(cfg: dict, conn: sqlite3.Connection, path: Path) -> None:
     """Обрабатывает одну исходящую копию. Не удаляет файл."""
     try:
@@ -1139,6 +1181,73 @@ def svh_outbox_loop(cfg: dict) -> None:
         except Exception:
             logging.error(f'svh_outbox: scan crash: {traceback.format_exc()}')
         time.sleep(sc['poll_interval'])
+
+
+def dt_pdf_loop(cfg: dict) -> None:
+    """Бесконечный поток: сканит IN_PDF на GTD_*-файлы (печатные бланки ДТ) и
+    POST'ит их байты на /api/v1/dt/pdf/. Дедуп по ИМЕНИ файла через state.sqlite
+    (кладём path.name в колонку envelope_id как generic-ключ, как svh_outbox)."""
+    dc = cfg['dt_pdf']
+    logging.info(
+        f'dt_pdf: started, watching {dc["watch_dir"]} glob={dc["glob"]!r} '
+        f'poll={dc["poll_interval"]}s'
+    )
+    if dc.get('archive_dir'):
+        try:
+            dc['archive_dir'].mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.error(f'dt_pdf: cannot create archive dir {dc["archive_dir"]}: {e}')
+    try:
+        conn = _state_db_open(dc['state_db'])
+    except Exception as e:
+        logging.error(f'dt_pdf: cannot open state db {dc["state_db"]}: {e}')
+        return
+
+    while True:
+        try:
+            for p_path in glob.glob(os.path.join(str(dc['watch_dir']), dc['glob'])):
+                p = Path(p_path)
+                if not p.is_file():
+                    continue
+                key = p.name
+                if _state_seen(conn, key):
+                    continue
+                # Ждём стабильного размера — Альта могла ещё дописывать файл.
+                try:
+                    sz1 = p.stat().st_size
+                except OSError:
+                    continue
+                time.sleep(1)
+                try:
+                    if p.stat().st_size != sz1 or sz1 == 0:
+                        continue  # ещё пишется / пустой — заберём в следующий цикл
+                except OSError:
+                    continue
+                try:
+                    with open(p, 'rb') as f:
+                        pdf_bytes = f.read()
+                except (FileNotFoundError, OSError) as e:
+                    logging.warning(f'dt_pdf: read {p.name}: {e}')
+                    continue
+                if not pdf_bytes.startswith(b'%PDF-'):
+                    logging.warning(f'dt_pdf: {p.name} не PDF — пропуск')
+                    _state_mark(conn, key)
+                    continue
+
+                status, body = _post_dt_pdf(cfg, p.name, pdf_bytes)
+                if status in (200, 201, 409):
+                    _state_mark(conn, key)
+                    logging.info(f'dt_pdf: {p.name} ({len(pdf_bytes)}B) → HTTP {status}')
+                    if dc.get('archive_dir'):
+                        try:
+                            shutil.copy2(str(p), str(dc['archive_dir'] / p.name))
+                        except OSError:
+                            pass
+                else:
+                    logging.error(f'dt_pdf: {p.name}: POST HTTP {status} body={body[:200]!r}')
+        except Exception:
+            logging.error(f'dt_pdf: scan crash: {traceback.format_exc()}')
+        time.sleep(dc['poll_interval'])
 
 
 def outbox_loop(cfg: dict) -> None:
@@ -1391,6 +1500,11 @@ def main() -> None:
         threading.Thread(target=svh_outbox_loop, args=(cfg,), daemon=True, name='svh-outbox-loop').start()
     else:
         logging.info('svh_outbox: section not configured in alta_agent.ini → SVH outbox loop disabled')
+
+    if cfg.get('dt_pdf'):
+        threading.Thread(target=dt_pdf_loop, args=(cfg,), daemon=True, name='dt-pdf-loop').start()
+    else:
+        logging.info('dt_pdf: section not configured in alta_agent.ini → DT-PDF loop disabled')
 
     if cfg.get('db_reconcile_enabled'):
         threading.Thread(target=db_reconcile_loop, args=(cfg,), daemon=True, name='db_reconcile').start()

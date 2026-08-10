@@ -3304,6 +3304,11 @@ def api_dt_pdf_post(request):
         return HttpResponse('not a PDF', status=400)
 
     raw_name = (request.headers.get('X-Alta-Filename') or '').strip()
+    try:
+        from urllib.parse import unquote
+        raw_name = unquote(raw_name)  # агент quote'ит (заголовки latin-1)
+    except Exception:
+        pass
     filename = os.path.basename(raw_name)[:255] or 'dt.pdf'  # защита от path traversal
 
     from .services.alta.dt_mailer import store_incoming_dt

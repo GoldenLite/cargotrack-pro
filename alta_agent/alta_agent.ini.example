@@ -116,6 +116,21 @@ state_db = svh_outbox_state.sqlite
 endpoint = /api/v1/alta/outbox/
 
 
+# ── DT PDF: рассылка регулярных ДТ печатным бланком ────────────────────
+# Наблюдает за папкой, куда Альта печатает готовые PDF-бланки ДТ (файлы вида
+# GTD_<пост>_<ддммгг>_<номер>.pdf), и POST'ит их байты на /api/v1/dt/pdf/.
+# Сервер парсит рег.№ из имени, матчит накладную, шлёт письмо с бланком.
+# Раскомментировать секцию, когда в Альте настроена печать ДТ в эту папку.
+# [dt_pdf]
+# watch_dir = C:\GTDSERV\ED\IN_PDF
+# token = (по умолчанию = inbox.token / ALTA_INBOX_TOKEN)
+# poll_interval = 15
+# state_db = dt_pdf_state.sqlite
+# endpoint = /api/v1/dt/pdf/
+# glob = GTD_*
+# archive_dir = C:\ALTA\IN\alta_agent\dt_pdf_archive
+
+
 # ── DB Reconcile: сверка с БД Альты (Postgres) ─────────────────────────
 # Опрашивает Postgres БД Альты-ГТД на предмет входящих сообщений за окно
 # (window_days), узнаёт у VPS какие envelope_id у нас отсутствуют, и
