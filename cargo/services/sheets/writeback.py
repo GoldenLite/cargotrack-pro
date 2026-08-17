@@ -777,6 +777,158 @@ def batch_write_svh_for_cargos(cargos: list) -> int:
     return total
 
 
+def write_transit_arrival_for_cargos(cargos: list) -> int:
+    """«Дата прибытия» (кол.11 «Общее») = дата размещения (scan_into_bond) для
+    HAWB ТРАНЗИТНЫХ партий, ПЕРЕТИРАЯ имеющееся значение.
+
+    Обычный set_arrival_from_do1 — fill-empty (не трогает ручное). Но для
+    транзита дата постановки на НАШ СВХ авторитетна, и ранняя авиа-дата в ячейке
+    = косяк (юзер 17.08.2026 разрешил перетирать ТОЛЬКО для транзита). Sort-proof
+    (живой ряд по «Накладная СДЭК»), diff-based (после сходимости 0 записей).
+    """
+    if _sheets_writeback_disabled() or not cargos:
+        return 0
+    from django.utils import timezone as _tz
+    from .mapping import GEN_ARRIVE_DATE, normalize_hawb_number
+    hawb_to_date: dict[str, str] = {}
+    for c in cargos:
+        d = c.scan_into_bond
+        if not d:
+            continue
+        if _tz.is_aware(d):
+            d = _tz.localtime(d)
+        ds = d.strftime('%d.%m.%Y')
+        for hn in c.hawbs.values_list('hawb_number', flat=True):
+            k = normalize_hawb_number(hn)
+            if k:
+                hawb_to_date[k] = ds
+    if not hawb_to_date:
+        return 0
+    total = 0
+    for source in SheetSource.objects.filter(kind='general', is_active=True):
+        try:
+            ws = _retry_api(open_worksheet, source, label='transit arr open')
+            header = _retry_api(ws.row_values, source.header_row,
+                                label='transit arr header')
+        except (SheetsConfigError, gspread.exceptions.APIError):
+            logger.exception('transit arr: open/header failed for %s', source.name)
+            continue
+        except Exception:
+            logger.exception('transit arr: unexpected open error for %s', source.name)
+            continue
+        col = next((i for i, v in enumerate(header, start=1)
+                    if (v or '').strip() == GEN_ARRIVE_DATE), 0)
+        if not col:
+            continue
+        try:
+            existing = _retry_api(ws.col_values, col, label='transit arr read')
+        except Exception:
+            logger.exception('transit arr: col read failed for %s', source.name)
+            continue
+        live = _hawb_live_rows(ws, source.header_row)
+        if not live:
+            continue
+        letter = _col_letter(col)
+        updates = []
+        for k, ds in hawb_to_date.items():
+            row = live.get(k)
+            if not row:
+                continue
+            cur = (existing[row - 1] if row - 1 < len(existing) else '').strip()
+            if cur != ds:
+                updates.append({'range': f'{letter}{row}', 'values': [[ds]]})
+        if not updates:
+            continue
+        updates = _filter_inrange_updates(updates, ws, source.name)
+        if updates:
+            total += _chunked_batch_update(ws, updates, 'transit_arr', source.name)
+    return total
+
+
+def write_transit_tsd_for_cargos(cargos: list) -> int:
+    """ТСД («Общее») ← Cargo.transit_doc для ТРАНЗИТНЫХ партий, ПЕРЕБИВАЯ
+    авиа-номер партии (Cargo.awb_number). Ручной, отличный от авиа, ТСД НЕ
+    трогаем (уважаем ввод специалиста). Зеркалим в HAWB.tsd_number, иначе
+    matcher видит diff. Sort-proof, diff-based.
+    """
+    if _sheets_writeback_disabled() or not cargos:
+        return 0
+    from .mapping import GEN_TSD, normalize_hawb_number
+    hawb_map: dict[str, tuple] = {}
+    for c in cargos:
+        transit = (c.transit_doc or '').strip()
+        awb = (c.awb_number or '').strip()
+        if not transit or transit == awb:
+            continue
+        for h in c.hawbs.all():
+            k = normalize_hawb_number(h.hawb_number)
+            if k:
+                hawb_map[k] = (h, transit, awb)
+    if not hawb_map:
+        return 0
+    total = 0
+    to_set_db: list[tuple] = []
+    for source in SheetSource.objects.filter(kind='general', is_active=True):
+        try:
+            ws = _retry_api(open_worksheet, source, label='transit tsd open')
+            header = _retry_api(ws.row_values, source.header_row,
+                                label='transit tsd header')
+        except (SheetsConfigError, gspread.exceptions.APIError):
+            logger.exception('transit tsd: open/header failed for %s', source.name)
+            continue
+        except Exception:
+            logger.exception('transit tsd: unexpected open error for %s', source.name)
+            continue
+        col = next((i for i, v in enumerate(header, start=1)
+                    if (v or '').strip() == GEN_TSD), 0)
+        if not col:
+            continue
+        try:
+            existing = _retry_api(ws.col_values, col, label='transit tsd read')
+        except Exception:
+            logger.exception('transit tsd: col read failed for %s', source.name)
+            continue
+        live = _hawb_live_rows(ws, source.header_row)
+        if not live:
+            continue
+        letter = _col_letter(col)
+        updates = []
+        for k, (h, transit, awb) in hawb_map.items():
+            row = live.get(k)
+            if not row:
+                continue
+            cur = (existing[row - 1] if row - 1 < len(existing) else '').strip()
+            if cur == transit:
+                if (h.tsd_number or '').strip() != transit:
+                    to_set_db.append((h, transit))
+                continue
+            # Перебиваем ТОЛЬКО пустую ячейку или авиа-номер партии; ручной
+            # другой ТСД (напр. свой СМР) — уважаем.
+            if cur and cur != awb:
+                continue
+            updates.append({'range': f'{letter}{row}', 'values': [[transit]]})
+            to_set_db.append((h, transit))
+        if not updates:
+            # мог остаться только DB-зеркальный долг
+            pass
+        else:
+            updates = _filter_inrange_updates(updates, ws, source.name)
+            if updates:
+                total += _chunked_batch_update(ws, updates, 'transit_tsd', source.name)
+    if to_set_db:
+        objs = []
+        for h, transit in to_set_db:
+            h.tsd_number = transit[:64]
+            objs.append(h)
+        try:
+            from cargo.services.alta.inbox import _retry_on_locked
+            _retry_on_locked(HouseWaybill.objects.bulk_update, objs,
+                             ['tsd_number'], batch_size=200)
+        except Exception:
+            logger.exception('transit tsd: bulk_update tsd_number failed')
+    return total
+
+
 def batch_write_tsd_from_mawb_for_hawbs(hawbs: list, dry_run: bool = False):
     """Пишет номер партии (Cargo.awb_number) в ПУСТУЮ колонку «ТСД» «Общее».
 

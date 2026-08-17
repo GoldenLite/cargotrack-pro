@@ -97,6 +97,14 @@ RECONCILE_STEPS = [
     ('rematch_svh',      'redispatch_unmatched_svh',        {'apply': True}),
     ('arrival_from_do1', 'set_arrival_from_do1',            {'apply': True}),
     ('tsd_from_cargo',   'backfill_tsd_from_cargo',         {'apply': True}),
+    # Транзит: партия пришла к нам транзитом (transit_doc), свой ДО1 часто не
+    # приходит → scan_into_bond «застревает» на ранней авиа-дате, а лицензия/
+    # ТСД уже транзитные (рассинхрон «половина авиа / половина партии»). Сдвигаем
+    # дату размещения к дате нашей описи (вперёд), ТСД←transit_doc (перебивая
+    # авиа-номер), «дата прибытия»←дата размещения (для транзита юзер разрешил
+    # перетирать). Идёт ПОСЛЕ tsd_from_cargo/arrival_from_do1 — финальное слово
+    # по транзитным строкам. Идемпотентно (diff-based).
+    ('transit_placement', 'reconcile_transit_placement',    {'apply': True}),
     # Бизнес-правило: при отказе/отзыве рег.номер ДТ анулирован — стираем
     # customs_declaration_number (с фильтром переподачи: если после отказа
     # пришла новая регистрация — ДТ валидна, не трогаем). Иначе «Общее»
