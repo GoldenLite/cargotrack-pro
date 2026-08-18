@@ -1371,18 +1371,30 @@ def emit_event(msg: AltaInboxMessage,
     elif cargo:
         hawbs = list(cargo.hawbs.all())
 
+    _defaults = {
+        'occurred_at': occurred,
+        'raw_value': msg.declaration_number or msg.msg_type,
+        'comment': msg.get_msg_kind_display(),
+        'source': 'alta',
+    }
     for h in hawbs:
-        HawbWorkflowEvent.objects.update_or_create(
-            hawb=h,
-            event_type=event_type,
-            source_row=None,
-            defaults={
-                'occurred_at': occurred,
-                'raw_value': msg.declaration_number or msg.msg_type,
-                'comment': msg.get_msg_kind_display(),
-                'source': 'alta',
-            },
-        )
+        # НЕ update_or_create: он падает MultipleObjectsReturned, если в БД
+        # уже лежат ДУБЛИ (hawb,event_type,source_row=None). Дубли рождаются
+        # при ГОНКЕ emit_event (get→create не атомарно: два параллельных
+        # dispatch/redispatch создают по событию). Одна такая ошибка роняла
+        # ВСЁ применение выпуска → накладная застревала (10300178518 HOLD).
+        # Толерантно + самолечение: обновляем первое, лишние дубли удаляем;
+        # нет — создаём.
+        _rows = list(HawbWorkflowEvent.objects.filter(
+            hawb=h, event_type=event_type, source_row=None).order_by('id'))
+        if _rows:
+            HawbWorkflowEvent.objects.filter(pk=_rows[0].pk).update(**_defaults)
+            if len(_rows) > 1:
+                HawbWorkflowEvent.objects.filter(
+                    pk__in=[e.pk for e in _rows[1:]]).delete()
+        else:
+            HawbWorkflowEvent.objects.create(
+                hawb=h, event_type=event_type, source_row=None, **_defaults)
 
 
 def trigger_sheets_writeback(hawb: HouseWaybill) -> None:
