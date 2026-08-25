@@ -119,16 +119,16 @@ class Command(BaseCommand):
         notif.attempts = (notif.attempts or 0) + 1
 
         mawb = meta.get('mawb') or ''
-        party = f'партия {mawb}, ' if mawb else ''
-        subject = ('Комакт (разрез по ТН ВЭД)'
-                   + (f' партия {mawb} /' if mawb else '')
-                   + f' накл {hn}')
+        subj_ident = (f'партия {mawb} / накл {hn}' if mawb else f'накл {hn}')
+        body_ident = (f'по накладной {hn} / партия {mawb}' if mawb
+                      else f'по накладной {hn}')
+        subject = 'Коммерческий акт ' + subj_ident
         try:
             msg = EmailMessage(
                 subject=subject,
-                body=(f'Коммерческий акт по накладной {hn} ({party}агрегировано по '
-                      f'коду ТН ВЭД: {meta["num_positions"]} позиций → '
-                      f'{meta["num_codes"]} строк).\n'
+                body=(f'Коммерческий акт {body_ident}.\n'
+                      f'Агрегировано по коду ТН ВЭД: {meta["num_positions"]} '
+                      f'позиций → {meta["num_codes"]} строк.\n'
                       f'Регистрационный номер ДТ: {reg or "—"}.'),
                 to=[to])
             msg.attach(f'komakt_{hn}.xlsx', xlsx, XLSX_MIME)
