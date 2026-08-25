@@ -222,6 +222,19 @@ DT_MAILER_MAX_ATTEMPTS = int(os.environ.get('DT_MAILER_MAX_ATTEMPTS', '12'))
 # Через сколько дней после отправки удалять PDF-файл с диска (аудит-строка
 # остаётся). Транзитные файлы — в бэкап БД не попадают (лежат в MEDIA_ROOT).
 DT_MAILER_PURGE_DAYS = int(os.environ.get('DT_MAILER_PURGE_DAYS', '14'))
+
+# ── Рассылка авто-комакта на СВХ Внуково при выпуске (svh-komakt-automation) ──
+# На выпуск ИМПОРТА на нашем СВХ Внуково (лицензия 10001) шлём Excel-разрез
+# товаров ДТЭГ, агрегированный по ТН ВЭД. Выключено по умолчанию. Пока тестим —
+# _TO держим на andylapshin@yandex.ru; боевой адрес СВХ подключим позже.
+KOMAKT_MAILER_ENABLED = env_bool('KOMAKT_MAILER_ENABLED', False)
+KOMAKT_MAILER_TO = os.environ.get('KOMAKT_MAILER_TO', 'andylapshin@yandex.ru')
+# Cutover: шлём ТОЛЬКО по выпускам с release_date >= метки (защита от бэклога 2955).
+KOMAKT_MAILER_SINCE = os.environ.get('KOMAKT_MAILER_SINCE', '')
+KOMAKT_MAILER_CAP = int(os.environ.get('KOMAKT_MAILER_CAP', '25'))
+# CMN.11350-выпуск/подача ДТЭГ приходят с задержкой → ретраим ~2 суток.
+KOMAKT_MAILER_MAX_ATTEMPTS = int(os.environ.get('KOMAKT_MAILER_MAX_ATTEMPTS', '48'))
+
 # NB: DATA_UPLOAD_MAX_MEMORY_SIZE НЕ поднимаем глобально (это усилило бы
 # unauth-DoS на публичный telegram-webhook, который парсит тело до auth).
 # api_dt_pdf_post читает PDF ограниченным request.read(MAX+1), минуя этот лимит.

@@ -132,6 +132,11 @@ FINALIZE_STEPS = [
     # шлёт до DT_MAILER_CAP писем, ротирует старые PDF. No-op пока
     # DT_MAILER_ENABLED=False.
     ('release_dt',       'send_release_dt', {}),
+    # Авто-комакт на СВХ Внуково по свежим выпускам (svh-komakt-automation).
+    # Лёгкий: берёт RELEASED-импорт Внуково без KomaktNotification, шлёт до
+    # KOMAKT_MAILER_CAP писем (Excel-разрез ДТЭГ по ТН ВЭД). No-op пока
+    # KOMAKT_MAILER_ENABLED=False. Идёт ПОСЛЕ реконсайла (выпуск/номер ДТ в БД).
+    ('svh_komakts',      'send_svh_komakts', {}),
 ]
 
 # Тяжёлые Sheets-шаги экспорта — ТОЛЬКО в --full (PT6H). В hourly они раздували
