@@ -121,8 +121,8 @@ class Command(BaseCommand):
         mawb = meta.get('mawb') or ''
         party = f'партия {mawb}, ' if mawb else ''
         subject = ('Комакт (разрез по ТН ВЭД)'
-                   + (f' {mawb} /' if mawb else '')
-                   + f' накл {hn}' + (f' — {reg}' if reg else ''))
+                   + (f' партия {mawb} /' if mawb else '')
+                   + f' накл {hn}')
         try:
             msg = EmailMessage(
                 subject=subject,
