@@ -51,6 +51,9 @@ from django.core.management.base import BaseCommand
 
 LOCK_DIR = os.path.join(os.path.dirname(sys.executable), '..', '..', 'tmp')
 LOCK_PATH = os.path.join(os.path.abspath(LOCK_DIR), 'run_maintenance.lock')
+# Маркер успешного ЗАВЕРШЕНИЯ полного прогона (для cron_watchdog: детект
+# «частичного стопа» — прогоны идут, но не доигрывают до конца).
+DONE_MARKER_PATH = os.path.join(os.path.abspath(LOCK_DIR), 'run_maintenance_done.marker')
 # Конвейер последовательный и длинный (импорт+аудит+свиперы). Возраст —
 # лишь страховка на случай неразбираемого PID; основная защита — pid_alive.
 LOCK_STALE_AFTER_SEC = 60 * 60  # 60 минут
@@ -261,3 +264,17 @@ class Command(BaseCommand):
             f'run_maintenance done за {elapsed:.0f} сек — '
             f'OK {len(ok)}, FAILED {len(failed)}'
             + (f': {failed}' if failed else '')))
+
+        # Маркер ЗАВЕРШЕНИЯ прогона — метка времени последнего доигранного до
+        # конца конвейера. cron_watchdog проверяет его возраст: если давно нет
+        # завершений (прогоны стартуют, но убиваются на середине — «частичный
+        # стоп», инцидент 24-25.08.2026), сторож бьёт тревогу и перезапускает.
+        # Пишем в самом конце handle(): маркер = «дошли до конца» (даже с FAILED
+        # шагами — это не стоп, а частные сбои). Строкой '--only' не портим
+        # (это ручной прогон подмножества, а не полный конвейер).
+        if not opts.get('only'):
+            try:
+                with open(DONE_MARKER_PATH, 'w', encoding='utf-8') as _f:
+                    _f.write(datetime.datetime.now().isoformat())
+            except OSError:
+                pass

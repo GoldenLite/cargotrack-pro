@@ -23,6 +23,7 @@ initial_envelope, обычные re-dispatch-свиперы (они якорят
 """
 from __future__ import annotations
 
+import time
 from collections import Counter
 
 from django.core.management.base import BaseCommand
@@ -32,6 +33,17 @@ from cargo.services.alta.inbox import dispatch
 
 ACTIONABLE = ['released', 'registered', 'rejected', 'withdrawn',
               'registration_rejected', 'hold']
+
+# Бюджет времени на шаг: он крутится в hourly-конвейере run_maintenance
+# (ExecTimeLimit 50 мин). dispatch()→recompute_declaration делает LIKE-скан по
+# гигантскому raw_xml AltaOutboxObservation (559MB) ПО КАЖДОМУ sibling ДТ —
+# для ДТ с десятками накладных это минуты. Пачка «отравленных» unapplied
+# сообщений (выпуск фактически применён, но status_applied завис из-за прошлого
+# kill) при каждом прогоне заново гоняла эти сканы → >50 мин → kill → шаги
+# ПОСЛЕ (arrival/audit/CRM-реконсайлы) не выполнялись (инцидент 24-25.08.2026).
+# Бюджет проверяется ПЕРЕД взятием нового сообщения — одно сообщение всегда
+# доигрывается целиком (не рвём транзакцию), остаток уходит в следующий прогон.
+BUDGET_SEC = 900
 
 
 class Command(BaseCommand):
@@ -73,13 +85,37 @@ class Command(BaseCommand):
         from cargo.services.sheets.writeback import (
             begin_batch_writeback, end_batch_writeback,
         )
+        # Гард «отравленных»: released-сообщение, чей HAWB уже RELEASED — выпуск
+        # фактически применён (dispatch прошлого раза успел выставить
+        # customs_status, но был убит до status_applied=True). Помечаем applied
+        # БЕЗ тяжёлого recompute (raw_xml-скан). Дешёвый прегруз статусов одним
+        # запросом. Пропагацию ДТ по siblings добьёт decl_propagation + audit.
+        status_by_hn = dict(HouseWaybill.objects
+                            .filter(hawb_number__in=[w for _, w, _ in matched])
+                            .values_list('hawb_number', 'customs_status'))
+
         begin_batch_writeback()
         applied = 0
         errors = 0
+        skipped_done = 0
+        budget_hit = False
         affected_decls = set()
         affected_ids = set()
+        started = time.monotonic()
         try:
             for i, w, k in matched:
+                if k == 'released' and status_by_hn.get(w) == 'RELEASED':
+                    AltaInboxMessage.objects.filter(
+                        pk=i, status_applied=False).update(status_applied=True)
+                    skipped_done += 1
+                    continue
+                if time.monotonic() - started > BUDGET_SEC:
+                    budget_hit = True
+                    self.stdout.write(self.style.WARNING(
+                        f'  бюджет {BUDGET_SEC}с исчерпан — обработано '
+                        f'{applied + skipped_done}/{len(matched)}, остаток на '
+                        f'следующий прогон'))
+                    break
                 try:
                     m = AltaInboxMessage.objects.get(pk=i)
                     dispatch(m)
@@ -95,6 +131,10 @@ class Command(BaseCommand):
                         self.stdout.write(f'  ERR msg #{i} ({w}): {e}')
         finally:
             end_batch_writeback()
+
+        if skipped_done:
+            self.stdout.write(
+                f'  уже-применённые (флаг завис) → помечено applied: {skipped_done}')
 
         # Затронутые HAWB + siblings по ДТ (recompute разнёс выпуск на всю ДТ).
         affected = {}
@@ -137,4 +177,5 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f'  general writeback FAILED: {e}'))
 
         self.stdout.write(self.style.SUCCESS(
-            f'Готово. applied={applied} errors={errors}'))
+            f'Готово. applied={applied} skipped_done={skipped_done} '
+            f'errors={errors} budget_hit={budget_hit}'))
