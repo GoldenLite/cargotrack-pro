@@ -2612,6 +2612,47 @@ class ReleaseReestrNotification(models.Model):
         return f'{self.hawb_number} [{self.status}]'
 
 
+class KomaktNotification(models.Model):
+    """Аудит и дедуп рассылки авто-комакта на СВХ Внуково при выпуске.
+
+    Одна строка на накладную (hawb_number уникален). Терминальный SENT = «уже
+    отправлено». SKIPPED — подача не найдена / не Внуково-импорт (ретрай),
+    EXCLUDED — терминально не шлём, FAILED — упала генерация/отправка. Пишется
+    командой `send_svh_komakts`. См. svh-komakt-automation в памяти.
+    """
+    STATUS_SENT = 'SENT'
+    STATUS_FAILED = 'FAILED'
+    STATUS_SKIPPED = 'SKIPPED'
+    STATUS_EXCLUDED = 'EXCLUDED'
+    STATUS_CHOICES = [
+        (STATUS_SENT, 'Отправлено'),
+        (STATUS_FAILED, 'Ошибка'),
+        (STATUS_SKIPPED, 'Отложено'),
+        (STATUS_EXCLUDED, 'Исключено'),
+    ]
+    hawb_number         = models.CharField('Накладная', max_length=64, unique=True, db_index=True)
+    to_email            = models.CharField('Кому', max_length=255, blank=True)
+    status              = models.CharField('Статус', max_length=16,
+                                           choices=STATUS_CHOICES, default=STATUS_SENT, db_index=True)
+    registration_number = models.CharField('Рег. номер ДТ', max_length=64, blank=True)
+    num_positions       = models.PositiveIntegerField('Позиций ДТ', default=0)
+    num_codes           = models.PositiveIntegerField('Кодов ТН ВЭД', default=0)
+    release_date        = models.DateTimeField('Дата выпуска', null=True, blank=True)
+    attempts            = models.PositiveIntegerField('Попыток', default=0)
+    error               = models.TextField('Последняя ошибка', blank=True)
+    created_at          = models.DateTimeField('Создано', auto_now_add=True)
+    sent_at             = models.DateTimeField('Отправлено в', null=True, blank=True)
+    updated_at          = models.DateTimeField('Обновлено', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Рассылка комакта СВХ'
+        verbose_name_plural = 'Рассылки комактов СВХ'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.hawb_number} [{self.status}]'
+
+
 def incoming_dt_upload_to(instance, filename):
     """PDF-бланки ДТ раскладываем по годам/месяцам, чтобы каталог не разрастался."""
     d = timezone.now()
