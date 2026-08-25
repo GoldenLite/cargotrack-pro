@@ -128,6 +128,7 @@ def build_komakt_xlsx(hawb_number: str, place_count=None):
         return None, {'reason': 'HAWB не найдена в БД'}
     if place_count is None:
         place_count = h.svh_do1_place_count
+    mawb = (h.mawb.awb_number if getattr(h, 'mawb_id', None) and h.mawb else '')
 
     consignee, positions, reason = extract_dt_positions(hawb_number)
     if positions is None:
@@ -186,6 +187,7 @@ def build_komakt_xlsx(hawb_number: str, place_count=None):
     buf = io.BytesIO()
     wb.save(buf)
     meta = {
+        'mawb': mawb,
         'consignee': consignee,
         'num_positions': len(positions),
         'num_codes': len(groups),
