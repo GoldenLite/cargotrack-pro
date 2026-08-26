@@ -249,16 +249,35 @@ def select_house_shipment(parsed: dict, waybill: str) -> dict | None:
     return None
 
 
+def _submission_obs_ids(hawb_number: str):
+    """observation_id всех исходящих копий с этой накладной — через денорм
+    AltaOutboxWaybill (индекс по hawb_number). Заменяет медленный
+    parsed_meta__hawbs__contains (Parallel Seq Scan 559MB outbox)."""
+    from cargo.models import AltaOutboxWaybill
+    return list(AltaOutboxWaybill.objects
+                .filter(hawb_number=hawb_number)
+                .values_list('observation_id', flat=True))
+
+
 def find_submission_for_hawb(hawb_number: str):
     """Ищет исходящую подачу ДТЭГ по номеру накладной в нашей БД.
 
     Возвращает (raw_xml, msg_type, observation) или (None, None, None).
+
+    Быстрый путь — через денорм AltaOutboxWaybill (индекс). Медленный
+    parsed_meta-скан — только fallback на промах денорма (пустой набор obs_ids).
     """
     from cargo.models import AltaOutboxObservation
+    obs_ids = _submission_obs_ids(hawb_number)
     for mt in SUBMISSION_MSG_TYPES:
-        obs = (AltaOutboxObservation.objects
-               .filter(msg_type=mt, parsed_meta__hawbs__contains=[hawb_number])
-               .order_by('-received_at').first())
+        if obs_ids:
+            obs = (AltaOutboxObservation.objects
+                   .filter(id__in=obs_ids, msg_type=mt)
+                   .order_by('-received_at').first())
+        else:
+            obs = (AltaOutboxObservation.objects
+                   .filter(msg_type=mt, parsed_meta__hawbs__contains=[hawb_number])
+                   .order_by('-received_at').first())
         if not obs:
             continue
         rx = (obs.parsed_meta or {}).get('raw_xml') or ''
@@ -276,10 +295,14 @@ def has_regular_dt_submission(hawb_number: str) -> bool:
     несёт оба типа, поэтому смотрим содержимое, а не только msg_type.
     """
     from cargo.models import AltaOutboxObservation
+    obs_ids = _submission_obs_ids(hawb_number)
     for mt in SUBMISSION_MSG_TYPES:
-        for obs in (AltaOutboxObservation.objects
-                    .filter(msg_type=mt, parsed_meta__hawbs__contains=[hawb_number])
-                    .order_by('-received_at')[:5]):
+        if obs_ids:
+            qs = AltaOutboxObservation.objects.filter(id__in=obs_ids, msg_type=mt)
+        else:
+            qs = AltaOutboxObservation.objects.filter(
+                msg_type=mt, parsed_meta__hawbs__contains=[hawb_number])
+        for obs in qs.order_by('-received_at')[:5]:
             rx = (obs.parsed_meta or {}).get('raw_xml') or ''
             if 'ESADout_CU' in rx:
                 return True
