@@ -14,10 +14,45 @@ dteg_reestr (parse_express_cargo_declaration/select_house_shipment) — там �
 from __future__ import annotations
 
 import io
+import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
 
 VNUKOVO_LICENSE_PREFIX = '10001'
+
+# Тег ESADout_CUPresentedDocument с ИНД. НАКЛАДНОЙ — так HAWB привязан к товару
+# в регулярной ДТ (в ДТЭГ он в HouseShipment).
+_HAWB_DOC_NAME = 'ИНДИВИДУАЛЬНАЯ НАКЛАДНАЯ'
+
+
+def _ln(tag: str) -> str:
+    return tag.rsplit('}', 1)[-1]
+
+
+def _direct(el, name):
+    """Прямые дети с локальным именем name (без глубоких потомков)."""
+    return [c for c in list(el) if _ln(c.tag) == name]
+
+
+def _direct_text(el, name: str) -> str:
+    for c in list(el):
+        if _ln(c.tag) == name and c.text:
+            return c.text.strip()
+    return ''
+
+
+def _deep_text(el, name: str) -> str:
+    for e in el.iter():
+        if e is not el and _ln(e.tag) == name and e.text:
+            return e.text.strip()
+    return ''
+
+
+def _deep_first(el, name):
+    for e in el.iter():
+        if e is not el and _ln(e.tag) == name:
+            return e
+    return None
 
 # Формат комакта = формат ДО1 (столбцы совпадают с ручным файлом).
 HEADERS = [
@@ -54,40 +89,103 @@ def is_vnukovo_import(hawb) -> bool:
     return (hawb.shipment_type or 'IMPORT').upper() != 'EXPORT'
 
 
-def extract_dt_positions(hawb_number: str):
-    """(consignee_name, positions|None, reason). positions: list of
-    {tnved, description, gross_kg, value, currency}. None + reason если не собрать.
+def _find_dt_submission(hawb_number: str) -> str:
+    """raw_xml подачи РЕГУЛЯРНОЙ ДТ (ESADout_CU) по накладной, или ''."""
+    from cargo.models import AltaOutboxObservation, AltaOutboxWaybill
+    obs_ids = list(AltaOutboxWaybill.objects
+                   .filter(hawb_number=hawb_number)
+                   .values_list('observation_id', flat=True))
+    qs = (AltaOutboxObservation.objects
+          .filter(id__in=obs_ids, msg_type__in=['CMN.11023', 'CMN.11335'])
+          .order_by('-prepared_at'))
+    for o in qs:
+        rx = (o.parsed_meta or {}).get('raw_xml') or ''
+        if 'ESADout_CU' in rx and 'ExpressCargoDeclaration' not in rx:
+            return rx
+    return ''
 
-    ДТЭГ (ExpressCargoDeclaration) — через штатный парсер. Регулярная ДТ
-    (ESADout_CU) — пока не поддержана (нужен образец для проверки полей)."""
-    from cargo.services.alta.dteg_reestr import (
-        find_submission_for_hawb, parse_express_cargo_declaration,
-        select_house_shipment, has_regular_dt_submission)
 
-    rx, mt, _obs = find_submission_for_hawb(hawb_number)
-    if not rx:
-        if has_regular_dt_submission(hawb_number):
-            return '', None, 'регулярная ДТ (ESADout_CU) — парсер комакта пока только ДТЭГ'
-        return '', None, 'подача ДТЭГ не найдена в БД'
-    parsed = parse_express_cargo_declaration(rx)
-    if not parsed:
-        return '', None, 'raw_xml не распознан как ДТЭГ'
-    hs = select_house_shipment(parsed, hawb_number)
-    if hs is None:
-        return '', None, 'HouseShipment по накладной не найден в подаче'
-    consignee = (hs.get('consignee') or {}).get('name') or ''
+def _parse_regular_dt(rx: str, hawb_number: str):
+    """(consignee_name, positions|None, reason) для регулярной ДТ (ESADout_CU).
+
+    Товар — ESADout_CUGoods; вес — GrossWeightQuantity (прямой текст), стоимость —
+    InvoicedCost (валюта ContractCurrencyCode из шапки), tnved — GoodsTNVEDCode,
+    описание — прямые GoodsDescription (склеиваем). HAWB товара —
+    ESADout_CUPresentedDocument с PrDocumentName='ИНДИВИДУАЛЬНАЯ НАКЛАДНАЯ'."""
+    try:
+        root = ET.fromstring(rx.encode('utf-8') if isinstance(rx, str) else rx)
+    except ET.ParseError:
+        return '', None, 'raw_xml ДТ не распарсился'
+    # Получатель: ESADout_CUConsignee.OrganizationName; если пусто (часто
+    # EqualIndicator=true — получатель==декларант) → ESADout_CUDeclarant.
+    consignee = ''
+    cons = _deep_first(root, 'ESADout_CUConsignee')
+    if cons is not None:
+        consignee = _deep_text(cons, 'OrganizationName')
+    if not consignee:
+        decl = _deep_first(root, 'ESADout_CUDeclarant')
+        if decl is not None:
+            consignee = _deep_text(decl, 'OrganizationName')
+    currency = _deep_text(root, 'ContractCurrencyCode')
+
     positions = []
-    for g in (hs.get('goods') or []):
+    for g in root.iter():
+        if _ln(g.tag) != 'ESADout_CUGoods':
+            continue
+        gh = ''
+        for pd in _direct(g, 'ESADout_CUPresentedDocument'):
+            if _direct_text(pd, 'PrDocumentName').strip().upper() == _HAWB_DOC_NAME:
+                gh = _direct_text(pd, 'PrDocumentNumber')
+                break
+        if gh and gh != hawb_number:
+            continue
+        descr = ' '.join(c.text.strip() for c in _direct(g, 'GoodsDescription')
+                         if c.text and c.text.strip())
         positions.append({
-            'tnved': (g.get('tnved') or '').strip(),
-            'description': (g.get('description') or '').strip(),
-            'gross_kg': _dec(g.get('gross_kg')),
-            'value': _dec(g.get('value')),
-            'currency': (g.get('currency') or '').strip(),
+            'tnved': _direct_text(g, 'GoodsTNVEDCode'),
+            'description': descr,
+            'gross_kg': _dec(_direct_text(g, 'GrossWeightQuantity')),
+            'value': _dec(_direct_text(g, 'InvoicedCost')),
+            'currency': currency,
         })
     if not positions:
-        return consignee, None, 'в подаче нет товарных позиций'
+        return consignee, None, 'в подаче ДТ нет товарных позиций по накладной'
     return consignee, positions, ''
+
+
+def extract_dt_positions(hawb_number: str):
+    """(consignee_name, positions|None, reason). positions: list of
+    {tnved, description, gross_kg, value, currency}.
+
+    Сначала ДТЭГ (ExpressCargoDeclaration, штатный парсер), затем регулярная ДТ
+    (ESADout_CU)."""
+    from cargo.services.alta.dteg_reestr import (
+        find_submission_for_hawb, parse_express_cargo_declaration,
+        select_house_shipment)
+
+    rx, _mt, _obs = find_submission_for_hawb(hawb_number)
+    if rx:
+        parsed = parse_express_cargo_declaration(rx)
+        if parsed:
+            hs = select_house_shipment(parsed, hawb_number)
+            if hs is None:
+                return '', None, 'HouseShipment по накладной не найден в подаче ДТЭГ'
+            consignee = (hs.get('consignee') or {}).get('name') or ''
+            positions = [{
+                'tnved': (g.get('tnved') or '').strip(),
+                'description': (g.get('description') or '').strip(),
+                'gross_kg': _dec(g.get('gross_kg')),
+                'value': _dec(g.get('value')),
+                'currency': (g.get('currency') or '').strip(),
+            } for g in (hs.get('goods') or [])]
+            if not positions:
+                return '', None, 'в подаче ДТЭГ нет товарных позиций'
+            return consignee, positions, ''
+
+    dt_rx = _find_dt_submission(hawb_number)
+    if dt_rx:
+        return _parse_regular_dt(dt_rx, hawb_number)
+    return '', None, 'подача (ДТЭГ/ДТ) не найдена в БД'
 
 
 def aggregate_by_tnved(positions):
