@@ -30,6 +30,13 @@ XLSX_MIME = ('application/vnd.openxmlformats-officedocument.'
              'spreadsheetml.sheet')
 
 
+def _recipients(raw: str) -> list:
+    """Список получателей из строки KOMAKT_MAILER_TO / --to (через запятую или
+    точку с запятой). Позволяет слать на несколько адресов одновременно."""
+    import re
+    return [a.strip() for a in re.split(r'[;,]', raw or '') if a.strip()]
+
+
 def _parse_since(raw: str):
     if not raw:
         return None
@@ -131,6 +138,7 @@ class Command(BaseCommand):
                       f'позиций → {meta["num_codes"]} строк.\n'
                       f'Регистрационный номер ДТ: {reg or "—"}.'),
                 to=[to])
+            msg.to = _recipients(to)
             msg.attach(f'komakt_{hn}.xlsx', xlsx, XLSX_MIME)
             msg.send(fail_silently=False)
         except Exception as e:
