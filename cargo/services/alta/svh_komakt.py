@@ -153,39 +153,73 @@ def _parse_regular_dt(rx: str, hawb_number: str):
     return consignee, positions, ''
 
 
+def _submission_fast(hawb_number: str):
+    """(raw_xml, kind) подачи по накладной через денорм AltaOutboxWaybill
+    (индекс по hawb_number, БЕЗ seq-scan parsed_meta->hawbs). kind: 'ecd' (ДТЭГ) |
+    'dt' (регулярная ДТ) | None. Это ускорение: раньше поиск шёл через
+    parsed_meta__hawbs__contains = Parallel Seq Scan 559MB (минуты на накладную)."""
+    from cargo.models import AltaOutboxObservation, AltaOutboxWaybill
+    obs_ids = list(AltaOutboxWaybill.objects
+                   .filter(hawb_number=hawb_number)
+                   .values_list('observation_id', flat=True))
+    if not obs_ids:
+        return '', None
+    for o in (AltaOutboxObservation.objects
+              .filter(id__in=obs_ids,
+                      msg_type__in=['CMN.11023', 'CMN.11349', 'CMN.11335'])
+              .order_by('-prepared_at')):
+        rx = (o.parsed_meta or {}).get('raw_xml') or ''
+        if 'ExpressCargoDeclaration' in rx:
+            return rx, 'ecd'
+        if 'ESADout_CU' in rx:
+            return rx, 'dt'
+    return '', None
+
+
 def extract_dt_positions(hawb_number: str):
     """(consignee_name, positions|None, reason). positions: list of
     {tnved, description, gross_kg, value, currency}.
 
-    Сначала ДТЭГ (ExpressCargoDeclaration, штатный парсер), затем регулярная ДТ
-    (ESADout_CU)."""
+    Быстрый путь: подача через денорм AltaOutboxWaybill (индекс). Fallback на
+    медленный `find_submission_for_hawb` (seq-scan) — только если денорм пуст."""
     from cargo.services.alta.dteg_reestr import (
         find_submission_for_hawb, parse_express_cargo_declaration,
         select_house_shipment)
 
-    rx, _mt, _obs = find_submission_for_hawb(hawb_number)
-    if rx:
-        parsed = parse_express_cargo_declaration(rx)
-        if parsed:
-            hs = select_house_shipment(parsed, hawb_number)
-            if hs is None:
-                return '', None, 'HouseShipment по накладной не найден в подаче ДТЭГ'
-            consignee = (hs.get('consignee') or {}).get('name') or ''
-            positions = [{
-                'tnved': (g.get('tnved') or '').strip(),
-                'description': (g.get('description') or '').strip(),
-                'gross_kg': _dec(g.get('gross_kg')),
-                'value': _dec(g.get('value')),
-                'currency': (g.get('currency') or '').strip(),
-            } for g in (hs.get('goods') or [])]
-            if not positions:
-                return '', None, 'в подаче ДТЭГ нет товарных позиций'
-            return consignee, positions, ''
+    rx, kind = _submission_fast(hawb_number)
+    if not rx:
+        # редкий промах денорма → медленный fallback
+        srx, _mt, _obs = find_submission_for_hawb(hawb_number)
+        if srx:
+            rx, kind = srx, 'ecd'
+        else:
+            drx = _find_dt_submission(hawb_number)
+            if drx:
+                rx, kind = drx, 'dt'
+    if not rx:
+        return '', None, 'подача (ДТЭГ/ДТ) не найдена в БД'
 
-    dt_rx = _find_dt_submission(hawb_number)
-    if dt_rx:
-        return _parse_regular_dt(dt_rx, hawb_number)
-    return '', None, 'подача (ДТЭГ/ДТ) не найдена в БД'
+    if kind == 'dt':
+        return _parse_regular_dt(rx, hawb_number)
+
+    # kind == 'ecd' (ДТЭГ)
+    parsed = parse_express_cargo_declaration(rx)
+    if not parsed:
+        return '', None, 'raw_xml не распознан как ДТЭГ'
+    hs = select_house_shipment(parsed, hawb_number)
+    if hs is None:
+        return '', None, 'HouseShipment по накладной не найден в подаче ДТЭГ'
+    consignee = (hs.get('consignee') or {}).get('name') or ''
+    positions = [{
+        'tnved': (g.get('tnved') or '').strip(),
+        'description': (g.get('description') or '').strip(),
+        'gross_kg': _dec(g.get('gross_kg')),
+        'value': _dec(g.get('value')),
+        'currency': (g.get('currency') or '').strip(),
+    } for g in (hs.get('goods') or [])]
+    if not positions:
+        return '', None, 'в подаче ДТЭГ нет товарных позиций'
+    return consignee, positions, ''
 
 
 def aggregate_by_tnved(positions):
